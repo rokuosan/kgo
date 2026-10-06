@@ -1900,7 +1900,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is GoString -> {
                 val i = number(rawIndex, "index").toInt()
                 if (i !in receiver.bytes.indices) throw RuntimeGoError("string index out of range")
-                (receiver.bytes[i].toInt() and 0xff).toLong()
+                GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), NamedGoType("byte"))
             }
             else -> throw RuntimeGoError("cannot index this value")
         }
