@@ -11,6 +11,9 @@ implemented in the runtime subset. Named struct methods support value and pointe
 receivers for the implemented runtime types.
 Goroutines use `kotlinx.coroutines`; channel operations suspend through Kotlin
 channels. The `fmt` calls are a small runtime shim, not the Go standard library.
+Before execution, a static checker validates function signatures, declared
+types, initializers, and many expression and statement type rules. It is still
+an incomplete subset of the Go 1.0 type system.
 
 ```sh
 ./gradlew run --args='hello.go'          # execute package main
@@ -18,9 +21,10 @@ channels. The `fmt` calls are a small runtime shim, not the Go standard library.
 ./gradlew run --args='--parse hello.go'  # parse and summarize declarations
 ```
 
-This is ongoing work toward the March 2012 Go 1.0 language specification. Static
-type checking, full package resolution, interfaces, and complete
-standard-library/runtime support are still missing. Go features added after Go
-1.0, such as generics and later literal syntax, are out of scope. The project builds and runs on JDK 27 with
-Gradle 9.6.1 and Kotlin 2.4.20. Kotlin currently emits JVM 26 bytecode, which runs
-on JDK 27. `kotlinx.coroutines` is included for the planned goroutine runtime.
+This is ongoing work toward the March 2012 Go 1.0 language specification.
+Interface syntax is parsed, but interface method sets and assignment rules are
+not complete. Full package resolution and standard-library/runtime support are
+also missing. Go features added after Go 1.0, such as generics and later literal
+syntax, are out of scope. The project builds and runs on JDK 27 with Gradle
+9.6.1 and Kotlin 2.4.20. Kotlin currently emits JVM 26 bytecode, which runs on
+JDK 27. `kotlinx.coroutines` provides the goroutine runtime.
