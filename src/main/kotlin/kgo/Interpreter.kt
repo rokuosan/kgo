@@ -1185,7 +1185,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         private val addresses = mutableMapOf<Int, GoPointer>()
         fun pointerAt(index: Int): GoPointer {
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
-            return addresses.getOrPut(index) { GoPointer.reference({ values[index] }, { values[index] = copyForType(it, elementType) }) }
+            return addresses.getOrPut(index) { GoPointer.reference({ values[index] }, { values[index] = copyForType(it, elementType) }, elementType) }
         }
         override fun equals(other: Any?) = other is GoArray && values.size == other.values.size &&
             values.indices.all { goEqual(values[it], other.values[it]) }
@@ -1204,7 +1204,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun pointerAt(index: Int): GoPointer {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             val absolute = start + index
-            return addresses.getOrPut(index) { GoPointer.reference({ backing[absolute] }, { backing[absolute] = copyForType(it, elementType) }) }
+            return addresses.getOrPut(index) { GoPointer.reference({ backing[absolute] }, { backing[absolute] = copyForType(it, elementType) }, elementType) }
         }
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
