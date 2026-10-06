@@ -4,9 +4,10 @@ An experimental Go 1.0 language implementation targeting the JVM, written in Kot
 
 The first milestone is the lexical front end: Go 1.0 keywords, operators, literals,
 comments, source locations, and automatic semicolon insertion. Run it with
-`gradle run --args='path/to/file.go'` to inspect the token stream.
+`./gradlew run --args='path/to/file.go'` to inspect the token stream.
 
 This is not yet a Go compiler or interpreter. The next layers are parsing, type
 checking, and execution on the JVM. The language target is the March 2012 Go 1.0
 specification, so newer features such as generics and later literal syntax are out
-of scope.
+of scope. The project builds and runs on JDK 27; Kotlin 2.4.20 currently emits
+JVM 26 bytecode, which runs on that JDK.
