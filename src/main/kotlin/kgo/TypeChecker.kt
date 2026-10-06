@@ -1,5 +1,7 @@
 package kgo
 
+import java.math.BigInteger
+
 class GoTypeError(message: String) : RuntimeException(message)
 
 /** Static checks for the declaration and statement forms currently represented by the AST. */
@@ -415,7 +417,7 @@ class TypeChecker {
         if (underlying(interfaceType) !is InterfaceGoType) error("type switch requires an interface operand")
         var sawDefault = false
         var sawNil = false
-        val seenTypes = mutableSetOf<GoTypeSyntax>()
+        val seenTypes = mutableListOf<GoTypeSyntax>()
         statement.clauses.forEach { clause ->
             if (clause.types == null) {
                 if (sawDefault) error("multiple default cases in type switch")
@@ -429,7 +431,8 @@ class TypeChecker {
                 validateType(type)
                 if (underlying(type) !is InterfaceGoType)
                     requireAssignable(type, interfaceType, "type switch case")
-                if (!seenTypes.add(type)) error("duplicate type switch case $type")
+                if (seenTypes.any { sameType(it, type) }) error("duplicate type switch case $type")
+                seenTypes += type
             }
             if (clause.statements.lastOrNull() is BranchStatement &&
                 (clause.statements.last() as BranchStatement).kind == TokenKind.FALLTHROUGH)
@@ -729,6 +732,13 @@ class TypeChecker {
         }
         if (operator in setOf(TokenKind.EQL, TokenKind.NEQ)) {
             if (!assignable(left, right) && !assignable(right, left)) error("incompatible comparison: $left and $right")
+            if (left == nilType) {
+                if (!isNilable(right)) error("cannot compare nil with $right")
+            } else if (right == nilType) {
+                if (!isNilable(left)) error("cannot compare $left with nil")
+            } else if (!isComparable(left) || !isComparable(right)) {
+                error("cannot compare values of type $left and $right")
+            }
             return boolType
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
@@ -781,7 +791,7 @@ class TypeChecker {
             }
         }
         if (isNamed(from) && isNamed(to)) return false
-        return underlying(from) == underlying(to) && (!isNamed(from) || !isNamed(to))
+        return sameType(underlying(from), underlying(to)) && (!isNamed(from) || !isNamed(to))
     }
 
     private fun convertible(from: GoTypeSyntax, to: GoTypeSyntax): Boolean = assignable(from, to) ||
@@ -868,8 +878,122 @@ class TypeChecker {
 
     private fun sameSignature(left: FunctionGoType, right: FunctionGoType): Boolean =
         left.parameters.size == right.parameters.size && left.results.size == right.results.size &&
-            left.parameters.zip(right.parameters).all { (a, b) -> a.type == b.type && a.variadic == b.variadic } &&
-            left.results.zip(right.results).all { (a, b) -> a == b }
+            left.parameters.zip(right.parameters).all { (a, b) -> sameType(a.type, b.type) && a.variadic == b.variadic } &&
+            left.results.zip(right.results).all { (a, b) -> sameType(a, b) }
+
+    private fun sameType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
+        if (left == right) return true
+        return when {
+            left is QualifiedGoType && right is QualifiedGoType -> left.packageName == right.packageName && left.name == right.name
+            left is PointerGoType && right is PointerGoType -> sameType(left.element, right.element)
+            left is SliceGoType && right is SliceGoType -> sameType(left.element, right.element)
+            left is ArrayGoType && right is ArrayGoType -> sameArrayLength(left.length, right.length) && sameType(left.element, right.element)
+            left is MapGoType && right is MapGoType -> sameType(left.key, right.key) && sameType(left.value, right.value)
+            left is ChannelGoType && right is ChannelGoType -> left.direction == right.direction && sameType(left.element, right.element)
+            left is StructGoType && right is StructGoType -> {
+                val leftFields = left.fields.flatMap { field -> (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag) } }
+                val rightFields = right.fields.flatMap { field -> (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag) } }
+                leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (a, b) ->
+                    a.first == b.first && a.third == b.third && sameType(a.second, b.second)
+                }
+            }
+            left is InterfaceGoType && right is InterfaceGoType -> {
+                val leftMethods = interfaceMethods(left)
+                val rightMethods = interfaceMethods(right)
+                leftMethods.keys == rightMethods.keys && leftMethods.all { (name, signature) ->
+                    rightMethods[name]?.let { sameSignature(signature, it) } == true
+                }
+            }
+            left is FunctionGoType && right is FunctionGoType -> sameSignature(left, right)
+            else -> false
+        }
+    }
+
+    private fun sameArrayLength(left: Expression, right: Expression): Boolean {
+        val leftValue = constantInteger(left)
+        val rightValue = constantInteger(right)
+        return if (leftValue != null && rightValue != null) leftValue == rightValue
+        else arrayLengthSyntax(left) == arrayLengthSyntax(right)
+    }
+
+    private fun constantInteger(expression: Expression): BigInteger? = when (expression) {
+        is LiteralExpression -> when (expression.token.kind) {
+            TokenKind.INT -> parseIntegerConstant(expression.token.lexeme)
+            TokenKind.CHAR -> decodeCharacterConstant(expression.token.lexeme)
+            else -> null
+        }
+        is ParenthesizedExpression -> constantInteger(expression.expression)
+        is UnaryExpression -> constantInteger(expression.operand)?.let { value -> when (expression.operator) {
+            TokenKind.ADD -> value
+            TokenKind.SUB -> value.negate()
+            TokenKind.XOR -> value.not()
+            else -> null
+        } }
+        is BinaryExpression -> {
+            val left = constantInteger(expression.left)
+            val right = constantInteger(expression.right)
+            if (left == null || right == null) null else runCatching { when (expression.operator) {
+                TokenKind.ADD -> left + right
+                TokenKind.SUB -> left - right
+                TokenKind.MUL -> left * right
+                TokenKind.QUO -> left / right
+                TokenKind.REM -> left % right
+                TokenKind.AND -> left.and(right)
+                TokenKind.OR -> left.or(right)
+                TokenKind.XOR -> left.xor(right)
+                TokenKind.AND_NOT -> left.andNot(right)
+                TokenKind.SHL -> left.shiftLeft(right.intValueExact())
+                TokenKind.SHR -> left.shiftRight(right.intValueExact())
+                else -> return@runCatching null
+            } }.getOrNull()
+        }
+        else -> null
+    }
+
+    private fun parseIntegerConstant(text: String): BigInteger? = runCatching {
+        val literal = text.replace("_", "")
+        when {
+            literal.startsWith("0x", true) -> BigInteger(literal.drop(2), 16)
+            literal.length > 1 && literal.startsWith('0') -> BigInteger(literal.drop(1), 8)
+            else -> BigInteger(literal, 10)
+        }
+    }.getOrNull()
+
+    private fun decodeCharacterConstant(text: String): BigInteger? = runCatching {
+        BigInteger(characterCodePoint(text).toString())
+    }.getOrNull()
+
+    private fun characterCodePoint(text: String): Int {
+        val body = text.substring(1, text.length - 1)
+        if (!body.startsWith("\\")) return body.codePointAt(0)
+        val escape = body.drop(1)
+        return when (escape.first()) {
+            'a' -> 7
+            'b' -> 8
+            'f' -> 12
+            'n' -> 10
+            'r' -> 13
+            't' -> 9
+            'v' -> 11
+            '\\' -> 92
+            '\'' -> 39
+            '"' -> 34
+            'x' -> escape.drop(1).toInt(16)
+            'u' -> escape.drop(1).toInt(16)
+            'U' -> escape.drop(1).toLong(16).toInt()
+            in '0'..'7' -> escape.take(3).toInt(8)
+            else -> error("invalid character escape")
+        }
+    }
+
+    private fun arrayLengthSyntax(expression: Expression): Any = when (expression) {
+        is LiteralExpression -> expression.token.kind to expression.token.lexeme
+        is NameExpression -> "name" to expression.name
+        is UnaryExpression -> "unary" to (expression.operator to arrayLengthSyntax(expression.operand))
+        is BinaryExpression -> "binary" to (expression.operator to (arrayLengthSyntax(expression.left) to arrayLengthSyntax(expression.right)))
+        is ParenthesizedExpression -> arrayLengthSyntax(expression.expression)
+        else -> expression
+    }
 
     private fun underlying(type: GoTypeSyntax, seen: Set<String> = emptySet()): GoTypeSyntax = when (type) {
         is NamedGoType -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }

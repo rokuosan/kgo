@@ -9,6 +9,8 @@ Composite literals, structs, arrays, slices, maps, indexing, slicing, and their
 basic built-ins (`make`, `append`, `copy`, `delete`, `len`, and `cap`) are also
 implemented in the runtime subset. Named struct methods support value and pointer
 receivers for the implemented runtime types.
+Array and struct comparisons use Go value equality, including when they are used
+as map keys.
 Function literals capture their surrounding variables, and variadic functions
 accept both individual arguments and slice expansion with `...`.
 Labeled `break` and `continue` statements can target enclosing loops and

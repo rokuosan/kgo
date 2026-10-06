@@ -221,7 +221,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 when (receiver) {
                     is GoSlice -> receiver.set(number(key, "index").toInt(), value)
                     is GoArray -> receiver.values[number(key, "index").toInt()] = value
-                    is GoMap -> receiver.values[key] = value
+                    is GoMap -> receiver.values[mapKey(key)] = value
                     else -> throw RuntimeGoError("cannot assign through index")
                 }
             }
@@ -410,7 +410,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is GoMap -> {
                 for ((key, entryValue) in value.values.entries.toList()) {
                     if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
-                        listOf(key, entryValue).take(range.targets.size), env)
+                        listOf(copyValue(key.value), entryValue).take(range.targets.size), env)
                     try { executeBlock(body, env) }
                     catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                     catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
@@ -468,8 +468,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val receiver = evaluate(index.receiver, env)
             val key = evaluate(index.index, env)
             if (receiver is GoMap) {
-                val found = receiver.values.containsKey(key)
-                return listOf(MapLookupResult(if (found) receiver.values[key] else receiver.elementZero, found))
+                val mapKey = mapKey(key)
+                val found = receiver.values.containsKey(mapKey)
+                return listOf(MapLookupResult(if (found) receiver.values[mapKey] else receiver.elementZero, found))
             }
         }
         return expressions.map { evaluate(it, env) }
@@ -669,10 +670,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 GoArray(type.element, values)
             }
             is MapGoType -> {
-                val values = linkedMapOf<Any?, Any?>()
+                val values = linkedMapOf<GoMapKey, Any?>()
                 literal.elements.forEach { element ->
                     val key = element.key?.let { evaluate(it, env) } ?: throw RuntimeGoError("map literal element requires a key")
-                    values[key] = evaluate(element.value, env)
+                    values[mapKey(key)] = evaluate(element.value, env)
                 }
                 GoMap(type.key, type.value, zeroValue(type.value), values)
             }
@@ -783,8 +784,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun dereference(value: Any?): Any? = if (value is GoPointer) value.get() else value
 
     private fun copyValue(value: Any?): Any? = when (value) {
-        is GoStruct -> GoStruct(value.fields.toMutableMap(), value.namedType, value.fieldTypes)
-        is GoArray -> GoArray(value.elementType, value.values.toMutableList())
+        is GoStruct -> GoStruct(value.fields.mapValuesTo(linkedMapOf()) { copyValue(it.value) }, value.namedType, value.fieldTypes)
+        is GoArray -> GoArray(value.elementType, value.values.mapTo(mutableListOf(), ::copyValue))
+        is GoInterfaceValue -> GoInterfaceValue(value.dynamicType, copyValue(value.value))
         else -> value
     }
 
@@ -792,7 +794,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         return when (receiver) {
             is GoSlice -> receiver.get(number(rawIndex, "index").toInt())
             is GoArray -> receiver.values.getOrNull(number(rawIndex, "index").toInt()) ?: throw RuntimeGoError("array index out of range")
-            is GoMap -> if (receiver.values.containsKey(rawIndex)) receiver.values[rawIndex] else receiver.elementZero
+            is GoMap -> mapKey(rawIndex).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
             is GoStruct -> {
                 val field = rawIndex as? String ?: throw RuntimeGoError("struct field must be a name")
                 if (receiver.fields.containsKey(field)) receiver.fields[field] else throw RuntimeGoError("unknown struct field: $field")
@@ -861,7 +863,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun delete(args: List<Any?>) {
         val map = args.getOrNull(0) as? GoMap ?: throw RuntimeGoError("delete requires a map")
-        map.values.remove(args.getOrNull(1))
+        map.values.remove(mapKey(args.getOrNull(1)))
+    }
+
+    private fun mapKey(value: Any?): GoMapKey {
+        if (!runtimeComparable(value)) throw RuntimeGoError("hash of unhashable type")
+        return GoMapKey(copyValue(value))
     }
 
     private fun literal(token: Token): Any = when (token.kind) {
@@ -965,11 +972,39 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun integerLiteral(expression: Expression): Long = when (expression) {
         is LiteralExpression -> integer(expression.token.lexeme)
-        else -> 0L
+        is ParenthesizedExpression -> integerLiteral(expression.expression)
+        is UnaryExpression -> when (expression.operator) {
+            TokenKind.ADD -> integerLiteral(expression.operand)
+            TokenKind.SUB -> -integerLiteral(expression.operand)
+            TokenKind.XOR -> integerLiteral(expression.operand).inv()
+            else -> throw RuntimeGoError("invalid integer constant expression")
+        }
+        is BinaryExpression -> {
+            val left = integerLiteral(expression.left)
+            val right = integerLiteral(expression.right)
+            when (expression.operator) {
+                TokenKind.ADD -> left + right
+                TokenKind.SUB -> left - right
+                TokenKind.MUL -> left * right
+                TokenKind.QUO -> if (right == 0L) throw RuntimeGoError("division by zero in array length") else left / right
+                TokenKind.REM -> if (right == 0L) throw RuntimeGoError("division by zero in array length") else left % right
+                TokenKind.AND -> left and right
+                TokenKind.OR -> left or right
+                TokenKind.XOR -> left xor right
+                TokenKind.AND_NOT -> left and right.inv()
+                TokenKind.SHL -> left shl right.toInt()
+                TokenKind.SHR -> left shr right.toInt()
+                else -> throw RuntimeGoError("invalid integer constant expression")
+            }
+        }
+        else -> throw RuntimeGoError("array length is not a constant integer expression")
     }
 
     private fun binary(left: Any?, op: TokenKind, right: Any?): Any? {
-        if (op == TokenKind.EQL || op == TokenKind.NEQ) return if (op == TokenKind.EQL) left == right else left != right
+        if (op == TokenKind.EQL || op == TokenKind.NEQ) {
+            val equal = goEqual(left, right)
+            return if (op == TokenKind.EQL) equal else !equal
+        }
         if (op == TokenKind.LAND || op == TokenKind.LOR) {
             val a = left as? Boolean ?: typeError("logical operator", left)
             val b = right as? Boolean ?: typeError("logical operator", right)
@@ -996,6 +1031,49 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
     }
 
+    private fun goEqual(left: Any?, right: Any?): Boolean {
+        if (left is GoInterfaceValue || right is GoInterfaceValue) {
+            if (left == null || right == null) return left == null && right == null
+            val leftType = (left as? GoInterfaceValue)?.dynamicType ?: runtimeType(left)
+            val rightType = (right as? GoInterfaceValue)?.dynamicType ?: runtimeType(right)
+            if (leftType != rightType) return false
+            val leftInterface = left as? GoInterfaceValue
+            val rightInterface = right as? GoInterfaceValue
+            val leftValue = if (leftInterface != null) leftInterface.value else left
+            val rightValue = if (rightInterface != null) rightInterface.value else right
+            if (!runtimeComparable(leftValue) || !runtimeComparable(rightValue))
+                throw RuntimeGoError("comparing uncomparable type ${leftType ?: "interface value"}")
+            return goEqual(leftValue, rightValue)
+        }
+        if (left is Double && right is Double) return left == right
+        if (left is GoArray && right is GoArray)
+            return left.values.size == right.values.size &&
+                left.values.indices.all { goEqual(left.values[it], right.values[it]) }
+        if (left is GoStruct && right is GoStruct)
+            return left.namedType == right.namedType && left.fields.keys == right.fields.keys &&
+                left.fields.keys.all { goEqual(left.fields[it], right.fields[it]) }
+        return left == right
+    }
+
+    private fun runtimeComparable(value: Any?): Boolean = when (value) {
+        is GoSlice, is GoMap, is FunctionValue -> false
+        is GoArray -> value.values.all(::runtimeComparable)
+        is GoStruct -> value.fields.values.all(::runtimeComparable)
+        is GoInterfaceValue -> runtimeComparable(value.value)
+        else -> true
+    }
+
+    private fun goHash(value: Any?): Int = when (value) {
+        null -> 0
+        is Double -> if (value == 0.0) 0 else value.hashCode()
+        is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
+        is GoStruct -> value.fields.entries.fold(value.namedType?.hashCode() ?: 0) { hash, (name, element) ->
+            31 * (31 * hash + name.hashCode()) + goHash(element)
+        }
+        is GoInterfaceValue -> 31 * value.dynamicType.hashCode() + goHash(value.value)
+        else -> value.hashCode()
+    }
+
     private fun number(value: Any?, op: String): Long = value as? Long ?: typeError(op, value)
     private fun real(value: Any?): Double = when (value) { is Long -> value.toDouble(); is Double -> value; else -> typeError("arithmetic", value) }
     private fun truth(value: Any?) = value as? Boolean ?: typeError("condition", value)
@@ -1006,7 +1084,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoArray -> value.values.joinToString(prefix = "[", postfix = "]") { stringify(it) }
-        is GoMap -> value.values.entries.joinToString(prefix = "map[", postfix = "]") { "${stringify(it.key)}:${stringify(it.value)}" }
+        is GoMap -> value.values.entries.joinToString(prefix = "map[", postfix = "]") { "${stringify(it.key.value)}:${stringify(it.value)}" }
         is GoStruct -> value.fields.values.joinToString(prefix = "{", postfix = "}") { stringify(it) }
         else -> value.toString()
     }
@@ -1101,12 +1179,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private sealed interface SelectOperation { val caseIndex: Int }
     private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation
     private data class SelectReceive(override val caseIndex: Int, val channel: GoChannel, val assignment: AssignmentStatement?) : SelectOperation
-    private class GoArray(val elementType: GoTypeSyntax, val values: MutableList<Any?>) {
+    private inner class GoArray(val elementType: GoTypeSyntax, val values: MutableList<Any?>) {
         private val addresses = mutableMapOf<Int, GoPointer>()
         fun pointerAt(index: Int): GoPointer {
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
             return addresses.getOrPut(index) { GoPointer.reference({ values[index] }, { values[index] = it }) }
         }
+        override fun equals(other: Any?) = other is GoArray && values.size == other.values.size &&
+            values.indices.all { goEqual(values[it], other.values[it]) }
+        override fun hashCode() = values.hashCode()
     }
     private inner class GoSlice(val elementType: GoTypeSyntax, private val backing: MutableList<Any?>, private val start: Int, val length: Int, val capacity: Int) {
         private val addresses = mutableMapOf<Int, GoPointer>()
@@ -1140,7 +1221,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         fun toList(): List<Any?> = (0 until length).map(::get)
     }
-    private class GoMap(val keyType: GoTypeSyntax, val valueType: GoTypeSyntax, val elementZero: Any?, val values: MutableMap<Any?, Any?>)
+    private inner class GoMap(val keyType: GoTypeSyntax, val valueType: GoTypeSyntax, val elementZero: Any?, val values: MutableMap<GoMapKey, Any?>)
+    private inner class GoMapKey(val value: Any?) {
+        override fun equals(other: Any?) = other is GoMapKey && goEqual(value, other.value)
+        override fun hashCode() = goHash(value)
+    }
     private inner class GoStruct(
         val fields: MutableMap<String, Any?>,
         val namedType: String? = null,
@@ -1150,6 +1235,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
             GoPointer.reference({ fields[field] }, { fields[field] = boxInterface(it, fieldTypes[field] ?: NamedGoType("<unknown>")) }, fieldTypes[field])
         }
+        override fun equals(other: Any?) = other is GoStruct && namedType == other.namedType && fields.keys == other.fields.keys &&
+            fields.keys.all { goEqual(fields[it], other.fields[it]) }
+        override fun hashCode() = 31 * (namedType?.hashCode() ?: 0) + fields.hashCode()
     }
     private class GoPointer(private val location: GoLocation, val pointeeType: GoTypeSyntax? = null) {
         fun get(): Any? = location.get()
