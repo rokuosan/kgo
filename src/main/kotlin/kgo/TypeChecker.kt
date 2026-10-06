@@ -92,33 +92,34 @@ class TypeChecker {
         methods.forEach { (key, function) -> globals.define(key, functionType(function)) }
         files.forEach { withFileImports(it) {} }
 
-        for ((sourceFile, declaration) in declarations) withFileImports(sourceFile) {
-            when (declaration) {
-                is ConstantDeclaration -> {
-                    val scope = globals.child()
-                    scope.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
-                    val values = expressionTypes(declaration.values, declaration.names.size, scope)
-                    if (values.size != declaration.names.size) error("constant initializer count mismatch")
-                    declaration.values.forEach { if (!isConstantExpression(it, scope)) error("constant initializer is not constant") }
-                    declaration.type?.let { t -> requireAssignableValues(values, declaration.values, t, "constant initializer", scope) }
-                    val integerConstants = if (values.size == declaration.values.size)
-                        declaration.values.map { constantInteger(it, scope) } else emptyList()
-                    val stringLengths = if (values.size == declaration.values.size)
-                        declaration.values.map { constantStringLength(it, scope) } else emptyList()
-                    val rationalConstants = if (values.size == declaration.values.size)
-                        declaration.values.map { constantRational(it, scope) } else emptyList()
-                    val stringIdentities = if (values.size == declaration.values.size)
-                        declaration.values.map { constantStringIdentity(it, scope) } else emptyList()
-                    val booleanValues = if (values.size == declaration.values.size)
-                        declaration.values.map { constantBoolean(it, scope) } else emptyList()
-                    declaration.names.forEachIndexed { i, name ->
-                        if (name != "_") globals.define(name, declaration.type ?: values.getOrNull(i) ?: intType,
-                            integerConstants.getOrNull(i), stringLengths.getOrNull(i), isConstant = true,
-                            rationalConstant = rationalConstants.getOrNull(i), stringIdentity = stringIdentities.getOrNull(i),
-                            booleanConstant = booleanValues.getOrNull(i))
-                    }
+        val globalConstants = declarations.flatMap { (file, declaration) ->
+            (declaration as? ConstantDeclaration)?.let { constant ->
+                if (constant.names.size != constant.values.size) error("constant initializer count mismatch")
+                constant.names.indices.map { GlobalConstantBinding(file, constant, it) }
+            }.orEmpty()
+        }
+        for (binding in globalConstantInitializationOrder(globalConstants)) {
+            withFileImports(binding.file) {
+                val declaration = binding.declaration
+                val name = declaration.names[binding.index]
+                val expression = declaration.values[binding.index]
+                val scope = globals.child().also {
+                    it.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
                 }
-                else -> Unit
+                val type = expressionTypes(listOf(expression), 1, scope).singleOrNull()
+                    ?: error("constant initializer count mismatch")
+                if (!isConstantExpression(expression, scope)) error("constant initializer is not constant")
+                declaration.type?.let { declaredType ->
+                    validateType(declaredType)
+                    requireAssignable(type, declaredType, "constant initializer", expression, scope)
+                }
+                if (name != "_") globals.define(
+                    name, declaration.type ?: type,
+                    constantInteger(expression, scope), constantStringLength(expression, scope), isConstant = true,
+                    rationalConstant = constantRational(expression, scope),
+                    stringIdentity = constantStringIdentity(expression, scope),
+                    booleanConstant = constantBoolean(expression, scope)
+                )
             }
         }
         val variableFiles = IdentityHashMap<VariableDeclaration, GoFile>()
@@ -217,6 +218,8 @@ class TypeChecker {
         val dependencies = variables.map { declaration -> declaration.values
             .flatMap(::referencedNames)
             .mapNotNull(ownerByName::get)
+            .distinct()
+            .sorted()
             .toSet()
         }
         val state = IntArray(variables.size)
@@ -232,6 +235,37 @@ class TypeChecker {
             result += variables[index]
         }
         variables.indices.forEach(::visit)
+        return result
+    }
+
+    private data class GlobalConstantBinding(
+        val file: GoFile,
+        val declaration: ConstantDeclaration,
+        val index: Int
+    )
+
+    private fun globalConstantInitializationOrder(constants: List<GlobalConstantBinding>): List<GlobalConstantBinding> {
+        val ownerByName = buildMap {
+            constants.forEachIndexed { index, binding ->
+                binding.declaration.names[binding.index].takeIf { it != "_" }?.let { put(it, index) }
+            }
+        }
+        val dependencies = constants.map { binding ->
+            referencedNames(binding.declaration.values[binding.index]).mapNotNull(ownerByName::get).distinct().sorted().toSet()
+        }
+        val state = IntArray(constants.size)
+        val result = mutableListOf<GlobalConstantBinding>()
+        fun visit(index: Int) {
+            when (state[index]) {
+                2 -> return
+                1 -> error("constant initialization cycle involving ${constants[index].declaration.names[constants[index].index]}")
+            }
+            state[index] = 1
+            dependencies[index].forEach(::visit)
+            state[index] = 2
+            result += constants[index]
+        }
+        constants.indices.forEach(::visit)
         return result
     }
 
