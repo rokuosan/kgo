@@ -2068,7 +2068,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun append(args: List<Any?>, expandString: Boolean = false): Any? {
         val first = args.firstOrNull()
         val values = args.drop(1)
-        if (first is GoNilValue && values.isEmpty()) return first
+        val expandsEmptyString = expandString && values.singleOrNull() is GoString &&
+            (values.single() as GoString).bytes.isEmpty()
+        if (first is GoNilValue && (values.isEmpty() || expandsEmptyString)) return first
         val slice = when (first) {
             is GoSlice -> first
             is GoNilValue -> (underlying(first.type) as? SliceGoType)?.let {
