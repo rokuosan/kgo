@@ -158,7 +158,11 @@ class Parser(private val tokens: List<Token>) {
             val names = parseNameList()
             var type: GoTypeSyntax? = null
             if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) type = parseType()
-            val values = if (match(TokenKind.ASSIGN)) expressionList() else previousValues
+            val values = if (match(TokenKind.ASSIGN)) expressionList() else {
+                if (!grouped || declarations.isEmpty() || previousValues.isEmpty())
+                    fail("missing initializer in const declaration")
+                previousValues
+            }
             if (type == null) type = previousType
             declarations += ConstantDeclaration(names, values, type, declarations.size)
             previousType = type

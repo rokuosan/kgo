@@ -95,6 +95,8 @@ class TypeChecker {
             when (declaration) {
                 is VariableDeclaration -> {
                     val values = expressionTypes(declaration.values, declaration.names.size, globals)
+                    if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
+                        error("initializer count mismatch")
                     if (declaration.type != null) {
                         validateType(declaration.type)
                         requireAssignableValues(values, declaration.values, declaration.type, "initializer", globals)
@@ -107,6 +109,7 @@ class TypeChecker {
                     val scope = globals.child()
                     scope.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
                     val values = expressionTypes(declaration.values, declaration.names.size, scope)
+                    if (values.size != declaration.names.size) error("constant initializer count mismatch")
                     declaration.values.forEach { if (!isConstantExpression(it, scope)) error("constant initializer is not constant") }
                     declaration.type?.let { t -> requireAssignableValues(values, declaration.values, t, "constant initializer", scope) }
                     val integerConstants = if (values.size == declaration.values.size)
@@ -358,6 +361,8 @@ class TypeChecker {
                         val declaredType = declaration.type?.let { resolveLocalType(it, scope) }
                         declaredType?.let(::validateType)
                         val values = expressionTypes(declaration.values, declaration.names.size, scope)
+                        if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
+                            error("initializer count mismatch")
                         if (declaredType != null) requireAssignableValues(values, declaration.values, declaredType, "initializer", scope)
                         else requireDefaultIntegerValues(values, declaration.values, "initializer", scope)
                         declaration.names.forEachIndexed { i, name ->
@@ -374,6 +379,7 @@ class TypeChecker {
                             it.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
                         }
                         val values = expressionTypes(declaration.values, declaration.names.size, constants)
+                        if (values.size != declaration.names.size) error("constant initializer count mismatch")
                         declaration.values.forEach { if (!isConstantExpression(it, constants)) error("constant initializer is not constant") }
                         if (declaredType != null) requireAssignableValues(values, declaration.values, declaredType, "constant initializer", constants)
                         val integerConstants = if (values.size == declaration.values.size)
@@ -411,6 +417,8 @@ class TypeChecker {
                 val declaredType = statement.type?.let { resolveLocalType(it, scope) }
                 declaredType?.let(::validateType)
                 val values = expressionTypes(statement.values, statement.names.size, scope)
+                if (statement.values.isNotEmpty() && values.size != statement.names.size)
+                    error("initializer count mismatch")
                 if (declaredType != null) requireAssignableValues(values, statement.values, declaredType, "initializer", scope)
                 else requireDefaultIntegerValues(values, statement.values, "initializer", scope)
                 statement.names.forEachIndexed { i, name ->
