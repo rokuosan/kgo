@@ -1164,10 +1164,29 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun convert(type: GoTypeSyntax, value: Any?): Any? = when (val target = underlying(type)) {
         is PointerGoType -> if (value == null) GoPointer.nil(target.element) else value
-        is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType ->
+        is SliceGoType -> {
+            if (value is String && isByteOrRuneType(target.element)) {
+                val converted = if (isByteType(target.element))
+                    value.toByteArray(Charsets.UTF_8).map { (it.toInt() and 0xff).toLong() }
+                else value.codePoints().toArray().map(Int::toLong)
+                GoSlice(target.element, converted.toMutableList(), 0, converted.size, converted.size)
+            } else if (value == null || value is GoNilValue && underlying(value.type) is SliceGoType) GoNilValue(type)
+            else throw RuntimeGoError("cannot convert value to $type")
+        }
+        is MapGoType, is ChannelGoType, is FunctionGoType ->
             if (value == null || value is GoNilValue) GoNilValue(type) else value
         is NamedGoType -> when (target.name) {
-            "string" -> when (value) { is String -> value; is Long -> String(Character.toChars(value.toInt())); else -> throw RuntimeGoError("cannot convert to string") }
+            "string" -> when (value) {
+                is String -> value
+                is Long -> codePointString(value)
+                is GoSlice -> when {
+                    isByteType(value.elementType) -> String(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), Charsets.UTF_8)
+                    isRuneType(value.elementType) -> value.toList().joinToString("") { codePointString(number(it, "string conversion")) }
+                    else -> throw RuntimeGoError("cannot convert slice to string")
+                }
+                is GoNilValue -> if (isByteOrRuneSlice(value.type)) "" else throw RuntimeGoError("cannot convert to string")
+                else -> throw RuntimeGoError("cannot convert to string")
+            }
             "bool" -> value as? Boolean ?: throw RuntimeGoError("cannot convert to bool")
             "float32", "float64" -> when (value) {
                 is Long -> if (target.name == "float32") GoFloat(value.toFloat().toDouble(), type) else value.toDouble()
@@ -1187,6 +1206,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             else -> value
         }
         else -> value
+    }
+
+    private fun isByteType(type: GoTypeSyntax): Boolean = underlying(type) == NamedGoType("uint8")
+    private fun isRuneType(type: GoTypeSyntax): Boolean = underlying(type) == NamedGoType("int32")
+    private fun isByteOrRuneType(type: GoTypeSyntax): Boolean = isByteType(type) || isRuneType(type)
+    private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
+        (underlying(type) as? SliceGoType)?.element?.let(::isByteOrRuneType) == true
+
+    private fun codePointString(value: Long): String {
+        val codePoint = value.toInt()
+        return if (value !in 0..Character.MAX_CODE_POINT.toLong() || codePoint in 0xd800..0xdfff)
+            "\ufffd" else String(Character.toChars(codePoint))
     }
 
     private fun append(args: List<Any?>): GoSlice {

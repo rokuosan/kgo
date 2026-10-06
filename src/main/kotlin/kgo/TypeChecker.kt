@@ -659,6 +659,12 @@ class TypeChecker {
 
     private fun callResults(call: CallExpression, scope: Scope): List<GoTypeSyntax> {
         val target = call.function
+        if (target is TypeExpression) {
+            if (call.arguments.size != 1) error("conversion requires one argument")
+            val from = expressionType(call.arguments.single(), scope)
+            if (!convertible(from, target.type)) error("cannot convert $from to ${target.type}")
+            return listOf(target.type)
+        }
         if (target is SelectorExpression && target.receiver is NameExpression && target.receiver.name in packagePaths) {
             call.arguments.forEach { expressionType(it, scope) }
             return when {
@@ -838,7 +844,14 @@ class TypeChecker {
     }
 
     private fun convertible(from: GoTypeSyntax, to: GoTypeSyntax): Boolean = assignable(from, to) ||
-        (isNumeric(from) && isNumeric(to)) || (isString(from) && (isString(to) || isInteger(to))) || (isInteger(from) && isString(to))
+        (isNumeric(from) && isNumeric(to)) || (isString(from) && (isString(to) || isInteger(to) || isByteOrRuneSlice(to))) ||
+        (isInteger(from) && isString(to)) || (isByteOrRuneSlice(from) && isString(to))
+
+    private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean {
+        val slice = underlying(type) as? SliceGoType ?: return false
+        val element = underlying(slice.element)
+        return element == NamedGoType("uint8") || element == NamedGoType("int32")
+    }
 
     private fun validateType(type: GoTypeSyntax, active: Set<String> = emptySet(), indirect: Boolean = false) {
         when (type) {
