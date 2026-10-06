@@ -669,9 +669,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
         }
         val evaluated = copyValue(evaluate(range.expression, env))
-        val value = if (evaluated is GoPointer &&
-            (evaluated.pointeeType?.let { underlying(it) is ArrayGoType } == true || (!evaluated.isNil && evaluated.get() is GoArray)))
-            copyValue(evaluated.get()) else evaluated
+        val pointerToArray = (evaluated as? GoPointer)?.takeIf { pointer ->
+            pointer.pointeeType?.let { underlying(it) is ArrayGoType } == true || (!pointer.isNil && pointer.get() is GoArray)
+        }
+        val value = if (pointerToArray == null) evaluated else pointerToArray
         when (value) {
             is GoChannel -> while (true) {
                 val received = value.receive()
@@ -706,6 +707,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             is GoSlice -> rangeIndexed(value.length, range, body, env, labels) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.get(i))
+            }
+            is GoPointer -> {
+                val arrayLength = staticRangeArrayLength(range.expression, env)
+                    ?: if (!value.isNil) (value.get() as? GoArray)?.values?.size
+                        ?: throw RuntimeGoError("range over pointer requires an array")
+                    else throw RuntimeGoError("range over nil pointer requires a known array length")
+                rangeIndexed(arrayLength, range, body, env, labels) { index ->
+                    if (onlyIndexIsUsed) listOf(index.toLong()) else {
+                        val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
+                        listOf(index.toLong(), array.values[index])
+                    }
+                }
             }
             is GoArray -> rangeIndexed(value.values.size, range, body, env, labels) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
