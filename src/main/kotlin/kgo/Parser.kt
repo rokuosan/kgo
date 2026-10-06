@@ -48,8 +48,21 @@ class Parser(private val tokens: List<Token>) {
 
     private fun parseFunction(): FunctionDeclaration {
         val receiver = if (match(TokenKind.LPAREN)) {
-            val receiverName = expect(TokenKind.IDENT).lexeme
-            val receiverType = parseType()
+            val receiverName: String?
+            val receiverType: GoTypeSyntax
+            if (match(TokenKind.MUL)) {
+                receiverName = null
+                receiverType = PointerGoType(parseType())
+            } else {
+                val first = expect(TokenKind.IDENT).lexeme
+                if (current().kind == TokenKind.RPAREN) {
+                    receiverName = null
+                    receiverType = NamedGoType(first)
+                } else {
+                    receiverName = first
+                    receiverType = parseType()
+                }
+            }
             expect(TokenKind.RPAREN)
             ParameterSyntax(receiverName, receiverType)
         } else null

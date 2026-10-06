@@ -17,17 +17,24 @@ class TypeChecker {
     private var blockStatementIndices: Map<BlockStatement, Int> = emptyMap()
 
     fun check(file: GoFile) {
+        file.declarations.filterIsInstance<TypeDeclaration>().forEach { declaration ->
+            if (typeDeclarations.putIfAbsent(declaration.name, declaration.type) != null) error("type ${declaration.name} redeclared")
+        }
         for (declaration in file.declarations) when (declaration) {
-            is TypeDeclaration -> {
-                if (typeDeclarations.putIfAbsent(declaration.name, declaration.type) != null) error("type ${declaration.name} redeclared")
-            }
+            is TypeDeclaration -> Unit
             is FunctionDeclaration -> {
                 val receiver = declaration.receiver
                 if (receiver == null) {
                     if (declaration.name == "init") initFunctions += declaration
                     else if (functions.putIfAbsent(declaration.name, declaration) != null) error("function ${declaration.name} redeclared")
                 } else {
-                    methods[methodKey(receiver.type, declaration.name)] = declaration
+                    val base = (receiver.type as? PointerGoType)?.element ?: receiver.type
+                    val baseName = base as? NamedGoType ?: error("method receiver must be a defined type")
+                    if (baseName.name !in typeDeclarations) error("method receiver type ${baseName.name} must be defined in this package")
+                    if (underlying(baseName) is InterfaceGoType || underlying(baseName) is PointerGoType)
+                        error("invalid method receiver type ${baseName.name}")
+                    val key = methodKey(receiver.type, declaration.name)
+                    if (methods.putIfAbsent(key, declaration) != null) error("method ${declaration.name} redeclared for ${baseName.name}")
                 }
             }
             is ImportDeclaration -> declaration.imports.forEach { spec ->
@@ -540,14 +547,18 @@ class TypeChecker {
         if (expression.receiver is NameExpression && expression.receiver.name in packagePaths) {
             return if (packageName(packagePaths.getValue(expression.receiver.name)) == "fmt") FunctionGoType(emptyList(), emptyList()) else error("unknown imported package")
         }
-        val receiver = underlying(expressionType(expression.receiver, scope))
+        val receiverType = expressionType(expression.receiver, scope)
+        val receiver = underlying(receiverType)
+        if (receiver is InterfaceGoType) {
+            return interfaceMethods(receiver).getOrElse(expression.field) { error("undefined interface method ${expression.field}") }
+        }
         val struct = when (receiver) {
             is StructGoType -> receiver
             is PointerGoType -> underlying(receiver.element) as? StructGoType
             else -> null
         } ?: error("selector requires struct or package")
         struct.fields.firstOrNull { expression.field in it.names }?.let { return it.type }
-        val named = namedType(expressionType(expression.receiver, scope)) ?: error("selector receiver has no method set")
+        val named = namedType(receiverType) ?: error("selector receiver has no method set")
         val method = methods["$named.${expression.field}"] ?: error("undefined field or method ${expression.field}")
         return functionType(method)
     }
@@ -711,7 +722,11 @@ class TypeChecker {
     private fun assignable(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
         if (from == to) return true
         if (from == nilType) return isNilable(to)
-        if (isEmptyInterface(to)) return true
+        val requiredMethods = (underlying(to) as? InterfaceGoType)?.let(::interfaceMethods)
+        if (requiredMethods != null) {
+            val availableMethods = methodSet(from)
+            return requiredMethods.all { (name, signature) -> availableMethods[name]?.let { sameSignature(it, signature) } == true }
+        }
         if (isUntyped(from)) {
             val f = underlying(from)
             val t = underlying(to)
@@ -749,8 +764,17 @@ class TypeChecker {
             is ChannelGoType -> validateType(type.element, active, true)
             is StructGoType -> type.fields.forEach { validateType(it.type, active) }
             is InterfaceGoType -> {
-                type.embeddedTypes.forEach { validateType(it, active) }
-                type.methods.forEach { method -> method.parameters.forEach { validateType(it.type, active) }; method.results.forEach { validateType(it, active) } }
+                val names = mutableSetOf<String>()
+                type.embeddedTypes.forEach {
+                    validateType(it, active)
+                    if (underlying(it) !is InterfaceGoType) error("embedded interface element must be an interface")
+                }
+                type.methods.forEach { method ->
+                    if (!names.add(method.name)) error("duplicate interface method ${method.name}")
+                    method.parameters.forEach { validateType(it.type, active) }
+                    method.results.forEach { validateType(it, active) }
+                }
+                interfaceMethods(type)
             }
             is FunctionGoType -> { type.parameters.forEach { validateType(it.type, active) }; type.results.forEach { validateType(it, active) } }
         }
@@ -766,8 +790,49 @@ class TypeChecker {
         else -> null
     }
     private fun methodKey(type: GoTypeSyntax, name: String): String = "${namedType(type) ?: type}.$name"
+    private fun interfaceMethods(type: GoTypeSyntax, seen: Set<String> = emptySet()): Map<String, FunctionGoType> {
+        val actual = underlying(type)
+        val iface = actual as? InterfaceGoType ?: return emptyMap()
+        val result = linkedMapOf<String, FunctionGoType>()
+        iface.embeddedTypes.forEach { embedded ->
+            val key = embedded.toString()
+            if (key in seen) error("invalid recursive interface embedding")
+            interfaceMethods(embedded, seen + key).forEach { (name, signature) ->
+                val previous = result.putIfAbsent(name, signature)
+                if (previous != null && !sameSignature(previous, signature)) error("conflicting interface method $name")
+            }
+        }
+        iface.methods.forEach { method ->
+            val signature = FunctionGoType(method.parameters, method.results)
+            val previous = result.putIfAbsent(method.name, signature)
+            if (previous != null && !sameSignature(previous, signature)) error("conflicting interface method ${method.name}")
+        }
+        return result
+    }
+
+    private fun methodSet(type: GoTypeSyntax): Map<String, FunctionGoType> {
+        val actual = underlying(type)
+        if (actual is InterfaceGoType) return interfaceMethods(actual)
+        val pointer = type is PointerGoType
+        val baseName = namedType(type) ?: return emptyMap()
+        val result = linkedMapOf<String, FunctionGoType>()
+        methods.values.forEach { method ->
+            val receiverType = method.receiver?.type ?: return@forEach
+            if (namedType(receiverType) != baseName) return@forEach
+            if (receiverType is PointerGoType && !pointer) return@forEach
+            result[method.name] = functionType(method)
+        }
+        return result
+    }
+
+    private fun sameSignature(left: FunctionGoType, right: FunctionGoType): Boolean =
+        left.parameters.size == right.parameters.size && left.results.size == right.results.size &&
+            left.parameters.zip(right.parameters).all { (a, b) -> a.type == b.type && a.variadic == b.variadic } &&
+            left.results.zip(right.results).all { (a, b) -> a == b }
+
     private fun underlying(type: GoTypeSyntax, seen: Set<String> = emptySet()): GoTypeSyntax = when (type) {
-        is NamedGoType -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) } ?: type
+        is NamedGoType -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
+            ?: if (type.name == "error") errorInterfaceType else type
         else -> type
     }
     private fun isNamed(type: GoTypeSyntax) = type is NamedGoType && !type.name.startsWith("#")
@@ -785,7 +850,6 @@ class TypeChecker {
     }
     private fun isString(type: GoTypeSyntax) = underlying(type) == stringType || type == untypedString
     private fun isBoolean(type: GoTypeSyntax) = underlying(type) == boolType || type == untypedBool
-    private fun isEmptyInterface(type: GoTypeSyntax) = (underlying(type) as? InterfaceGoType)?.let { it.methods.isEmpty() && it.embeddedTypes.isEmpty() } == true
     private fun isNilable(type: GoTypeSyntax) = when (underlying(type)) { is PointerGoType, is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType, is InterfaceGoType -> true; else -> false }
     private fun isComparable(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
         is SliceGoType, is MapGoType, is FunctionGoType -> false
@@ -838,6 +902,7 @@ class TypeChecker {
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
+        private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(stringType))))
         private val integerNames = setOf("int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val floatNames = setOf("float32", "float64")
         private val complexNames = setOf("complex64", "complex128")

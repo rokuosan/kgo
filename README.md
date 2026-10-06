@@ -28,10 +28,12 @@ an incomplete subset of the Go 1.0 type system.
 ```
 
 This is ongoing work toward the March 2012 Go 1.0 language specification.
-Empty-interface values and type assertions are supported for the runtime types
-currently represented, but non-empty interface method sets and assignment rules
-are incomplete. Full package resolution and standard-library/runtime support
-are also missing. Go features added after Go 1.0, such as generics and later
-literal syntax, are out of scope. The project builds and runs on JDK 27 with Gradle
+Empty and basic non-empty interface values use method-set checks for declared
+methods on named types, with value and pointer receiver dispatch. Embedded
+struct-field method promotion and some interface assignment cases are still
+incomplete.
+Full package resolution and standard-library/runtime support are also missing.
+Go features added after Go 1.0, such as generics and later literal syntax, are
+out of scope. The project builds and runs on JDK 27 with Gradle
 9.6.1 and Kotlin 2.4.20. Kotlin currently emits JVM 26 bytecode, which runs on
 JDK 27. `kotlinx.coroutines` provides the goroutine runtime.

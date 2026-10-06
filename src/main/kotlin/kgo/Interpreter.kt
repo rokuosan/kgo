@@ -228,7 +228,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val receiver = evaluate(target.receiver, env)
                 val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
                 if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
-                struct.fields[target.field] = value
+                struct.fields[target.field] = struct.fieldTypes[target.field]?.let { boxInterface(value, it) } ?: value
             }
             is UnaryExpression -> {
                 if (target.operator != TokenKind.MUL) throw RuntimeGoError("invalid assignment target")
@@ -461,19 +461,32 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             if (expression.receiver is NameExpression && expression.receiver.name in fmtAliases) BuiltinValue(expression.field)
             else {
                 val receiver = evaluate(expression.receiver, env)
-                val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector is not defined for this value")
-                if (struct.fields.containsKey(expression.field)) struct.fields[expression.field]
-                else {
-                    val method = methods["${struct.namedType}.${expression.field}"]
-                        ?: throw RuntimeGoError("unknown struct field or method: ${expression.field}")
+                if (receiver is GoInterfaceValue) {
+                    val method = methods["${methodKey(receiver.dynamicType, expression.field)}"]
+                        ?: throw RuntimeGoError("unknown interface method: ${expression.field}")
                     val pointerReceiver = method.receiver?.type is PointerGoType
                     val boundReceiver = when {
-                        pointerReceiver && receiver is GoPointer -> receiver
-                        pointerReceiver -> GoPointer.cell(receiver)
-                        receiver is GoPointer -> copyValue(dereference(receiver))
-                        else -> copyValue(receiver)
+                        pointerReceiver && receiver.value is GoPointer -> receiver.value
+                        pointerReceiver -> throw RuntimeGoError("interface value does not contain a pointer receiver")
+                        receiver.value is GoPointer -> copyValue(dereference(receiver.value))
+                        else -> copyValue(receiver.value)
                     }
                     MethodValue(method, boundReceiver)
+                } else {
+                    val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector is not defined for this value")
+                    if (struct.fields.containsKey(expression.field)) struct.fields[expression.field]
+                    else {
+                        val method = methods["${struct.namedType}.${expression.field}"]
+                            ?: throw RuntimeGoError("unknown struct field or method: ${expression.field}")
+                        val pointerReceiver = method.receiver?.type is PointerGoType
+                        val boundReceiver = when {
+                            pointerReceiver && receiver is GoPointer -> receiver
+                            pointerReceiver -> GoPointer.cell(receiver, runtimeType(receiver))
+                            receiver is GoPointer -> copyValue(dereference(receiver))
+                            else -> copyValue(receiver)
+                        }
+                        MethodValue(method, boundReceiver)
+                    }
                 }
             }
         }
@@ -517,7 +530,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
             evaluate(expression.operand, env) as? GoPointer ?: throw RuntimeGoError("cannot take address through a non-pointer")
         } else throw RuntimeGoError("expression is not addressable")
-        is CompositeLiteral -> GoPointer.cell(composite(expression, env))
+        is CompositeLiteral -> GoPointer.cell(composite(expression, env), expression.type)
         else -> throw RuntimeGoError("expression is not addressable")
     }
 
@@ -554,7 +567,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 "make" -> return make(args)
                 "new" -> {
                     val type = (args.singleOrNull() as? TypeValue)?.type ?: throw RuntimeGoError("new requires a type")
-                    return GoPointer.cell(zeroValue(type))
+                    return GoPointer.cell(zeroValue(type), type)
                 }
                 "close" -> { (args.singleOrNull() as? GoChannel)?.close() ?: throw RuntimeGoError("close of non-channel"); return null }
                 "len" -> return when (val value = args.singleOrNull()) {
@@ -626,16 +639,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 literal.elements.forEachIndexed { i, element ->
                     val name = if (element.key == null) fieldList.getOrNull(i)?.first else (element.key as? NameExpression)?.name
                     if (name == null || name !in fields) throw RuntimeGoError("unknown struct literal field")
-                    fields[name] = evaluate(element.value, env)
+                    val value = evaluate(element.value, env)
+                    fields[name] = fieldList.firstOrNull { it.first == name }?.second?.let { boxInterface(value, it) } ?: value
                 }
-                GoStruct(fields, (literal.type as? NamedGoType)?.name)
+                val fieldTypes = fieldList.filter { it.first.isNotEmpty() }.toMap()
+                GoStruct(fields, (literal.type as? NamedGoType)?.name, fieldTypes)
             }
             else -> throw RuntimeGoError("composite literal for this type is not implemented")
         }
     }
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
-        is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: type
+        is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: if (type.name == "error") errorInterfaceType else type
         else -> type
     }
 
@@ -648,6 +663,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
         is GoInterfaceValue -> value.dynamicType
         is GoStruct -> value.namedType?.let(::NamedGoType)
+        is GoPointer -> value.pointeeType?.let(::PointerGoType) ?: runtimeType(value.get())?.let(::PointerGoType)
         is GoSlice -> SliceGoType(value.elementType)
         is GoMap -> MapGoType(value.keyType, value.valueType)
         is GoChannel -> ChannelGoType(value.elementType, ChannelDirection.SEND_RECEIVE)
@@ -666,12 +682,54 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         val iface = value as? GoInterfaceValue ?: throw RuntimeGoError("type assertion on non-interface value")
         val targetInterface = underlying(target) as? InterfaceGoType
         val matches = when {
-            targetInterface != null && targetInterface.methods.isEmpty() && targetInterface.embeddedTypes.isEmpty() -> true
-            targetInterface != null -> false
+            targetInterface != null -> implementsInterface(iface.dynamicType, targetInterface)
             else -> iface.dynamicType == target
         }
         return GoAssertionResult(if (matches) iface.value else zeroValue(target), matches, iface.dynamicType)
     }
+
+    private fun implementsInterface(type: GoTypeSyntax, target: InterfaceGoType): Boolean {
+        val required = interfaceMethodsRuntime(target)
+        val actual = runtimeMethodSet(type)
+        return required.all { (name, signature) -> actual[name]?.let { sameFunctionType(it, signature) } == true }
+    }
+
+    private fun interfaceMethodsRuntime(type: GoTypeSyntax, seen: Set<String> = emptySet()): Map<String, FunctionGoType> {
+        val iface = underlying(type) as? InterfaceGoType ?: return emptyMap()
+        val result = linkedMapOf<String, FunctionGoType>()
+        iface.embeddedTypes.forEach { embedded ->
+            val key = embedded.toString()
+            if (key !in seen) interfaceMethodsRuntime(embedded, seen + key).forEach { (name, signature) -> result.putIfAbsent(name, signature) }
+        }
+        iface.methods.forEach { method -> result[method.name] = FunctionGoType(method.parameters, method.results) }
+        return result
+    }
+
+    private fun runtimeMethodSet(type: GoTypeSyntax): Map<String, FunctionGoType> {
+        val actual = underlying(type)
+        if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
+        val pointer = type is PointerGoType
+        val baseName = when (val base = if (pointer) type.element else type) {
+            is NamedGoType -> base.name
+            else -> return emptyMap()
+        }
+        val result = linkedMapOf<String, FunctionGoType>()
+        methods.values.forEach { method ->
+            val receiverType = method.receiver?.type ?: return@forEach
+            val receiverBase = if (receiverType is PointerGoType) receiverType.element else receiverType
+            if (receiverBase != NamedGoType(baseName)) return@forEach
+            if (receiverType is PointerGoType && !pointer) return@forEach
+            result[method.name] = FunctionGoType(method.parameterTypes.mapIndexed { i, parameter ->
+                ParameterSyntax(method.parameters.getOrNull(i), parameter, method.variadic && i == method.parameterTypes.lastIndex)
+            }, method.resultTypes)
+        }
+        return result
+    }
+
+    private fun sameFunctionType(left: FunctionGoType, right: FunctionGoType): Boolean =
+        left.parameters.size == right.parameters.size && left.results.size == right.results.size &&
+            left.parameters.zip(right.parameters).all { (a, b) -> a.type == b.type && a.variadic == b.variadic } &&
+            left.results.zip(right.results).all { (a, b) -> a == b }
 
     private fun methodKey(type: GoTypeSyntax, name: String): String {
         val base = if (type is PointerGoType) type.element else type
@@ -681,7 +739,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun dereference(value: Any?): Any? = if (value is GoPointer) value.get() else value
 
     private fun copyValue(value: Any?): Any? = when (value) {
-        is GoStruct -> GoStruct(value.fields.toMutableMap(), value.namedType)
+        is GoStruct -> GoStruct(value.fields.toMutableMap(), value.namedType, value.fieldTypes)
         is GoArray -> GoArray(value.elementType, value.values.toMutableList())
         else -> value
     }
@@ -845,11 +903,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         is StructGoType -> {
             val fields = linkedMapOf<String, Any?>()
+            val fieldTypes = linkedMapOf<String, GoTypeSyntax>()
             actual.fields.forEach { field ->
                 val names = field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
-                names.filter { it.isNotEmpty() }.forEach { fields[it] = zeroValue(field.type) }
+                names.filter { it.isNotEmpty() }.forEach { fields[it] = zeroValue(field.type); fieldTypes[it] = field.type }
             }
-            GoStruct(fields, (type as? NamedGoType)?.name)
+            GoStruct(fields, (type as? NamedGoType)?.name, fieldTypes)
         }
         else -> null
     }
@@ -966,7 +1025,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
         fun pointer(name: String): GoPointer {
             val owner = owner(name) ?: throw RuntimeGoError("undefined: $name")
-            return owner.addresses.getOrPut(name) { GoPointer.reference({ owner.get(name) }, { owner.set(name, it) }) }
+            return owner.addresses.getOrPut(name) {
+                GoPointer.reference({ owner.get(name) }, { owner.set(name, it) }, owner.types[name] ?: runtimeType(owner.get(name)))
+            }
         }
         private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
@@ -1035,21 +1096,26 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun toList(): List<Any?> = (0 until length).map(::get)
     }
     private class GoMap(val keyType: GoTypeSyntax, val valueType: GoTypeSyntax, val elementZero: Any?, val values: MutableMap<Any?, Any?>)
-    private class GoStruct(val fields: MutableMap<String, Any?>, val namedType: String? = null) {
+    private inner class GoStruct(
+        val fields: MutableMap<String, Any?>,
+        val namedType: String? = null,
+        val fieldTypes: Map<String, GoTypeSyntax> = emptyMap()
+    ) {
         private val addresses = mutableMapOf<String, GoPointer>()
         fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
-            GoPointer.reference({ fields[field] }, { fields[field] = it })
+            GoPointer.reference({ fields[field] }, { fields[field] = boxInterface(it, fieldTypes[field] ?: NamedGoType("<unknown>")) }, fieldTypes[field])
         }
     }
-    private class GoPointer(private val location: GoLocation) {
+    private class GoPointer(private val location: GoLocation, val pointeeType: GoTypeSyntax? = null) {
         fun get(): Any? = location.get()
         fun set(value: Any?) = location.set(value)
         override fun equals(other: Any?) = other is GoPointer && location === other.location
         override fun hashCode() = System.identityHashCode(location)
 
         companion object {
-            fun reference(get: () -> Any?, set: (Any?) -> Unit) = GoPointer(GoLocation(get, set))
-            fun cell(value: Any?) = GoCell(value).let { cell -> reference({ cell.value }, { cell.value = it }) }
+            fun reference(get: () -> Any?, set: (Any?) -> Unit, pointeeType: GoTypeSyntax? = null) =
+                GoPointer(GoLocation(get, set), pointeeType)
+            fun cell(value: Any?, pointeeType: GoTypeSyntax? = null) = GoCell(value).let { cell -> reference({ cell.value }, { cell.value = it }, pointeeType) }
         }
     }
     private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)
@@ -1088,6 +1154,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private class FallthroughSignal : RuntimeException(null, null, false, false)
 
     companion object {
+        private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")
     }
 }
