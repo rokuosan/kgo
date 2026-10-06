@@ -37,6 +37,12 @@ class TypeChecker {
         val declarations = files.flatMap { file -> file.declarations.map { file to it } }
         val packageIdentifiers = linkedSetOf<String>()
         declarations.forEach { (_, declaration) ->
+            if (declaration !is FunctionDeclaration && "init" in when (declaration) {
+                    is VariableDeclaration -> declaration.names
+                    is ConstantDeclaration -> declaration.names
+                    is TypeDeclaration -> listOf(declaration.name)
+                    else -> emptyList()
+                }) error("init may only be used for function declarations in the package block")
             val names = when (declaration) {
                 is VariableDeclaration -> declaration.names
                 is ConstantDeclaration -> declaration.names
