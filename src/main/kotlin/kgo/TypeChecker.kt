@@ -783,7 +783,12 @@ class TypeChecker {
                 }
                 listOf(intType)
             }
-            "delete" -> { requireCount(name, args, 2); if (underlying(types[0]) !is MapGoType) error("delete requires a map"); emptyList() }
+            "delete" -> {
+                requireCount(name, args, 2)
+                val map = underlying(types[0]) as? MapGoType ?: error("delete requires a map")
+                requireAssignable(types[1], map.key, "delete key", args[1], scope)
+                emptyList()
+            }
             "complex" -> {
                 requireCount(name, args, 2)
                 if (types.any { !isFloatArgument(it) }) error("complex arguments must be floating-point values")

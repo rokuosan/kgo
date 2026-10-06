@@ -257,7 +257,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     })
                 }
                 is GoMap -> {
-                    val mapKey = mapKey(key)
+                    val mapKey = mapKey(key, receiver.keyType)
                     RuntimeTarget(
                         { if (receiver.values.containsKey(mapKey)) receiver.values[mapKey] else receiver.elementZero },
                         { receiver.values[mapKey] = copyForType(it, receiver.valueType) }
@@ -266,7 +266,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 is GoNilValue -> {
                     val mapType = underlying(receiver.type) as? MapGoType
                         ?: throw RuntimeGoError("cannot assign through index")
-                    mapKey(key)
+                    mapKey(key, mapType.key)
                     RuntimeTarget({ zeroValue(mapType.value) }, { throw RuntimeGoError("assignment to entry in nil map") })
                 }
                 else -> throw RuntimeGoError("cannot assign through index")
@@ -711,7 +711,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val receiver = evaluate(index.receiver, env)
             val key = evaluate(index.index, env)
             if (receiver is GoMap) {
-                val mapKey = mapKey(key)
+                val mapKey = mapKey(key, receiver.keyType)
                 val found = receiver.values.containsKey(mapKey)
                 return listOf(MapLookupResult(if (found) receiver.values[mapKey] else receiver.elementZero, found))
             }
@@ -986,7 +986,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val values = linkedMapOf<GoMapKey, Any?>()
                 literal.elements.forEach { element ->
                     val key = element.key?.let { evaluate(it, env) } ?: throw RuntimeGoError("map literal element requires a key")
-                    values[mapKey(key)] = copyForType(evaluate(element.value, env), type.value)
+                    values[mapKey(key, type.key)] = copyForType(evaluate(element.value, env), type.value)
                 }
                 GoMap(type.key, type.value, zeroValue(type.value), values)
             }
@@ -1135,7 +1135,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
                 arrayElement(array, rawIndex)
             }
-            is GoMap -> mapKey(rawIndex).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
+            is GoMap -> mapKey(rawIndex, receiver.keyType).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
             is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { zeroValue(it.value) }
                 ?: throw RuntimeGoError("cannot index this value")
             is GoStruct -> {
@@ -1347,12 +1347,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is GoNilValue -> if (underlying(nilMap.type) is MapGoType) return else throw RuntimeGoError("delete requires a map")
             else -> throw RuntimeGoError("delete requires a map")
         }
-        map.values.remove(mapKey(args.getOrNull(1)))
+        map.values.remove(mapKey(args.getOrNull(1), map.keyType))
     }
 
-    private fun mapKey(value: Any?): GoMapKey {
-        if (!runtimeComparable(value)) throw RuntimeGoError("hash of unhashable type")
-        return GoMapKey(copyValue(value))
+    private fun mapKey(value: Any?, keyType: GoTypeSyntax? = null): GoMapKey {
+        val typedValue = keyType?.let { copyForType(value, it) } ?: value
+        if (!runtimeComparable(typedValue)) throw RuntimeGoError("hash of unhashable type")
+        return GoMapKey(copyValue(typedValue))
     }
 
     private fun literal(token: Token): Any = when (token.kind) {
