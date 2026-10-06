@@ -908,6 +908,21 @@ class TypeChecker {
         return constantBoolean(expression, scope)?.let { "$typeKey:boolean:$it" }
     }
 
+    private fun constantMapKeyIdentity(
+        expression: Expression,
+        keyType: GoTypeSyntax,
+        scope: Scope
+    ): String? {
+        val sourceType = expressionType(expression, scope)
+        val identityType = if (underlying(keyType) is InterfaceGoType) defaultType(sourceType) else keyType
+        val typeKey = identityType.toString()
+        constantRational(expression, scope)?.let { value ->
+            return "$typeKey:number:${value.numerator}/${value.denominator}"
+        }
+        constantStringIdentity(expression, scope)?.let { value -> return "$typeKey:string:$value" }
+        return constantBoolean(expression, scope)?.let { "$typeKey:boolean:$it" }
+    }
+
     private fun constantBoolean(expression: Expression, scope: Scope = globals): Boolean? = when (expression) {
         is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.constantBoolean(expression.name) else when (expression.name) {
             "true" -> true
@@ -1457,10 +1472,16 @@ class TypeChecker {
                     checkCompositeValue(item.value, element, "composite element", scope)
                 }
             }
-            is MapGoType -> elements.forEach { item ->
-                val key = item.key ?: error("map literal element requires key")
-                checkCompositeValue(key, type.key, "map key", scope)
-                checkCompositeValue(item.value, type.value, "map value", scope)
+            is MapGoType -> {
+                val constantKeys = mutableSetOf<String>()
+                elements.forEach { item ->
+                    val key = item.key ?: error("map literal element requires key")
+                    checkCompositeValue(key, type.key, "map key", scope)
+                    constantMapKeyIdentity(key, type.key, scope)?.let { identity ->
+                        if (!constantKeys.add(identity)) error("duplicate constant map key")
+                    }
+                    checkCompositeValue(item.value, type.value, "map value", scope)
+                }
             }
             is StructGoType -> {
                 val fieldList = type.fields.flatMap { field ->
