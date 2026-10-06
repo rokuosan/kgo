@@ -386,10 +386,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun executeSwitch(statement: SwitchStatement, env: Environment, labels: Set<String>) {
         val scope = env.child()
         statement.init?.let { execute(it, scope) }
-        val tag = statement.tag?.let { copyValue(evaluate(it, scope)) } ?: true
+        val tag = statement.tag?.let { copyValue(evaluate(it, scope)) } ?: if (statement.tag == null) true else null
         var selected = -1
         for ((clauseIndex, clause) in statement.clauses.withIndex()) {
-            if (clause.expressions?.any { evaluate(it, scope) == tag } == true) {
+            if (clause.expressions?.any { goEqual(evaluate(it, scope), tag) } == true) {
                 selected = clauseIndex
                 break
             }
@@ -444,7 +444,33 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun matchesDynamicType(dynamicType: GoTypeSyntax, target: GoTypeSyntax): Boolean {
         val interfaceType = underlying(target) as? InterfaceGoType
-        return if (interfaceType != null) implementsInterface(dynamicType, interfaceType) else dynamicType == target
+        return if (interfaceType != null) implementsInterface(dynamicType, interfaceType) else sameRuntimeType(dynamicType, target)
+    }
+
+    private fun sameRuntimeType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean =
+        canonicalAliasType(left) == canonicalAliasType(right)
+
+    private fun canonicalAliasType(type: GoTypeSyntax): GoTypeSyntax = when (type) {
+        NamedGoType("byte") -> NamedGoType("uint8")
+        NamedGoType("rune") -> NamedGoType("int32")
+        is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
+        is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
+        is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
+        is MapGoType -> MapGoType(canonicalAliasType(type.key), canonicalAliasType(type.value))
+        is ChannelGoType -> ChannelGoType(canonicalAliasType(type.element), type.direction)
+        is FunctionGoType -> FunctionGoType(
+            type.parameters.map { it.copy(type = canonicalAliasType(it.type)) },
+            type.results.map(::canonicalAliasType)
+        )
+        is StructGoType -> StructGoType(type.fields.map { it.copy(type = canonicalAliasType(it.type)) })
+        is InterfaceGoType -> InterfaceGoType(
+            type.methods.map { method -> method.copy(
+                parameters = method.parameters.map { it.copy(type = canonicalAliasType(it.type)) },
+                results = method.results.map(::canonicalAliasType)
+            ) },
+            type.embeddedTypes.map(::canonicalAliasType)
+        )
+        else -> type
     }
 
     private fun interfaceOperandType(expression: Expression, env: Environment): GoTypeSyntax = when (expression) {
@@ -1027,7 +1053,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         val targetInterface = underlying(target) as? InterfaceGoType
         val matches = when {
             targetInterface != null -> implementsInterface(iface.dynamicType, targetInterface)
-            else -> iface.dynamicType == target
+            else -> sameRuntimeType(iface.dynamicType, target)
         }
         return GoAssertionResult(if (matches) iface.value else zeroValue(target), matches, iface.dynamicType)
     }
