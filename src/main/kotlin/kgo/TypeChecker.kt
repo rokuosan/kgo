@@ -368,6 +368,7 @@ class TypeChecker {
                         }
                     }
                     is ConstantDeclaration -> {
+                        requireUniqueNames(declaration.names, "constant declaration")
                         val declaredType = declaration.type?.let { resolveLocalType(it, scope) }
                         val constants = scope.child().also {
                             it.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
@@ -385,12 +386,15 @@ class TypeChecker {
                             declaration.values.map { constantStringIdentity(it, constants) } else emptyList()
                         val booleanValues = if (values.size == declaration.values.size)
                             declaration.values.map { constantBoolean(it, constants) } else emptyList()
-                        declaration.names.forEachIndexed { i, name -> if (name != "_") scope.define(
-                            name, declaredType ?: values.getOrNull(i) ?: untypedInt,
-                            integerConstants.getOrNull(i), stringLengths.getOrNull(i), isConstant = true,
-                            rationalConstant = rationalConstants.getOrNull(i), stringIdentity = stringIdentities.getOrNull(i),
-                            booleanConstant = booleanValues.getOrNull(i)
-                        ) }
+                        declaration.names.forEachIndexed { i, name -> if (name != "_") {
+                            if (scope.containsLocal(name)) error("$name redeclared in this block")
+                            scope.define(
+                                name, declaredType ?: values.getOrNull(i) ?: untypedInt,
+                                integerConstants.getOrNull(i), stringLengths.getOrNull(i), isConstant = true,
+                                rationalConstant = rationalConstants.getOrNull(i), stringIdentity = stringIdentities.getOrNull(i),
+                                booleanConstant = booleanValues.getOrNull(i)
+                            )
+                        } }
                     }
                     is TypeDeclaration -> {
                         if (scope.containsLocal(declaration.name)) error("${declaration.name} redeclared in this block")
