@@ -7,6 +7,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class GoTypeError(message: String) : RuntimeException(message)
 
+private data class ConstantComplexValue(val real: GoRational, val imaginary: GoRational)
+
 /** Static checks for the declaration and statement forms currently represented by the AST. */
 class TypeChecker {
     private val typeDeclarations = linkedMapOf<String, GoTypeSyntax>()
@@ -118,7 +120,8 @@ class TypeChecker {
                     constantInteger(expression, scope), constantStringLength(expression, scope), isConstant = true,
                     rationalConstant = constantRational(expression, scope),
                     stringIdentity = constantStringIdentity(expression, scope),
-                    booleanConstant = constantBoolean(expression, scope)
+                    booleanConstant = constantBoolean(expression, scope),
+                    complexConstant = constantComplex(expression, scope)
                 )
             }
         }
@@ -599,13 +602,15 @@ class TypeChecker {
                             declaration.values.map { constantStringIdentity(it, constants) } else emptyList()
                         val booleanValues = if (values.size == declaration.values.size)
                             declaration.values.map { constantBoolean(it, constants) } else emptyList()
+                        val complexValues = if (values.size == declaration.values.size)
+                            declaration.values.map { constantComplex(it, constants) } else emptyList()
                         declaration.names.forEachIndexed { i, name -> if (name != "_") {
                             if (scope.containsLocal(name)) error("$name redeclared in this block")
                             scope.define(
                                 name, declaredType ?: values.getOrNull(i) ?: untypedInt,
                                 integerConstants.getOrNull(i), stringLengths.getOrNull(i), isConstant = true,
                                 rationalConstant = rationalConstants.getOrNull(i), stringIdentity = stringIdentities.getOrNull(i),
-                                booleanConstant = booleanValues.getOrNull(i)
+                                booleanConstant = booleanValues.getOrNull(i), complexConstant = complexValues.getOrNull(i)
                             )
                         } }
                     }
@@ -916,11 +921,76 @@ class TypeChecker {
         val sourceType = expressionType(expression, scope)
         val identityType = if (underlying(keyType) is InterfaceGoType) defaultType(sourceType) else keyType
         val typeKey = identityType.toString()
+        if (isComplex(identityType)) {
+            constantComplex(expression, scope)?.let { value ->
+                return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
+            }
+        }
         constantRational(expression, scope)?.let { value ->
             return "$typeKey:number:${value.numerator}/${value.denominator}"
         }
         constantStringIdentity(expression, scope)?.let { value -> return "$typeKey:string:$value" }
         return constantBoolean(expression, scope)?.let { "$typeKey:boolean:$it" }
+    }
+
+    private fun constantComplex(expression: Expression, scope: Scope = globals): ConstantComplexValue? = when (expression) {
+        is NameExpression -> scope.constantComplex(expression.name)
+        is LiteralExpression -> if (expression.token.kind == TokenKind.IMAG) {
+            runCatching { GoRational.decimal(expression.token.lexeme.removeSuffix("i")) }.getOrNull()
+                ?.let { ConstantComplexValue(GoRational.ZERO, it) }
+        } else constantRational(expression, scope)?.let { ConstantComplexValue(it, GoRational.ZERO) }
+        is ParenthesizedExpression -> constantComplex(expression.expression, scope)
+        is UnaryExpression -> constantComplex(expression.operand, scope)?.let { value ->
+            when (expression.operator) {
+                TokenKind.ADD -> value
+                TokenKind.SUB -> ConstantComplexValue(value.real.negate(), value.imaginary.negate())
+                else -> null
+            }
+        }
+        is BinaryExpression -> {
+            val left = constantComplex(expression.left, scope)
+            val right = constantComplex(expression.right, scope)
+            if (left == null || right == null) null else when (expression.operator) {
+                TokenKind.ADD -> ConstantComplexValue(left.real + right.real, left.imaginary + right.imaginary)
+                TokenKind.SUB -> ConstantComplexValue(left.real - right.real, left.imaginary - right.imaginary)
+                TokenKind.MUL -> ConstantComplexValue(
+                    left.real * right.real - left.imaginary * right.imaginary,
+                    left.real * right.imaginary + left.imaginary * right.real
+                )
+                TokenKind.QUO -> {
+                    val denominator = right.real * right.real + right.imaginary * right.imaginary
+                    if (denominator.numerator.signum() == 0) error("division by zero in constant expression")
+                    ConstantComplexValue(
+                        (left.real * right.real + left.imaginary * right.imaginary) / denominator,
+                        (left.imaginary * right.real - left.real * right.imaginary) / denominator
+                    )
+                }
+                else -> null
+            }
+        }
+        is CallExpression -> {
+            val target = when (val function = expression.function) {
+                is TypeExpression -> function.type
+                is NameExpression -> if (scope.getOrNull(function.name) == null &&
+                    (isBuiltinType(function.name) || function.name in typeDeclarations)) NamedGoType(function.name) else null
+                else -> null
+            }
+            when {
+                expression.function == NameExpression("complex") && expression.arguments.size == 2 -> {
+                    val real = constantRational(expression.arguments[0], scope)
+                    val imaginary = constantRational(expression.arguments[1], scope)
+                    if (real == null || imaginary == null) null else ConstantComplexValue(real, imaginary)
+                }
+                expression.function == NameExpression("real") && expression.arguments.size == 1 ->
+                    constantComplex(expression.arguments.single(), scope)?.let { ConstantComplexValue(it.real, GoRational.ZERO) }
+                expression.function == NameExpression("imag") && expression.arguments.size == 1 ->
+                    constantComplex(expression.arguments.single(), scope)?.let { ConstantComplexValue(it.imaginary, GoRational.ZERO) }
+                target != null && isComplex(target) && expression.arguments.size == 1 && !expression.expandLastArgument ->
+                    constantComplex(expression.arguments.single(), scope)
+                else -> null
+            }
+        }
+        else -> null
     }
 
     private fun constantBoolean(expression: Expression, scope: Scope = globals): Boolean? = when (expression) {
@@ -2429,6 +2499,11 @@ class TypeChecker {
         is NamedGoType -> t.name in integerNames || t.name in floatNames || t.name in complexNames
         else -> false
     }
+    private fun isComplex(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
+        untypedComplex -> true
+        is NamedGoType -> t.name in complexNames
+        else -> false
+    }
     private fun isFloatArgument(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
         untypedInt, untypedRune, untypedFloat -> true
         is NamedGoType -> t.name in floatNames
@@ -2505,6 +2580,7 @@ class TypeChecker {
         private val rationalConstants = linkedMapOf<String, GoRational>()
         private val stringIdentities = linkedMapOf<String, String>()
         private val booleanConstants = linkedMapOf<String, Boolean>()
+        private val complexConstants = linkedMapOf<String, ConstantComplexValue>()
         private val functionNames = linkedSetOf<String>()
         fun define(
             name: String,
@@ -2515,7 +2591,8 @@ class TypeChecker {
             rationalConstant: GoRational? = null,
             stringIdentity: String? = null,
             booleanConstant: Boolean? = null,
-            isFunction: Boolean = false
+            isFunction: Boolean = false,
+            complexConstant: ConstantComplexValue? = null
         ) {
             values[name] = type
             if (isFunction) functionNames += name else functionNames -= name
@@ -2524,6 +2601,7 @@ class TypeChecker {
             if (rationalConstant == null) rationalConstants.remove(name) else rationalConstants[name] = rationalConstant
             if (stringIdentity == null) stringIdentities.remove(name) else stringIdentities[name] = stringIdentity
             if (booleanConstant == null) booleanConstants.remove(name) else booleanConstants[name] = booleanConstant
+            if (complexConstant == null) complexConstants.remove(name) else complexConstants[name] = complexConstant
             if (isConstant) constantNames += name else constantNames -= name
         }
         fun defineType(name: String, identity: String) { typeNames[name] = identity }
@@ -2539,6 +2617,7 @@ class TypeChecker {
         fun constantStringLength(name: String): BigInteger? = if (name in values) stringLengths[name] else parent?.constantStringLength(name)
         fun constantStringIdentity(name: String): String? = if (name in values) stringIdentities[name] else parent?.constantStringIdentity(name)
         fun constantBoolean(name: String): Boolean? = if (name in values) booleanConstants[name] else parent?.constantBoolean(name)
+        fun constantComplex(name: String): ConstantComplexValue? = if (name in values) complexConstants[name] else parent?.constantComplex(name)
         fun isConstant(name: String): Boolean = if (name in values) name in constantNames else parent?.isConstant(name) == true
     }
 
