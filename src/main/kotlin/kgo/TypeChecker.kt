@@ -412,6 +412,7 @@ class TypeChecker {
             }
             is AssignmentStatement -> checkAssignment(statement, scope)
             is IncrementStatement -> {
+                requireAssignmentTarget(statement.target, scope, allowBlank = false)
                 val type = expressionType(statement.target, scope)
                 if (!isNumeric(type)) error("increment requires numeric operand")
             }
