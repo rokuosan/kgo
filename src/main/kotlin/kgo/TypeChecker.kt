@@ -95,12 +95,18 @@ class TypeChecker {
         val scope = globals.child()
         function.receiver?.let { receiver ->
             validateType(receiver.type)
-            receiver.name?.let { scope.define(it, receiver.type) }
+            receiver.name?.takeIf { it != "_" }?.let { name ->
+                if (scope.containsLocal(name)) error("$name redeclared in function signature")
+                scope.define(name, receiver.type)
+            }
         }
         function.parameters.forEachIndexed { i, name ->
             val type = function.parameterTypes.getOrNull(i) ?: error("missing type for parameter ${name ?: i}")
             validateType(type)
-            if (name != null && name != "_") scope.define(name, type)
+            if (name != null && name != "_") {
+                if (scope.containsLocal(name)) error("$name redeclared in function signature")
+                scope.define(name, type)
+            }
         }
         function.resultTypes.forEach(::validateType)
         val previousResults = resultTypes
@@ -114,7 +120,7 @@ class TypeChecker {
         labelBlockPath = emptyList()
         blockStatementIndices = emptyMap()
         try {
-            checkBlock(function.body, scope)
+            checkBlock(function.body, scope, reuseScope = true)
             val unused = functionLabels.keys - usedLabels
             if (unused.isNotEmpty()) error("label ${unused.first()} declared and not used")
         } finally {
@@ -126,8 +132,8 @@ class TypeChecker {
         }
     }
 
-    private fun checkBlock(block: BlockStatement, parent: Scope) {
-        val scope = parent.child()
+    private fun checkBlock(block: BlockStatement, parent: Scope, reuseScope: Boolean = false) {
+        val scope = if (reuseScope) parent else parent.child()
         val previousPath = labelBlockPath
         labelBlockPath = previousPath + block
         try {
@@ -310,6 +316,7 @@ class TypeChecker {
             val names = statement.targets.map { (it as? NameExpression)?.name ?: error("short declaration target must be an identifier") }
             val valueTypes = expressionTypes(statement.values, names.size, scope)
             if (valueTypes.size != names.size) error("assignment count mismatch")
+            requireUniqueNames(names, "short declaration")
             var added = 0
             names.forEachIndexed { i, name ->
                 if (name == "_") return@forEachIndexed
@@ -347,6 +354,7 @@ class TypeChecker {
         val types = listOfNotNull(keyAndValue.first, keyAndValue.second).take(range.targets.size)
         if (types.size != range.targets.size) error("too many range variables")
         if (range.operator == TokenKind.DEFINE) {
+            requireUniqueNames(range.targets.map { (it as? NameExpression)?.name ?: error("range declaration requires identifiers") }, "range declaration")
             range.targets.forEachIndexed { i, target ->
                 val name = (target as? NameExpression)?.name ?: error("range declaration requires identifiers")
                 if (name != "_") scope.define(name, defaultType(types[i]))
@@ -376,6 +384,7 @@ class TypeChecker {
                     if (communication.operator == TokenKind.DEFINE) {
                         val names = communication.targets.map { (it as? NameExpression)?.name ?: error("receive declaration requires identifiers") }
                         if (names.size !in 1..2) error("invalid receive assignment")
+                        requireUniqueNames(names, "receive declaration")
                         names.forEachIndexed { i, name ->
                             if (name != "_") caseScope.define(name, if (i == 0) defaultType(channel.element) else boolType)
                         }
@@ -520,7 +529,7 @@ class TypeChecker {
             labelBlockPath = emptyList()
             blockStatementIndices = emptyMap()
             try {
-                checkBlock(expression.body, literalScope)
+                checkBlock(expression.body, literalScope, reuseScope = true)
                 val unused = functionLabels.keys - usedLabels
                 if (unused.isNotEmpty()) error("label ${unused.first()} declared and not used")
             } finally {
@@ -1089,6 +1098,11 @@ class TypeChecker {
         else -> error("invalid compound assignment")
     }
     private fun error(message: String): Nothing = throw GoTypeError(message)
+
+    private fun requireUniqueNames(names: List<String>, context: String) {
+        val declared = names.filter { it != "_" }
+        if (declared.size != declared.toSet().size) error("repeated name in $context")
+    }
 
     private class Scope(private val parent: Scope? = null) {
         private val values = linkedMapOf<String, GoTypeSyntax>()

@@ -92,7 +92,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         panicState.recoverAllowed = deferredCall
         var defersRun = false
         return try {
-            executeBlock(function.body, env)
+            executeBlock(function.body, env, createScope = false)
             emptyList()
         } catch (returned: ReturnSignal) {
             returned.values.mapIndexed { i, value -> function.resultTypes.getOrNull(i)?.let { boxInterface(value, it) } ?: value }
@@ -113,8 +113,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
     }
 
-    private suspend fun executeBlock(block: BlockStatement, parent: Environment) {
-        val env = parent.child()
+    private suspend fun executeBlock(block: BlockStatement, parent: Environment, createScope: Boolean = true) {
+        val env = if (createScope) parent.child() else parent
         var index = 0
         while (index < block.statements.size) {
             try {
@@ -213,7 +213,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         if (operator == TokenKind.DEFINE) {
             val names = targets.map { (it as? NameExpression)?.name ?: throw RuntimeGoError("short declaration targets must be names") }
             if (names.size != values.size) throw RuntimeGoError("assignment count mismatch")
-            names.zip(values).filter { it.first != "_" }.forEach { (name, value) -> env.define(name, value) }
+            val declared = mutableSetOf<String>()
+            names.zip(values).forEach { (name, value) ->
+                if (name == "_") return@forEach
+                if (!declared.add(name)) throw RuntimeGoError("$name repeated on left side of :=")
+                if (env.containsLocal(name)) env.set(name, value) else env.define(name, value)
+            }
             return
         }
         if (targets.size != values.size) throw RuntimeGoError("assignment count mismatch")
@@ -332,8 +337,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     return
                 }
                 is SelectReceive -> operation.channel.tryReceive()?.let { received ->
-                    operation.assignment?.let { assignValues(it.targets, it.operator, expandValues(listOf(received), it.targets.size), env) }
-                    executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
+                    executeSelectedCase(statement.cases[operation.caseIndex], env, labels, operation.assignment, received)
                     return
                 }
             }
@@ -355,11 +359,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         val clause = statement.cases[selected.caseIndex]
         val receive = operations.filterIsInstance<SelectReceive>().firstOrNull { it.caseIndex == selected.caseIndex }
-        if (receive?.assignment != null) {
-            assignValues(receive.assignment.targets, receive.assignment.operator,
-                expandValues(listOf(selected.received), receive.assignment.targets.size), env)
-        }
-        executeSelectedCase(clause, env, labels)
+        executeSelectedCase(clause, env, labels, receive?.assignment, selected.received)
     }
 
     private fun selectChannelOrNull(value: Any?): GoChannel? = when (value) {
@@ -368,7 +368,17 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         else -> throw RuntimeGoError("select operation requires a channel")
     }
 
-    private suspend fun executeSelectedCase(clause: SelectCase, env: Environment, labels: Set<String>) {
+    private suspend fun executeSelectedCase(
+        clause: SelectCase,
+        parent: Environment,
+        labels: Set<String>,
+        assignment: AssignmentStatement? = null,
+        received: GoReceiveResult? = null
+    ) {
+        val env = parent.child()
+        if (assignment != null && received != null) {
+            assignValues(assignment.targets, assignment.operator, expandValues(listOf(received), assignment.targets.size), env)
+        }
         try { for (statement in clause.statements) execute(statement, env) }
         catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal }
     }
@@ -1600,6 +1610,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         private val types = mutableMapOf<String, GoTypeSyntax>()
         private val addresses = mutableMapOf<String, GoPointer>()
         fun child() = Environment(this, deferredCalls, panicState)
+        fun containsLocal(name: String) = values.containsKey(name)
         fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
             values[name] = type?.let { copyForType(value, it) } ?: copyValue(value)
             if (type != null) types[name] = type
