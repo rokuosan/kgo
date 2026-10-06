@@ -216,6 +216,7 @@ class Parser(private val tokens: List<Token>) {
         match(TokenKind.DEFER) -> DeferStatement(expression())
         match(TokenKind.BREAK) -> BranchStatement(TokenKind.BREAK, if (at(TokenKind.IDENT)) take().lexeme else null)
         match(TokenKind.CONTINUE) -> BranchStatement(TokenKind.CONTINUE, if (at(TokenKind.IDENT)) take().lexeme else null)
+        match(TokenKind.GOTO) -> BranchStatement(TokenKind.GOTO, expect(TokenKind.IDENT).lexeme)
         match(TokenKind.FALLTHROUGH) -> BranchStatement(TokenKind.FALLTHROUGH, null)
         match(TokenKind.SELECT) -> parseSelect()
         match(TokenKind.SWITCH) -> parseSwitch()

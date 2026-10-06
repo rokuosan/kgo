@@ -11,7 +11,10 @@ class TypeChecker {
     private val packagePaths = linkedMapOf<String, String>()
     private val globals = Scope()
     private var resultTypes: List<GoTypeSyntax> = emptyList()
-    private var functionLabels: Map<String, Statement> = emptyMap()
+    private var functionLabels: Map<String, LabelInfo> = emptyMap()
+    private var usedLabels: MutableSet<String> = mutableSetOf()
+    private var labelBlockPath: List<Any> = emptyList()
+    private var blockStatementIndices: Map<BlockStatement, Int> = emptyMap()
 
     fun check(file: GoFile) {
         for (declaration in file.declarations) when (declaration) {
@@ -93,46 +96,91 @@ class TypeChecker {
         function.resultTypes.forEach(::validateType)
         val previousResults = resultTypes
         val previousLabels = functionLabels
+        val previousUsedLabels = usedLabels
+        val previousBlockPath = labelBlockPath
+        val previousBlockIndices = blockStatementIndices
         resultTypes = function.resultTypes
         functionLabels = collectLabels(function.body)
-        try { checkBlock(function.body, scope) } finally {
+        usedLabels = mutableSetOf()
+        labelBlockPath = emptyList()
+        blockStatementIndices = emptyMap()
+        try {
+            checkBlock(function.body, scope)
+            val unused = functionLabels.keys - usedLabels
+            if (unused.isNotEmpty()) error("label ${unused.first()} declared and not used")
+        } finally {
             resultTypes = previousResults
             functionLabels = previousLabels
+            usedLabels = previousUsedLabels
+            labelBlockPath = previousBlockPath
+            blockStatementIndices = previousBlockIndices
         }
     }
 
     private fun checkBlock(block: BlockStatement, parent: Scope) {
         val scope = parent.child()
-        block.statements.forEach { checkStatement(it, scope) }
+        val previousPath = labelBlockPath
+        labelBlockPath = previousPath + block
+        try {
+            block.statements.forEachIndexed { index, statement ->
+                val previousIndices = blockStatementIndices
+                blockStatementIndices = previousIndices + (block to index)
+                try { checkStatement(statement, scope) } finally { blockStatementIndices = previousIndices }
+            }
+        }
+        finally { labelBlockPath = previousPath }
     }
 
-    private fun collectLabels(body: BlockStatement): Map<String, Statement> {
-        val labels = linkedMapOf<String, Statement>()
-        fun visit(statement: Statement) {
+    private data class LabelInfo(
+        val statement: Statement,
+        val blockPath: List<Any>,
+        val ownerBlock: BlockStatement?,
+        val statementIndex: Int?
+    )
+
+    private fun collectLabels(body: BlockStatement): Map<String, LabelInfo> {
+        val labels = linkedMapOf<String, LabelInfo>()
+        fun visit(statement: Statement, path: List<Any>, ownerBlock: BlockStatement?, statementIndex: Int?) {
             when (statement) {
                 is LabeledStatement -> {
-                    if (labels.putIfAbsent(statement.label, statement.statement) != null) error("label ${statement.label} redeclared")
-                    visit(statement.statement)
+                    if (labels.putIfAbsent(statement.label, LabelInfo(statement.statement, path, ownerBlock, statementIndex)) != null)
+                        error("label ${statement.label} redeclared")
+                    visit(statement.statement, path, ownerBlock, statementIndex)
                 }
-                is BlockStatement -> statement.statements.forEach(::visit)
+                is BlockStatement -> statement.statements.forEachIndexed { index, child -> visit(child, path + statement, statement, index) }
                 is IfStatement -> {
-                    statement.init?.let(::visit); visit(statement.thenBranch); statement.elseBranch?.let(::visit)
+                    statement.init?.let { visit(it, path, ownerBlock, statementIndex) }
+                    visit(statement.thenBranch, path, ownerBlock, statementIndex)
+                    statement.elseBranch?.let { visit(it, path, ownerBlock, statementIndex) }
                 }
                 is ForStatement -> {
-                    statement.init?.let(::visit); statement.post?.let(::visit); visit(statement.body)
+                    statement.init?.let { visit(it, path, ownerBlock, statementIndex) }
+                    statement.post?.let { visit(it, path, ownerBlock, statementIndex) }
+                    visit(statement.body, path, ownerBlock, statementIndex)
                 }
                 is SwitchStatement -> {
-                    statement.init?.let(::visit)
-                    statement.clauses.flatMap { it.statements }.forEach(::visit)
+                    statement.init?.let { visit(it, path, ownerBlock, statementIndex) }
+                    statement.clauses.forEach { clause -> clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) } }
                 }
                 is SelectStatement -> statement.cases.forEach { clause ->
-                    clause.communication?.let(::visit); clause.statements.forEach(::visit)
+                    clause.communication?.let { visit(it, path + clause, ownerBlock, statementIndex) }
+                    clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) }
                 }
                 else -> Unit
             }
         }
-        body.statements.forEach(::visit)
+        body.statements.forEachIndexed { index, statement -> visit(statement, listOf(body), body, index) }
         return labels
+    }
+
+    private fun isPrefix(prefix: List<Any>, path: List<Any>): Boolean =
+        prefix.size <= path.size && prefix.indices.all { prefix[it] === path[it] }
+
+    private fun introducesVariable(statement: Statement): Boolean = when (statement) {
+        is VariableStatement -> true
+        is AssignmentStatement -> statement.operator == TokenKind.DEFINE
+        is DeclarationStatement -> statement.declarations.any { it is VariableDeclaration }
+        else -> false
     }
 
     private fun unwrapLabels(statement: Statement): Statement =
@@ -212,15 +260,30 @@ class TypeChecker {
             is SendStatement -> checkSend(statement, scope)
             is GoStatement -> requireCall(statement.call, scope, "go")
             is DeferStatement -> requireCall(statement.call, scope, "defer")
-            is BranchStatement -> if (statement.label != null) {
-                val target = functionLabels[statement.label] ?: error("undefined label ${statement.label}")
-                val destination = unwrapLabels(target)
-                when (statement.kind) {
-                    TokenKind.BREAK -> if (destination !is ForStatement && destination !is SwitchStatement && destination !is SelectStatement)
-                        error("invalid break label ${statement.label}")
-                    TokenKind.CONTINUE -> if (destination !is ForStatement) error("invalid continue label ${statement.label}")
-                    else -> error("label is not valid on ${statement.kind}")
+            is BranchStatement -> when (statement.kind) {
+                TokenKind.GOTO -> {
+                    val label = statement.label ?: error("goto requires a label")
+                    val target = functionLabels[label] ?: error("undefined label $label")
+                    if (!isPrefix(target.blockPath, labelBlockPath)) error("goto $label jumps into a block")
+                    val owner = target.ownerBlock
+                    val sourceIndex = owner?.let { blockStatementIndices[it] }
+                    val targetIndex = target.statementIndex
+                    if (owner != null && sourceIndex != null && targetIndex != null && targetIndex > sourceIndex &&
+                        owner.statements.subList(sourceIndex + 1, targetIndex).any(::introducesVariable)) {
+                        error("goto $label jumps over a variable declaration")
+                    }
+                    usedLabels += label
                 }
+                TokenKind.BREAK, TokenKind.CONTINUE -> statement.label?.let { label ->
+                    val target = functionLabels[label]?.statement ?: error("undefined label $label")
+                    val destination = unwrapLabels(target)
+                    usedLabels += label
+                    if (statement.kind == TokenKind.BREAK && destination !is ForStatement && destination !is SwitchStatement && destination !is SelectStatement)
+                        error("invalid break label $label")
+                    if (statement.kind == TokenKind.CONTINUE && destination !is ForStatement) error("invalid continue label $label")
+                }
+                TokenKind.FALLTHROUGH -> Unit
+                else -> Unit
             }
             is SelectStatement -> checkSelect(statement, scope)
             is SwitchStatement -> checkSwitch(statement, scope)
@@ -306,7 +369,7 @@ class TypeChecker {
                 }
                 else -> error("invalid select communication")
             }
-            clause.statements.forEach { checkStatement(it, caseScope) }
+            inLabelBlock(clause) { clause.statements.forEach { checkStatement(it, caseScope) } }
         }
     }
 
@@ -328,8 +391,14 @@ class TypeChecker {
                     if (!assignable(caseType, tagType) && !assignable(tagType, caseType)) error("case type does not match switch expression")
                 } else requireBoolean(caseType, "expressionless switch case")
             }
-            clause.statements.forEach { checkStatement(it, caseScope) }
+            inLabelBlock(clause) { clause.statements.forEach { checkStatement(it, caseScope) } }
         }
+    }
+
+    private fun inLabelBlock(marker: Any, check: () -> Unit) {
+        val previous = labelBlockPath
+        labelBlockPath = previous + marker
+        try { check() } finally { labelBlockPath = previous }
     }
 
     private fun expressionTypes(expressions: List<Expression>, arity: Int, scope: Scope): List<GoTypeSyntax> {
@@ -384,11 +453,24 @@ class TypeChecker {
             expression.results.forEach(::validateType)
             val previousResults = resultTypes
             val previousLabels = functionLabels
+            val previousUsedLabels = usedLabels
+            val previousBlockPath = labelBlockPath
+            val previousBlockIndices = blockStatementIndices
             resultTypes = expression.results
             functionLabels = collectLabels(expression.body)
-            try { checkBlock(expression.body, literalScope) } finally {
+            usedLabels = mutableSetOf()
+            labelBlockPath = emptyList()
+            blockStatementIndices = emptyMap()
+            try {
+                checkBlock(expression.body, literalScope)
+                val unused = functionLabels.keys - usedLabels
+                if (unused.isNotEmpty()) error("label ${unused.first()} declared and not used")
+            } finally {
                 resultTypes = previousResults
                 functionLabels = previousLabels
+                usedLabels = previousUsedLabels
+                labelBlockPath = previousBlockPath
+                blockStatementIndices = previousBlockIndices
             }
             FunctionGoType(expression.parameters, expression.results)
         }

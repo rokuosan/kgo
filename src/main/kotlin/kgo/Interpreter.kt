@@ -93,7 +93,17 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private suspend fun executeBlock(block: BlockStatement, parent: Environment) {
         val env = parent.child()
-        for (statement in block.statements) execute(statement, env)
+        var index = 0
+        while (index < block.statements.size) {
+            try {
+                execute(block.statements[index], env)
+                index++
+            } catch (jump: GotoSignal) {
+                val target = block.statements.indexOfFirst { it is LabeledStatement && it.label == jump.label }
+                if (target < 0) throw jump
+                index = target
+            }
+        }
     }
 
     private suspend fun execute(statement: Statement, env: Environment, labels: Set<String> = emptySet()) {
@@ -156,6 +166,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is BranchStatement -> when (statement.kind) {
                 TokenKind.BREAK -> throw BreakSignal(statement.label)
                 TokenKind.CONTINUE -> throw ContinueSignal(statement.label)
+                TokenKind.GOTO -> throw GotoSignal(statement.label ?: throw RuntimeGoError("goto requires a label"))
                 TokenKind.FALLTHROUGH -> throw FallthroughSignal()
                 else -> throw RuntimeGoError("invalid branch statement")
             }
@@ -1019,6 +1030,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private class ReturnSignal(val values: List<Any?>) : RuntimeException(null, null, false, false)
     private class BreakSignal(val label: String?) : RuntimeException(null, null, false, false)
     private class ContinueSignal(val label: String?) : RuntimeException(null, null, false, false)
+    private class GotoSignal(val label: String) : RuntimeException(null, null, false, false)
     private class FallthroughSignal : RuntimeException(null, null, false, false)
 
     companion object {
