@@ -906,6 +906,11 @@ class TypeChecker {
     ): String? {
         val identityType = if (isUntyped(caseType)) switchType ?: defaultType(caseType) else caseType
         val typeKey = identityType.toString()
+        if (isComplex(identityType)) {
+            constantComplex(expression, scope)?.let { value ->
+                return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
+            }
+        }
         constantRational(expression, scope)?.let { value ->
             return "$typeKey:number:${value.numerator}/${value.denominator}"
         }
