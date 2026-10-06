@@ -498,7 +498,10 @@ class TypeChecker {
         if (leftTypes.size != rightTypes.size) error("assignment count mismatch")
         if (statement.operator == TokenKind.ASSIGN) {
             leftTypes.zip(rightTypes).forEachIndexed { i, (left, right) ->
-                if (left != null) requireAssignable(right, left, "assignment", statement.values.getOrNull(i), scope)
+                val value = statement.values.getOrNull(i)
+                if (left != null) requireAssignable(right, left, "assignment", value, scope)
+                else if (value != null && statement.values.size == rightTypes.size)
+                    requireDefaultIntegerValues(listOf(right), listOf(value), "assignment", scope)
             }
         } else {
             if (leftTypes.size != 1 || rightTypes.size != 1) error("compound assignment requires one operand")
