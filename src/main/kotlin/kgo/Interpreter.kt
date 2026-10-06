@@ -2019,8 +2019,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun codePointString(value: BigInteger): String = if (value < BigInteger.ZERO ||
         value > BigInteger.valueOf(Character.MAX_CODE_POINT.toLong())) "\ufffd" else codePointString(value.toLong())
 
-    private fun append(args: List<Any?>, expandString: Boolean = false): GoSlice {
+    private fun append(args: List<Any?>, expandString: Boolean = false): Any? {
         val first = args.firstOrNull()
+        val values = args.drop(1)
+        if (first is GoNilValue && values.isEmpty()) return first
         val slice = when (first) {
             is GoSlice -> first
             is GoNilValue -> (underlying(first.type) as? SliceGoType)?.let {
@@ -2029,7 +2031,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             } ?: throw RuntimeGoError("append requires a slice")
             else -> throw RuntimeGoError("append requires a slice")
         }
-        val values = args.drop(1)
         if (expandString && values.singleOrNull() is GoString) {
             if (!isPredeclaredByteType(slice.elementType)) throw RuntimeGoError("append string expansion requires a byte slice")
             return slice.append((values.single() as GoString).bytes.map { (it.toInt() and 0xff).toLong() })
