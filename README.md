@@ -10,7 +10,8 @@ basic built-ins (`make`, `append`, `copy`, `delete`, `len`, and `cap`) are also
 implemented in the runtime subset. Named struct methods support value and pointer
 receivers for the implemented runtime types.
 Array and struct comparisons use Go value equality, including when they are used
-as map keys.
+as map keys. Arrays and structs copy at value-transfer points; slices, maps,
+channels, and pointers keep their reference semantics.
 Function literals capture their surrounding variables, and variadic functions
 accept both individual arguments and slice expansion with `...`.
 Labeled `break` and `continue` statements can target enclosing loops and

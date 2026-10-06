@@ -76,7 +76,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val sliceType = function.parameterTypes.lastOrNull() as? SliceGoType
                 ?: throw RuntimeGoError("invalid variadic function signature")
             val extras = arguments.drop(fixedCount)
-            arguments.take(fixedCount) + GoSlice(sliceType.element, extras.toMutableList(), 0, extras.size, extras.size)
+            arguments.take(fixedCount) + GoSlice(sliceType.element, extras.mapTo(mutableListOf(), ::copyValue), 0, extras.size, extras.size)
         }
         val env = Environment(parent)
         function.receiver?.let { env.define(it.name ?: "", receiver, it.type) }
@@ -122,7 +122,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             is BlockStatement -> executeBlock(statement, env)
             is VariableStatement -> initialize(statement.names, statement.values, env, statement.type)
-            is ReturnStatement -> throw ReturnSignal(statement.values.map { evaluate(it, env) })
+            is ReturnStatement -> throw ReturnSignal(statement.values.map { copyValue(evaluate(it, env)) })
             is ExpressionStatement -> evaluate(statement.expression, env)
             is AssignmentStatement -> assign(statement, env)
             is IncrementStatement -> {
@@ -156,13 +156,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is GoStatement -> {
                 val call = statement.call as? CallExpression ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = call.arguments.map { evaluate(it, env) }
+                val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
                 goroutines.launch { call(target, arguments, call.expandLastArgument) }
             }
             is DeferStatement -> {
                 val call = statement.call as? CallExpression ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = call.arguments.map { evaluate(it, env) }
+                val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
                 env.defer { call(target, arguments, call.expandLastArgument) }
             }
             is BranchStatement -> when (statement.kind) {
@@ -219,9 +219,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val receiver = evaluate(target.receiver, env)
                 val key = evaluate(target.index, env)
                 when (receiver) {
-                    is GoSlice -> receiver.set(number(key, "index").toInt(), value)
-                    is GoArray -> receiver.values[number(key, "index").toInt()] = value
-                    is GoMap -> receiver.values[mapKey(key)] = value
+                    is GoSlice -> receiver.set(number(key, "index").toInt(), copyForType(value, receiver.elementType))
+                    is GoArray -> receiver.values[number(key, "index").toInt()] = copyForType(value, receiver.elementType)
+                    is GoMap -> receiver.values[mapKey(key)] = copyForType(value, receiver.valueType)
                     else -> throw RuntimeGoError("cannot assign through index")
                 }
             }
@@ -229,12 +229,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val receiver = evaluate(target.receiver, env)
                 val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
                 if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
-                struct.fields[target.field] = struct.fieldTypes[target.field]?.let { boxInterface(value, it) } ?: value
+                struct.fields[target.field] = struct.fieldTypes[target.field]?.let { copyForType(value, it) } ?: copyValue(value)
             }
             is UnaryExpression -> {
                 if (target.operator != TokenKind.MUL) throw RuntimeGoError("invalid assignment target")
                 val pointer = evaluate(target.operand, env) as? GoPointer ?: throw RuntimeGoError("dereference of non-pointer")
-                pointer.set(value)
+                pointer.set(copyForType(value, pointer.pointeeType ?: runtimeType(value) ?: NamedGoType("<unknown>")))
             }
             else -> throw RuntimeGoError("invalid assignment target")
         }
@@ -246,7 +246,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 null -> null
                 is SendStatement -> {
                     val channel = evaluate(communication.channel, env) as? GoChannel ?: throw RuntimeGoError("select send on non-channel")
-                    SelectSend(caseIndex, channel, evaluate(communication.value, env))
+                    SelectSend(caseIndex, channel, copyForType(evaluate(communication.value, env), channel.elementType))
                 }
                 is ExpressionStatement -> {
                     val receive = communication.expression as? UnaryExpression
@@ -308,7 +308,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun executeSwitch(statement: SwitchStatement, env: Environment, labels: Set<String>) {
         val scope = env.child()
         statement.init?.let { execute(it, scope) }
-        val tag = statement.tag?.let { evaluate(it, scope) } ?: true
+        val tag = statement.tag?.let { copyValue(evaluate(it, scope)) } ?: true
         var selected = -1
         for ((clauseIndex, clause) in statement.clauses.withIndex()) {
             if (clause.expressions?.any { evaluate(it, scope) == tag } == true) {
@@ -336,7 +336,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun executeTypeSwitch(statement: TypeSwitchStatement, env: Environment, labels: Set<String>) {
         val scope = env.child()
         statement.init?.let { execute(it, scope) }
-        val value = evaluate(statement.guard.expression, scope)
+        val value = copyValue(evaluate(statement.guard.expression, scope))
         val dynamicType = (value as? GoInterfaceValue)?.dynamicType
         val selected = statement.clauses.indexOfFirst { clause ->
             clause.types?.any { type ->
@@ -376,7 +376,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
-        val value = evaluate(range.expression, env)
+        val value = copyValue(evaluate(range.expression, env))
         when (value) {
             is GoChannel -> while (true) {
                 val received = value.receive()
@@ -496,10 +496,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             else -> unary(expression.operator, evaluate(expression.operand, env))
         }
         is BinaryExpression -> {
-            val left = evaluate(expression.left, env)
+            val left = copyValue(evaluate(expression.left, env))
             if (expression.operator == TokenKind.LAND && left == false) false
             else if (expression.operator == TokenKind.LOR && left == true) true
-            else binary(left, expression.operator, evaluate(expression.right, env))
+            else binary(left, expression.operator, copyValue(evaluate(expression.right, env)))
         }
         is SelectorExpression -> {
             if (expression.receiver is NameExpression && expression.receiver.name in fmtAliases) BuiltinValue(expression.field)
@@ -581,19 +581,19 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private suspend fun call(call: CallExpression, env: Environment): Any? {
         val target = evaluate(call.function, env)
-        val args = call.arguments.map { evaluate(it, env) }
+        val args = call.arguments.map { copyValue(evaluate(it, env)) }
         return call(target, args, call.expandLastArgument)
     }
 
     private suspend fun call(target: Any?, args: List<Any?>, expandLastArgument: Boolean = false): Any? {
         val effectiveArgs = if (expandLastArgument) {
             val last = args.lastOrNull()
-            args.dropLast(1) + when (last) {
-                is GoSlice -> last.toList()
+            args.dropLast(1).map(::copyValue) + when (last) {
+                is GoSlice -> last.toList().map(::copyValue)
                 null -> emptyList()
                 else -> throw RuntimeGoError("... argument must be a slice")
             }
-        } else args
+        } else args.map(::copyValue)
         when (target) {
             is FunctionValue -> {
                 val values = invoke(target.function, args, parent = target.closure, expandedVariadic = expandLastArgument)
@@ -654,7 +654,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 literal.elements.forEachIndexed { i, element ->
                     val at = element.key?.let { number(evaluate(it, env), "slice literal index").toInt() } ?: i
                     if (at < 0 || at >= backing.size) throw RuntimeGoError("slice literal index out of range")
-                    backing[at] = evaluate(element.value, env)
+                    backing[at] = copyForType(evaluate(element.value, env), type.element)
                 }
                 GoSlice(type.element, backing, 0, backing.size, backing.size)
             }
@@ -665,7 +665,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 literal.elements.forEachIndexed { i, element ->
                     val at = element.key?.let { number(evaluate(it, env), "array literal index").toInt() } ?: i
                     if (at !in values.indices) throw RuntimeGoError("array literal index out of range")
-                    values[at] = evaluate(element.value, env)
+                    values[at] = copyForType(evaluate(element.value, env), type.element)
                 }
                 GoArray(type.element, values)
             }
@@ -673,7 +673,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val values = linkedMapOf<GoMapKey, Any?>()
                 literal.elements.forEach { element ->
                     val key = element.key?.let { evaluate(it, env) } ?: throw RuntimeGoError("map literal element requires a key")
-                    values[mapKey(key)] = evaluate(element.value, env)
+                    values[mapKey(key)] = copyForType(evaluate(element.value, env), type.value)
                 }
                 GoMap(type.key, type.value, zeroValue(type.value), values)
             }
@@ -685,7 +685,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     val name = if (element.key == null) fieldList.getOrNull(i)?.first else (element.key as? NameExpression)?.name
                     if (name == null || name !in fields) throw RuntimeGoError("unknown struct literal field")
                     val value = evaluate(element.value, env)
-                    fields[name] = fieldList.firstOrNull { it.first == name }?.second?.let { boxInterface(value, it) } ?: value
+                    fields[name] = fieldList.firstOrNull { it.first == name }?.second?.let { copyForType(value, it) } ?: copyValue(value)
                 }
                 val fieldTypes = fieldList.filter { it.first.isNotEmpty() }.toMap()
                 GoStruct(fields, (literal.type as? NamedGoType)?.name, fieldTypes)
@@ -789,6 +789,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is GoInterfaceValue -> GoInterfaceValue(value.dynamicType, copyValue(value.value))
         else -> value
     }
+
+    private fun copyForType(value: Any?, type: GoTypeSyntax): Any? = boxInterface(copyValue(value), type)
 
     private fun index(receiver: Any?, rawIndex: Any?): Any? {
         return when (receiver) {
@@ -1138,7 +1140,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         private val addresses = mutableMapOf<String, GoPointer>()
         fun child() = Environment(this, deferredCalls)
         fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
-            values[name] = type?.let { boxInterface(value, it) } ?: value
+            values[name] = type?.let { copyForType(value, it) } ?: copyValue(value)
             if (type != null) types[name] = type
         }
         fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
@@ -1159,7 +1161,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             deferredCalls.clear()
         }
         fun set(name: String, value: Any?) {
-            if (values.containsKey(name)) values[name] = types[name]?.let { boxInterface(value, it) } ?: value
+            if (values.containsKey(name)) values[name] = types[name]?.let { copyForType(value, it) } ?: copyValue(value)
             else if (parent != null && parent.contains(name)) parent.set(name, value)
             else throw RuntimeGoError("undefined: $name")
         }
@@ -1183,7 +1185,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         private val addresses = mutableMapOf<Int, GoPointer>()
         fun pointerAt(index: Int): GoPointer {
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
-            return addresses.getOrPut(index) { GoPointer.reference({ values[index] }, { values[index] = it }) }
+            return addresses.getOrPut(index) { GoPointer.reference({ values[index] }, { values[index] = copyForType(it, elementType) }) }
         }
         override fun equals(other: Any?) = other is GoArray && values.size == other.values.size &&
             values.indices.all { goEqual(values[it], other.values[it]) }
@@ -1197,12 +1199,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         fun set(index: Int, value: Any?) {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
-            backing[start + index] = value
+            backing[start + index] = copyForType(value, elementType)
         }
         fun pointerAt(index: Int): GoPointer {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             val absolute = start + index
-            return addresses.getOrPut(index) { GoPointer.reference({ backing[absolute] }, { backing[absolute] = it }) }
+            return addresses.getOrPut(index) { GoPointer.reference({ backing[absolute] }, { backing[absolute] = copyForType(it, elementType) }) }
         }
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
@@ -1210,13 +1212,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         fun append(values: List<Any?>): GoSlice {
             if (length + values.size <= capacity) {
-                values.forEachIndexed { i, value -> backing[start + length + i] = value }
+                values.forEachIndexed { i, value -> backing[start + length + i] = copyForType(value, elementType) }
                 return GoSlice(elementType, backing, start, length + values.size, capacity)
             }
             val newCapacity = maxOf(length + values.size, maxOf(1, capacity * 2))
             val newBacking = MutableList(newCapacity) { zeroValue(elementType) }
             repeat(length) { newBacking[it] = get(it) }
-            values.forEachIndexed { i, value -> newBacking[length + i] = value }
+            values.forEachIndexed { i, value -> newBacking[length + i] = copyForType(value, elementType) }
             return GoSlice(elementType, newBacking, 0, length + values.size, newCapacity)
         }
         fun toList(): List<Any?> = (0 until length).map(::get)
@@ -1233,7 +1235,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     ) {
         private val addresses = mutableMapOf<String, GoPointer>()
         fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
-            GoPointer.reference({ fields[field] }, { fields[field] = boxInterface(it, fieldTypes[field] ?: NamedGoType("<unknown>")) }, fieldTypes[field])
+            GoPointer.reference({ fields[field] }, { fields[field] = copyForType(it, fieldTypes[field] ?: NamedGoType("<unknown>")) }, fieldTypes[field])
         }
         override fun equals(other: Any?) = other is GoStruct && namedType == other.namedType && fields.keys == other.fields.keys &&
             fields.keys.all { goEqual(fields[it], other.fields[it]) }
@@ -1253,18 +1255,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
     private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)
     private class GoCell(var value: Any?)
-    private class GoChannel(val elementType: GoTypeSyntax, private val elementZero: Any?, val capacity: Int) {
+    private inner class GoChannel(val elementType: GoTypeSyntax, private val elementZero: Any?, val capacity: Int) {
         val queue = Channel<Any?>(capacity)
         private val buffered = AtomicInteger(0)
         suspend fun send(value: Any?) {
-            queue.send(value)
+            queue.send(copyForType(value, elementType))
             if (capacity > 0) buffered.incrementAndGet()
         }
         suspend fun receive(): GoReceiveResult {
             val result = queue.receiveCatching()
             return decode(result)
         }
-        fun trySend(value: Any?): Boolean = queue.trySend(value).isSuccess.also { if (it && capacity > 0) buffered.incrementAndGet() }
+        fun trySend(value: Any?): Boolean = queue.trySend(copyForType(value, elementType)).isSuccess.also { if (it && capacity > 0) buffered.incrementAndGet() }
         fun tryReceive(): GoReceiveResult? {
             val result = queue.tryReceive()
             if (result.isFailure && !result.isClosed) return null
