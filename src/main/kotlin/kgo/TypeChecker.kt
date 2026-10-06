@@ -1060,6 +1060,15 @@ class TypeChecker {
         return expressions.map { expressionType(it, scope) }
     }
 
+    private fun callArgumentTypes(arguments: List<Expression>, expandLastArgument: Boolean, scope: Scope): List<GoTypeSyntax> {
+        if (!expandLastArgument && arguments.size == 1) {
+            val multiValueCall = arguments.single() as? CallExpression
+            val results = multiValueCall?.let { callResults(it, scope) }
+            if (results != null && results.size > 1) return results
+        }
+        return arguments.map { expressionType(it, scope) }
+    }
+
     private fun expressionType(expression: Expression, scope: Scope): GoTypeSyntax = when (expression) {
         is NameExpression -> scope.getOrNull(expression.name) ?: when (expression.name) {
             "true", "false" -> untypedBool
@@ -1522,7 +1531,7 @@ class TypeChecker {
         if (target is SelectorExpression && target.receiver is NameExpression &&
             target.receiver.name in packagePaths && scope.getOrNull(target.receiver.name) == null) {
             val importedPath = importedPackagePath(target.receiver.name)!!
-            call.arguments.forEach { expressionType(it, scope) }
+            callArgumentTypes(call.arguments, call.expandLastArgument, scope)
             return when {
                 packageName(importedPath) != "fmt" -> error("unknown imported package")
                 target.field in setOf("Print", "Println", "Printf", "Fprint", "Fprintln", "Fprintf") -> listOf(intType, NamedGoType("error"))
@@ -1556,29 +1565,30 @@ class TypeChecker {
         if (call.expandLastArgument && !variadic) error("cannot use ... with non-variadic function")
         if (call.expandLastArgument && call.arguments.size != functionType.parameters.size)
             error("variadic call with ... requires one slice argument")
-        if ((!variadic && call.arguments.size != fixedCount) || (variadic && !call.expandLastArgument && call.arguments.size < fixedCount))
-            error("wrong number of arguments: got ${call.arguments.size}")
-        call.arguments.forEachIndexed { i, arg ->
+        val argumentTypes = callArgumentTypes(call.arguments, call.expandLastArgument, scope)
+        if ((!variadic && argumentTypes.size != fixedCount) || (variadic && !call.expandLastArgument && argumentTypes.size < fixedCount))
+            error("wrong number of arguments: got ${argumentTypes.size}")
+        argumentTypes.forEachIndexed { i, argumentType ->
             val parameter = functionType.parameters.getOrNull(i) ?: functionType.parameters.lastOrNull()
                 ?: error("function has no parameters")
             val expected = when {
-                call.expandLastArgument && i == call.arguments.lastIndex -> parameter.type
+                call.expandLastArgument && i == argumentTypes.lastIndex -> parameter.type
                 parameter.variadic -> (parameter.type as? SliceGoType)?.element ?: parameter.type
                 else -> parameter.type
             }
-            requireAssignable(expressionType(arg, scope), expected, "argument", arg, scope)
+            requireAssignable(argumentType, expected, "argument", call.arguments.getOrNull(i), scope)
         }
         return functionType.results
     }
 
     private fun builtinCall(name: String, args: List<Expression>, scope: Scope, expandLastArgument: Boolean = false): List<GoTypeSyntax>? {
-        val types = args.map { expressionType(it, scope) }
+        val types = callArgumentTypes(args, expandLastArgument, scope)
         if (expandLastArgument && name in setOf("print", "println") && args.size != 1)
             error("... requires a single final argument")
         return when (name) {
             "print", "println" -> emptyList()
-            "panic" -> { requireCount(name, args, 1); emptyList() }
-            "recover" -> { requireCount(name, args, 0); listOf(NamedGoType("interface{}")) }
+            "panic" -> { requireCount(name, args, 1, types.size); emptyList() }
+            "recover" -> { requireCount(name, args, 0, types.size); listOf(NamedGoType("interface{}")) }
             "make" -> {
                 if (expandLastArgument) error("make does not accept ...")
                 if (types.isEmpty()) error("make requires a type argument")
@@ -1618,15 +1628,15 @@ class TypeChecker {
                 }
                 listOf(type)
             }
-            "new" -> { requireCount(name, args, 1); listOf(PointerGoType(types[0])) }
+            "new" -> { requireCount(name, args, 1, types.size); listOf(PointerGoType(types[0])) }
             "close" -> {
-                requireCount(name, args, 1)
+                requireCount(name, args, 1, types.size)
                 val channel = underlying(types[0]) as? ChannelGoType ?: error("close requires channel")
                 if (channel.direction == ChannelDirection.RECEIVE_ONLY) error("cannot close receive-only channel")
                 emptyList()
             }
             "len", "cap" -> {
-                requireCount(name, args, 1)
+                requireCount(name, args, 1, types.size)
                 val type = underlying(types[0])
                 val string = type is NamedGoType && type.name == "string"
                 val pointerToArray = type is PointerGoType && underlying(type.element) is ArrayGoType
@@ -1647,7 +1657,7 @@ class TypeChecker {
                 listOf(types[0])
             }
             "copy" -> {
-                requireCount(name, args, 2)
+                requireCount(name, args, 2, types.size)
                 val destination = underlying(types[0])
                 val source = underlying(types[1])
                 when {
@@ -1662,13 +1672,13 @@ class TypeChecker {
                 listOf(intType)
             }
             "delete" -> {
-                requireCount(name, args, 2)
+                requireCount(name, args, 2, types.size)
                 val map = underlying(types[0]) as? MapGoType ?: error("delete requires a map")
-                requireAssignable(types[1], map.key, "delete key", args[1], scope)
+                requireAssignable(types[1], map.key, "delete key", args.getOrNull(1), scope)
                 emptyList()
             }
             "complex" -> {
-                requireCount(name, args, 2)
+                requireCount(name, args, 2, types.size)
                 if (types.any { !isFloatArgument(it) }) error("complex arguments must be floating-point values")
                 val first = types[0]
                 val second = types[1]
@@ -1682,7 +1692,7 @@ class TypeChecker {
                 })
             }
             "real", "imag" -> {
-                requireCount(name, args, 1)
+                requireCount(name, args, 1, types.size)
                 val type = types.single()
                 if (type == untypedComplex) listOf(untypedFloat)
                 else when (underlying(type)) {
@@ -2426,7 +2436,9 @@ class TypeChecker {
             (scope.typeBinding(target.name) != null || isBuiltinType(target.name) || target.name in typeDeclarations)
         else -> false
     }
-    private fun requireCount(name: String, args: List<Expression>, count: Int) { if (args.size != count) error("$name expects $count arguments") }
+    private fun requireCount(name: String, args: List<Expression>, count: Int, actualCount: Int = args.size) {
+        if (actualCount != count) error("$name expects $count arguments")
+    }
     private fun compoundOperator(operator: TokenKind) = when (operator) {
         TokenKind.ADD_ASSIGN -> TokenKind.ADD; TokenKind.SUB_ASSIGN -> TokenKind.SUB; TokenKind.MUL_ASSIGN -> TokenKind.MUL
         TokenKind.QUO_ASSIGN -> TokenKind.QUO; TokenKind.REM_ASSIGN -> TokenKind.REM; TokenKind.AND_ASSIGN -> TokenKind.AND

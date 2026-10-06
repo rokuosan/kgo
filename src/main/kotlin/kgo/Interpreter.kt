@@ -323,14 +323,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val call = statement.call.unparenthesized() as? CallExpression
                     ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
+                val arguments = evaluateCallArguments(call, env)
                 goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState(), environment = env) }
             }
             is DeferStatement -> {
                 val call = statement.call.unparenthesized() as? CallExpression
                     ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
+                val arguments = evaluateCallArguments(call, env)
                 env.defer { call(target, arguments, call.expandLastArgument, env.panicState, deferredCall = true, environment = env) }
             }
             is BranchStatement -> when (statement.kind) {
@@ -1307,7 +1307,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             staticRangeArrayLength(call.arguments.single(), env)?.let { return it.toLong() }
         }
         val target = evaluate(call.function, env)
-        val rawArgs = call.arguments.map { copyValue(evaluate(it, env)) }
+        val rawArgs = evaluateCallArguments(call, env)
         val parameterTypes = when (target) {
             is FunctionValue -> target.function.parameterTypes
             is MethodValue -> target.function.parameterTypes
@@ -1321,6 +1321,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 defaultRuneValue(value, call.arguments.getOrNull(index), env) else value
         }
         return call(target, args, call.expandLastArgument, env.panicState, environment = env)
+    }
+
+    private suspend fun evaluateCallArguments(call: CallExpression, env: Environment): List<Any?> {
+        if (!call.expandLastArgument && call.arguments.size == 1) {
+            val value = evaluate(call.arguments.single(), env)
+            if (value is GoMultiValue) return value.values.map(::copyValue)
+            return listOf(copyValue(value))
+        }
+        return call.arguments.map { copyValue(evaluate(it, env)) }
     }
 
     private fun runtimeTypeConversion(call: CallExpression, env: Environment): GoTypeSyntax? = when (val target = call.function) {
