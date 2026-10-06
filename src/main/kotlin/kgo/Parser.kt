@@ -7,6 +7,7 @@ class ParseError(message: String, val position: Position) : RuntimeException(
 /** Recursive-descent parser for the executable Go 1.0 core. */
 class Parser(private val tokens: List<Token>) {
     private var index = 0
+    private var allowCompositeLiteral = true
 
     fun parseFile(): GoFile {
         expect(TokenKind.PACKAGE)
@@ -162,7 +163,7 @@ class Parser(private val tokens: List<Token>) {
         val type = if (typeStart(current().kind) && !at(TokenKind.DEFINE) && !at(TokenKind.ASSIGN)) parseType() else null
         val values = if (match(TokenKind.DEFINE) || match(TokenKind.ASSIGN)) expressionList() else emptyList()
         if (type == null && values.isEmpty()) fail("expected a type or initializer")
-        return VariableStatement(names, values)
+        return VariableStatement(names, values, type)
     }
 
     private fun parseNameList(): List<String> {
@@ -203,10 +204,10 @@ class Parser(private val tokens: List<Token>) {
         var init: Statement? = null
         var tag: Expression? = null
         if (!at(TokenKind.LBRACE)) {
-            val first = parseSimpleStatement()
+            val first = expressionHeader { parseSimpleStatement() }
             if (match(TokenKind.SEMICOLON)) {
                 init = first
-                if (!at(TokenKind.LBRACE)) tag = expression()
+                if (!at(TokenKind.LBRACE)) tag = expressionHeader { expression() }
             } else {
                 tag = asExpression(first)
             }
@@ -259,12 +260,12 @@ class Parser(private val tokens: List<Token>) {
     }
 
     private fun parseIf(): IfStatement {
-        val first = parseSimpleStatement()
+        val first = expressionHeader { parseSimpleStatement() }
         val init: Statement?
         val condition: Expression
         if (match(TokenKind.SEMICOLON)) {
             init = first
-            condition = expression()
+            condition = expressionHeader { expression() }
         } else {
             init = null
             condition = asExpression(first)
@@ -279,30 +280,30 @@ class Parser(private val tokens: List<Token>) {
     private fun parseFor(): ForStatement {
         if (at(TokenKind.LBRACE)) return ForStatement(null, null, null, parseBlock())
         if (match(TokenKind.RANGE)) {
-            val expression = expression()
+            val expression = expressionHeader { expression() }
             return ForStatement(null, null, null, parseBlock(), RangeClause(emptyList(), null, expression))
         }
         if (match(TokenKind.SEMICOLON)) {
-            val condition = if (at(TokenKind.SEMICOLON)) null else expression()
+            val condition = if (at(TokenKind.SEMICOLON)) null else expressionHeader { expression() }
             expect(TokenKind.SEMICOLON)
             val post = if (at(TokenKind.LBRACE)) null else parseSimpleStatement()
             return ForStatement(null, condition, post, parseBlock())
         }
         val start = index
-        val possibleTargets = expressionList()
+        val possibleTargets = expressionHeader { expressionList() }
         val possibleOperator = if (current().kind == TokenKind.DEFINE || current().kind == TokenKind.ASSIGN) take().kind else null
         if (possibleOperator != null && match(TokenKind.RANGE)) {
-            val expression = expression()
+            val expression = expressionHeader { expression() }
             return ForStatement(null, null, null, parseBlock(), RangeClause(possibleTargets, possibleOperator, expression))
         }
         if (possibleOperator == null && match(TokenKind.RANGE)) {
-            val expression = expression()
+            val expression = expressionHeader { expression() }
             return ForStatement(null, null, null, parseBlock(), RangeClause(possibleTargets, null, expression))
         }
         index = start
-        val first = parseSimpleStatement()
+        val first = expressionHeader { parseSimpleStatement() }
         if (match(TokenKind.SEMICOLON)) {
-            val condition = if (at(TokenKind.SEMICOLON)) null else expression()
+            val condition = if (at(TokenKind.SEMICOLON)) null else expressionHeader { expression() }
             expect(TokenKind.SEMICOLON)
             val post = if (at(TokenKind.LBRACE)) null else parseSimpleStatement()
             return ForStatement(first, condition, post, parseBlock())
@@ -347,24 +348,72 @@ class Parser(private val tokens: List<Token>) {
 
     private fun primary(): Expression {
         var expr: Expression = when (current().kind) {
-            TokenKind.IDENT -> NameExpression(take().lexeme)
+            TokenKind.IDENT -> {
+                val name = take().lexeme
+                if (allowCompositeLiteral && at(TokenKind.PERIOD) && tokens.getOrNull(index + 1)?.kind == TokenKind.IDENT) {
+                    take()
+                    val typeName = take().lexeme
+                    if (at(TokenKind.LBRACE)) parseCompositeLiteral(QualifiedGoType(name, typeName))
+                    else SelectorExpression(NameExpression(name), typeName)
+                } else if (allowCompositeLiteral && at(TokenKind.LBRACE)) parseCompositeLiteral(NamedGoType(name))
+                else NameExpression(name)
+            }
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING -> LiteralExpression(take())
-            TokenKind.CHAN, TokenKind.ARROW, TokenKind.MUL, TokenKind.LBRACK -> TypeExpression(parseType())
-            TokenKind.LPAREN -> { take(); val inner = expression(); expect(TokenKind.RPAREN); ParenthesizedExpression(inner) }
+            TokenKind.CHAN, TokenKind.ARROW, TokenKind.MUL, TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT -> {
+                val type = parseType()
+                if (allowCompositeLiteral && at(TokenKind.LBRACE)) parseCompositeLiteral(type) else TypeExpression(type)
+            }
+            TokenKind.LPAREN -> { take(); val inner = expressionWithComposite { expression() }; expect(TokenKind.RPAREN); ParenthesizedExpression(inner) }
             else -> fail("expected expression")
         }
         while (true) {
             expr = when {
                 match(TokenKind.PERIOD) -> SelectorExpression(expr, expect(TokenKind.IDENT).lexeme)
-                match(TokenKind.LBRACK) -> { val i = expression(); expect(TokenKind.RBRACK); IndexExpression(expr, i) }
+                match(TokenKind.LBRACK) -> {
+                    val low = if (at(TokenKind.COLON) || at(TokenKind.RBRACK)) null else expression()
+                    if (match(TokenKind.COLON)) {
+                        val high = if (at(TokenKind.COLON) || at(TokenKind.RBRACK)) null else expression()
+                        val max = if (match(TokenKind.COLON)) expression() else null
+                        expect(TokenKind.RBRACK)
+                        SliceExpression(expr, low, high, max)
+                    } else {
+                        expect(TokenKind.RBRACK)
+                        IndexExpression(expr, low ?: fail("missing index expression"))
+                    }
+                }
                 match(TokenKind.LPAREN) -> {
-                    val args = if (at(TokenKind.RPAREN)) emptyList() else expressionList()
+                    val args = if (at(TokenKind.RPAREN)) emptyList() else expressionWithComposite { expressionList() }
                     expect(TokenKind.RPAREN)
                     CallExpression(expr, args)
                 }
                 else -> return expr
             }
         }
+    }
+
+    private fun parseCompositeLiteral(type: GoTypeSyntax): CompositeLiteral {
+        expect(TokenKind.LBRACE)
+        val elements = mutableListOf<CompositeElement>()
+        while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+            val first = expression()
+            if (match(TokenKind.COLON)) elements += CompositeElement(first, expression())
+            else elements += CompositeElement(null, first)
+            if (!match(TokenKind.COMMA) && !at(TokenKind.RBRACE)) fail("expected ',' or '}' in composite literal")
+        }
+        expect(TokenKind.RBRACE)
+        return CompositeLiteral(type, elements)
+    }
+
+    private fun <T> expressionHeader(block: () -> T): T {
+        return withCompositeLiterals(false, block)
+    }
+
+    private fun <T> expressionWithComposite(block: () -> T): T = withCompositeLiterals(true, block)
+
+    private fun <T> withCompositeLiterals(enabled: Boolean, block: () -> T): T {
+        val previous = allowCompositeLiteral
+        allowCompositeLiteral = enabled
+        return try { block() } finally { allowCompositeLiteral = previous }
     }
 
     private fun parseType(): GoTypeSyntax = when {
@@ -397,7 +446,10 @@ class Parser(private val tokens: List<Token>) {
             val parameters = parseParameters()
             FunctionGoType(parameters, parseResults())
         }
-        at(TokenKind.IDENT) -> NamedGoType(take().lexeme)
+        at(TokenKind.IDENT) -> {
+            val name = take().lexeme
+            if (match(TokenKind.PERIOD)) QualifiedGoType(name, expect(TokenKind.IDENT).lexeme) else NamedGoType(name)
+        }
         else -> fail("expected type")
     }
 

@@ -23,7 +23,7 @@ data class ImportDeclaration(val paths: List<String>) : Declaration
 
 sealed interface Statement
 data class BlockStatement(val statements: List<Statement>) : Statement
-data class VariableStatement(val names: List<String>, val values: List<Expression>) : Statement
+data class VariableStatement(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Statement
 data class ReturnStatement(val values: List<Expression>) : Statement
 data class ExpressionStatement(val expression: Expression) : Statement
 data class SendStatement(val channel: Expression, val value: Expression) : Statement
@@ -64,14 +64,18 @@ data class BinaryExpression(val left: Expression, val operator: TokenKind, val r
 data class CallExpression(val function: Expression, val arguments: List<Expression>) : Expression
 data class SelectorExpression(val receiver: Expression, val field: String) : Expression
 data class IndexExpression(val receiver: Expression, val index: Expression) : Expression
+data class SliceExpression(val receiver: Expression, val low: Expression?, val high: Expression?, val max: Expression? = null) : Expression
 data class ParenthesizedExpression(val expression: Expression) : Expression
 data class TypeExpression(val type: GoTypeSyntax) : Expression
+data class CompositeLiteral(val type: GoTypeSyntax, val elements: List<CompositeElement>) : Expression
+data class CompositeElement(val key: Expression?, val value: Expression)
 
 sealed interface GoTypeSyntax
 data class ParameterSyntax(val name: String?, val type: GoTypeSyntax, val variadic: Boolean = false)
 data class StructFieldSyntax(val names: List<String>, val type: GoTypeSyntax, val tag: String? = null)
 data class InterfaceMethodSyntax(val name: String, val parameters: List<ParameterSyntax>, val results: List<GoTypeSyntax>)
 data class NamedGoType(val name: String) : GoTypeSyntax
+data class QualifiedGoType(val packageName: String, val name: String) : GoTypeSyntax
 data class PointerGoType(val element: GoTypeSyntax) : GoTypeSyntax
 data class SliceGoType(val element: GoTypeSyntax) : GoTypeSyntax
 data class ArrayGoType(val length: Expression, val element: GoTypeSyntax) : GoTypeSyntax
