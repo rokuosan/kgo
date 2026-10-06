@@ -410,7 +410,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
-        val value = copyValue(evaluate(range.expression, env))
+        val evaluated = copyValue(evaluate(range.expression, env))
+        val value = if (evaluated is GoPointer &&
+            (evaluated.pointeeType?.let { underlying(it) is ArrayGoType } == true || (!evaluated.isNil && evaluated.get() is GoArray)))
+            copyValue(evaluated.get()) else evaluated
         when (value) {
             is GoChannel -> while (true) {
                 val received = value.receive()
