@@ -11,6 +11,7 @@ class TypeChecker {
     private val packagePaths = linkedMapOf<String, String>()
     private val globals = Scope()
     private var resultTypes: List<GoTypeSyntax> = emptyList()
+    private var functionLabels: Map<String, Statement> = emptyMap()
 
     fun check(file: GoFile) {
         for (declaration in file.declarations) when (declaration) {
@@ -91,8 +92,13 @@ class TypeChecker {
         }
         function.resultTypes.forEach(::validateType)
         val previousResults = resultTypes
+        val previousLabels = functionLabels
         resultTypes = function.resultTypes
-        try { checkBlock(function.body, scope) } finally { resultTypes = previousResults }
+        functionLabels = collectLabels(function.body)
+        try { checkBlock(function.body, scope) } finally {
+            resultTypes = previousResults
+            functionLabels = previousLabels
+        }
     }
 
     private fun checkBlock(block: BlockStatement, parent: Scope) {
@@ -100,9 +106,42 @@ class TypeChecker {
         block.statements.forEach { checkStatement(it, scope) }
     }
 
+    private fun collectLabels(body: BlockStatement): Map<String, Statement> {
+        val labels = linkedMapOf<String, Statement>()
+        fun visit(statement: Statement) {
+            when (statement) {
+                is LabeledStatement -> {
+                    if (labels.putIfAbsent(statement.label, statement.statement) != null) error("label ${statement.label} redeclared")
+                    visit(statement.statement)
+                }
+                is BlockStatement -> statement.statements.forEach(::visit)
+                is IfStatement -> {
+                    statement.init?.let(::visit); visit(statement.thenBranch); statement.elseBranch?.let(::visit)
+                }
+                is ForStatement -> {
+                    statement.init?.let(::visit); statement.post?.let(::visit); visit(statement.body)
+                }
+                is SwitchStatement -> {
+                    statement.init?.let(::visit)
+                    statement.clauses.flatMap { it.statements }.forEach(::visit)
+                }
+                is SelectStatement -> statement.cases.forEach { clause ->
+                    clause.communication?.let(::visit); clause.statements.forEach(::visit)
+                }
+                else -> Unit
+            }
+        }
+        body.statements.forEach(::visit)
+        return labels
+    }
+
+    private fun unwrapLabels(statement: Statement): Statement =
+        if (statement is LabeledStatement) unwrapLabels(statement.statement) else statement
+
     private fun checkStatement(statement: Statement, scope: Scope) {
         when (statement) {
             EmptyStatement -> Unit
+            is LabeledStatement -> checkStatement(statement.statement, scope)
             is DeclarationStatement -> statement.declarations.forEach { declaration ->
                 when (declaration) {
                     is VariableDeclaration -> {
@@ -173,9 +212,15 @@ class TypeChecker {
             is SendStatement -> checkSend(statement, scope)
             is GoStatement -> requireCall(statement.call, scope, "go")
             is DeferStatement -> requireCall(statement.call, scope, "defer")
-            is BranchStatement -> when (statement.kind) {
-                TokenKind.FALLTHROUGH -> Unit
-                else -> Unit // Target validation is performed after labeled statements are represented.
+            is BranchStatement -> if (statement.label != null) {
+                val target = functionLabels[statement.label] ?: error("undefined label ${statement.label}")
+                val destination = unwrapLabels(target)
+                when (statement.kind) {
+                    TokenKind.BREAK -> if (destination !is ForStatement && destination !is SwitchStatement && destination !is SelectStatement)
+                        error("invalid break label ${statement.label}")
+                    TokenKind.CONTINUE -> if (destination !is ForStatement) error("invalid continue label ${statement.label}")
+                    else -> error("label is not valid on ${statement.kind}")
+                }
             }
             is SelectStatement -> checkSelect(statement, scope)
             is SwitchStatement -> checkSwitch(statement, scope)
@@ -338,8 +383,13 @@ class TypeChecker {
             }
             expression.results.forEach(::validateType)
             val previousResults = resultTypes
+            val previousLabels = functionLabels
             resultTypes = expression.results
-            try { checkBlock(expression.body, literalScope) } finally { resultTypes = previousResults }
+            functionLabels = collectLabels(expression.body)
+            try { checkBlock(expression.body, literalScope) } finally {
+                resultTypes = previousResults
+                functionLabels = previousLabels
+            }
             FunctionGoType(expression.parameters, expression.results)
         }
         is UnaryExpression -> {

@@ -198,7 +198,13 @@ class Parser(private val tokens: List<Token>) {
         return BlockStatement(statements)
     }
 
-    private fun parseStatement(): Statement = when {
+    private fun parseStatement(): Statement {
+        if (at(TokenKind.IDENT) && tokens.getOrNull(index + 1)?.kind == TokenKind.COLON) {
+            val label = take().lexeme
+            take()
+            return LabeledStatement(label, parseStatement())
+        }
+        return when {
         at(TokenKind.LBRACE) -> parseBlock()
         match(TokenKind.RETURN) -> ReturnStatement(if (at(TokenKind.SEMICOLON) || at(TokenKind.RBRACE)) emptyList() else expressionList())
         match(TokenKind.VAR) -> DeclarationStatement(parseVariables())
@@ -214,6 +220,7 @@ class Parser(private val tokens: List<Token>) {
         match(TokenKind.SELECT) -> parseSelect()
         match(TokenKind.SWITCH) -> parseSwitch()
         else -> parseSimpleStatement()
+        }
     }
 
     private fun parseSwitch(): SwitchStatement {

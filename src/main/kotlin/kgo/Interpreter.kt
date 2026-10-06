@@ -96,9 +96,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         for (statement in block.statements) execute(statement, env)
     }
 
-    private suspend fun execute(statement: Statement, env: Environment) {
+    private suspend fun execute(statement: Statement, env: Environment, labels: Set<String> = emptySet()) {
         when (statement) {
             EmptyStatement -> Unit
+            is LabeledStatement -> execute(statement.statement, env, labels + statement.label)
             is DeclarationStatement -> statement.declarations.forEach { declaration ->
                 when (declaration) {
                     is VariableDeclaration -> initialize(declaration.names, declaration.values, env, declaration.type)
@@ -125,13 +126,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is ForStatement -> {
                 val scope = env.child()
                 if (statement.rangeClause != null) {
-                    executeRange(statement.rangeClause, statement.body, scope)
+                    executeRange(statement.rangeClause, statement.body, scope, labels)
                 } else {
                     statement.init?.let { execute(it, scope) }
                     while (statement.condition == null || truth(evaluate(statement.condition, scope))) {
                         try { executeBlock(statement.body, scope) }
-                        catch (_: ContinueSignal) { }
-                        catch (_: BreakSignal) { break }
+                        catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
+                        catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
                         statement.post?.let { execute(it, scope) }
                     }
                 }
@@ -153,15 +154,17 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 env.defer { call(target, arguments, call.expandLastArgument) }
             }
             is BranchStatement -> when (statement.kind) {
-                TokenKind.BREAK -> throw BreakSignal()
-                TokenKind.CONTINUE -> throw ContinueSignal()
+                TokenKind.BREAK -> throw BreakSignal(statement.label)
+                TokenKind.CONTINUE -> throw ContinueSignal(statement.label)
                 TokenKind.FALLTHROUGH -> throw FallthroughSignal()
                 else -> throw RuntimeGoError("invalid branch statement")
             }
-            is SelectStatement -> executeSelect(statement, env)
-            is SwitchStatement -> executeSwitch(statement, env)
+            is SelectStatement -> executeSelect(statement, env, labels)
+            is SwitchStatement -> executeSwitch(statement, env, labels)
         }
     }
+
+    private fun targets(label: String?, labels: Set<String>) = label == null || label in labels
 
     private suspend fun assign(statement: AssignmentStatement, env: Environment) {
         val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
@@ -223,7 +226,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
     }
 
-    private suspend fun executeSelect(statement: SelectStatement, env: Environment) {
+    private suspend fun executeSelect(statement: SelectStatement, env: Environment, labels: Set<String>) {
         val operations = statement.cases.mapIndexedNotNull { caseIndex, clause ->
             when (val communication = clause.communication) {
                 null -> null
@@ -250,18 +253,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         for (operation in operations.shuffled()) {
             when (operation) {
                 is SelectSend -> if (operation.channel.trySend(operation.value)) {
-                    executeSelectedCase(statement.cases[operation.caseIndex], env)
+                    executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
                     return
                 }
                 is SelectReceive -> operation.channel.tryReceive()?.let { received ->
                     operation.assignment?.let { assignValues(it.targets, it.operator, expandValues(listOf(received), it.targets.size), env) }
-                    executeSelectedCase(statement.cases[operation.caseIndex], env)
+                    executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
                     return
                 }
             }
         }
         if (defaultIndex >= 0) {
-            executeSelectedCase(statement.cases[defaultIndex], env)
+            executeSelectedCase(statement.cases[defaultIndex], env, labels)
             return
         }
         val selected = selectUnbiased<SelectSelection> {
@@ -280,15 +283,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             assignValues(receive.assignment.targets, receive.assignment.operator,
                 expandValues(listOf(selected.received), receive.assignment.targets.size), env)
         }
-        executeSelectedCase(clause, env)
+        executeSelectedCase(clause, env, labels)
     }
 
-    private suspend fun executeSelectedCase(clause: SelectCase, env: Environment) {
+    private suspend fun executeSelectedCase(clause: SelectCase, env: Environment, labels: Set<String>) {
         try { for (statement in clause.statements) execute(statement, env) }
-        catch (_: BreakSignal) { }
+        catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal }
     }
 
-    private suspend fun executeSwitch(statement: SwitchStatement, env: Environment) {
+    private suspend fun executeSwitch(statement: SwitchStatement, env: Environment, labels: Set<String>) {
         val scope = env.child()
         statement.init?.let { execute(it, scope) }
         val tag = statement.tag?.let { evaluate(it, scope) } ?: true
@@ -309,13 +312,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             } catch (_: FallthroughSignal) {
                 if (index == statement.clauses.lastIndex) throw RuntimeGoError("fallthrough in final switch clause")
                 index++
-            } catch (_: BreakSignal) {
+            } catch (signal: BreakSignal) {
+                if (!targets(signal.label, labels)) throw signal
                 return
             }
         }
     }
 
-    private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment) {
+    private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
         val value = evaluate(range.expression, env)
         when (value) {
             is GoChannel -> while (true) {
@@ -326,8 +330,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env)
                 }
                 try { executeBlock(body, env) }
-                catch (_: ContinueSignal) { }
-                catch (_: BreakSignal) { break }
+                catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
+                catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
             }
             is String -> {
                 var byteIndex = 0L
@@ -339,21 +343,21 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                         assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env)
                     }
                     try { executeBlock(body, env) }
-                    catch (_: ContinueSignal) { }
-                    catch (_: BreakSignal) { break }
+                    catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
+                    catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
                     byteIndex += when { cp <= 0x7f -> 1; cp <= 0x7ff -> 2; cp <= 0xffff -> 3; else -> 4 }
                     charIndex += Character.charCount(cp)
                 }
             }
-            is GoSlice -> rangeIndexed(value.length, range, body, env) { i -> listOf(i.toLong(), value.get(i)) }
-            is GoArray -> rangeIndexed(value.values.size, range, body, env) { i -> listOf(i.toLong(), value.values[i]) }
+            is GoSlice -> rangeIndexed(value.length, range, body, env, labels) { i -> listOf(i.toLong(), value.get(i)) }
+            is GoArray -> rangeIndexed(value.values.size, range, body, env, labels) { i -> listOf(i.toLong(), value.values[i]) }
             is GoMap -> {
                 for ((key, entryValue) in value.values.entries.toList()) {
                     if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
                         listOf(key, entryValue).take(range.targets.size), env)
                     try { executeBlock(body, env) }
-                    catch (_: ContinueSignal) { }
-                    catch (_: BreakSignal) { break }
+                    catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
+                    catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
                 }
             }
             else -> throw RuntimeGoError("range over this value is not implemented")
@@ -365,13 +369,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         range: RangeClause,
         body: BlockStatement,
         env: Environment,
+        labels: Set<String>,
         values: (Int) -> List<Any?>
     ) {
         for (i in 0 until length) {
             if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values(i).take(range.targets.size), env)
             try { executeBlock(body, env) }
-            catch (_: ContinueSignal) { }
-            catch (_: BreakSignal) { break }
+            catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
+            catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
         }
     }
 
@@ -1012,8 +1017,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun len() = if (capacity == 0) 0L else buffered.get().toLong()
     }
     private class ReturnSignal(val values: List<Any?>) : RuntimeException(null, null, false, false)
-    private class BreakSignal : RuntimeException(null, null, false, false)
-    private class ContinueSignal : RuntimeException(null, null, false, false)
+    private class BreakSignal(val label: String?) : RuntimeException(null, null, false, false)
+    private class ContinueSignal(val label: String?) : RuntimeException(null, null, false, false)
     private class FallthroughSignal : RuntimeException(null, null, false, false)
 
     companion object {

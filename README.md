@@ -11,6 +11,8 @@ implemented in the runtime subset. Named struct methods support value and pointe
 receivers for the implemented runtime types.
 Function literals capture their surrounding variables, and variadic functions
 accept both individual arguments and slice expansion with `...`.
+Labeled `break` and `continue` statements can target enclosing loops and
+switch/select statements as permitted by their branch kind.
 Goroutines use `kotlinx.coroutines`; channel operations suspend through Kotlin
 channels. The `fmt` calls are a small runtime shim, not the Go standard library.
 Before execution, a static checker validates function signatures, declared

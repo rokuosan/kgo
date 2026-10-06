@@ -27,6 +27,7 @@ data class ImportDeclaration(val imports: List<ImportSpecSyntax>) : Declaration 
 
 sealed interface Statement
 data class DeclarationStatement(val declarations: List<Declaration>) : Statement
+data class LabeledStatement(val label: String, val statement: Statement) : Statement
 data class BlockStatement(val statements: List<Statement>) : Statement
 data class VariableStatement(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Statement
 data class ReturnStatement(val values: List<Expression>) : Statement
