@@ -637,7 +637,7 @@ class TypeChecker {
             }
             is ReturnStatement -> {
                 if (statement.values.isNotEmpty() || resultTypes.isEmpty() || resultNames.any { it == null }) {
-                    val values = expressionTypes(statement.values, resultTypes.size, scope)
+                    val values = returnExpressionTypes(statement.values, scope)
                     if (values.size != resultTypes.size) error("return has ${values.size} values, want ${resultTypes.size}")
                     values.zip(resultTypes).forEachIndexed { i, (from, to) ->
                         requireAssignable(from, to, "return", statement.values.getOrNull(i), scope)
@@ -1057,6 +1057,13 @@ class TypeChecker {
                 if (map != null) return listOf(map.value, boolType)
             }
         }
+        return expressions.map { expressionType(it, scope) }
+    }
+
+    private fun returnExpressionTypes(expressions: List<Expression>, scope: Scope): List<GoTypeSyntax> {
+        val call = expressions.singleOrNull() as? CallExpression
+        val callResults = call?.let { callResults(it, scope) }
+        if (callResults != null && callResults.size > 1) return callResults
         return expressions.map { expressionType(it, scope) }
     }
 
