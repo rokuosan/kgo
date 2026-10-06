@@ -17,6 +17,7 @@ class RuntimeGoError(message: String) : RuntimeException(message)
 /** Runtime for the currently implemented Go 1.0 execution subset. */
 class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private val functions = mutableMapOf<String, FunctionDeclaration>()
+    private val methods = mutableMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val globals = Environment()
     private val typeDefinitions = mutableMapOf<String, GoTypeSyntax>()
@@ -27,7 +28,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             goroutines = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             try {
                 file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
-                    if (function.name == "init") initFunctions += function else functions[function.name] = function
+                    if (function.receiver != null) methods[methodKey(function.receiver.type, function.name)] = function
+                    else if (function.name == "init") initFunctions += function
+                    else functions[function.name] = function
                 }
                 file.declarations.filterIsInstance<TypeDeclaration>().forEach { typeDefinitions[it.name] = it.type }
                 file.declarations.forEach { declaration ->
@@ -48,11 +51,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
     }
 
-    private suspend fun invoke(function: FunctionDeclaration, arguments: List<Any?>): List<Any?> {
+    private suspend fun invoke(function: FunctionDeclaration, arguments: List<Any?>, receiver: Any? = null): List<Any?> {
         if (function.parameters.size != arguments.size) {
             throw RuntimeGoError("${function.name} expects ${function.parameters.size} arguments, got ${arguments.size}")
         }
         val env = Environment(globals)
+        function.receiver?.let { env.define(it.name ?: "", receiver) }
         function.parameters.zip(arguments).forEach { (name, value) -> env.define(name, value) }
         return try {
             executeBlock(function.body, env)
@@ -78,9 +82,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is ExpressionStatement -> evaluate(statement.expression, env)
             is AssignmentStatement -> assign(statement, env)
             is IncrementStatement -> {
-                val name = (statement.target as? NameExpression)?.name ?: throw RuntimeGoError("increment target must be a variable")
-                val old = number(env.get(name), name)
-                env.set(name, old + statement.delta)
+                val old = number(readTarget(statement.target, env), "increment")
+                writeTarget(statement.target, old + statement.delta, env)
             }
             is IfStatement -> {
                 val scope = env.child()
@@ -174,7 +177,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             is SelectorExpression -> {
                 val receiver = evaluate(target.receiver, env)
-                val struct = receiver as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
+                val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
                 if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
                 struct.fields[target.field] = value
             }
@@ -377,7 +380,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         is LiteralExpression -> literal(expression.token)
         is ParenthesizedExpression -> evaluate(expression.expression, env)
-        is UnaryExpression -> unary(expression.operator, evaluate(expression.operand, env))
+        is UnaryExpression -> when (expression.operator) {
+            TokenKind.AND -> GoPointer(evaluate(expression.operand, env))
+            TokenKind.MUL -> dereference(evaluate(expression.operand, env))
+            else -> unary(expression.operator, evaluate(expression.operand, env))
+        }
         is BinaryExpression -> {
             val left = evaluate(expression.left, env)
             if (expression.operator == TokenKind.LAND && left == false) false
@@ -388,9 +395,20 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             if (expression.receiver is NameExpression && expression.receiver.name == "fmt") BuiltinValue(expression.field)
             else {
                 val receiver = evaluate(expression.receiver, env)
-                val struct = receiver as? GoStruct ?: throw RuntimeGoError("selector is not defined for this value")
-                if (!struct.fields.containsKey(expression.field)) throw RuntimeGoError("unknown struct field: ${expression.field}")
-                struct.fields[expression.field]
+                val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector is not defined for this value")
+                if (struct.fields.containsKey(expression.field)) struct.fields[expression.field]
+                else {
+                    val method = methods["${struct.namedType}.${expression.field}"]
+                        ?: throw RuntimeGoError("unknown struct field or method: ${expression.field}")
+                    val pointerReceiver = method.receiver?.type is PointerGoType
+                    val boundReceiver = when {
+                        pointerReceiver && receiver is GoPointer -> receiver
+                        pointerReceiver -> GoPointer(receiver)
+                        receiver is GoPointer -> copyValue(dereference(receiver))
+                        else -> copyValue(receiver)
+                    }
+                    MethodValue(method, boundReceiver)
+                }
             }
         }
         is CallExpression -> call(expression, env)
@@ -411,6 +429,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         when (target) {
             is FunctionValue -> {
                 val values = invoke(functions[target.name] ?: throw RuntimeGoError("undefined function ${target.name}"), args)
+                return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
+            }
+            is MethodValue -> {
+                val values = invoke(target.function, args, target.receiver)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
             is BuiltinValue -> when (target.name) {
@@ -493,7 +515,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     if (name == null || name !in fields) throw RuntimeGoError("unknown struct literal field")
                     fields[name] = evaluate(element.value, env)
                 }
-                GoStruct(fields)
+                GoStruct(fields, (literal.type as? NamedGoType)?.name)
             }
             else -> throw RuntimeGoError("composite literal for this type is not implemented")
         }
@@ -502,6 +524,19 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: type
         else -> type
+    }
+
+    private fun methodKey(type: GoTypeSyntax, name: String): String {
+        val base = if (type is PointerGoType) type.element else type
+        return "${(base as? NamedGoType)?.name ?: base}.$name"
+    }
+
+    private fun dereference(value: Any?): Any? = if (value is GoPointer) value.value else value
+
+    private fun copyValue(value: Any?): Any? = when (value) {
+        is GoStruct -> GoStruct(value.fields.toMutableMap(), value.namedType)
+        is GoArray -> GoArray(value.elementType, value.values.toMutableList())
+        else -> value
     }
 
     private fun index(receiver: Any?, rawIndex: Any?): Any? {
@@ -665,7 +700,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val names = field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
                 names.filter { it.isNotEmpty() }.forEach { fields[it] = zeroValue(field.type) }
             }
-            GoStruct(fields)
+            GoStruct(fields, (type as? NamedGoType)?.name)
         }
         else -> null
     }
@@ -789,6 +824,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private data class FunctionValue(val name: String)
     private data class BuiltinValue(val name: String)
     private data class TypeValue(val type: GoTypeSyntax)
+    private data class MethodValue(val function: FunctionDeclaration, val receiver: Any?)
     private data class GoMultiValue(val values: List<Any?>)
     private data class GoReceiveResult(val value: Any?, val ok: Boolean)
     private data class MapLookupResult(val value: Any?, val ok: Boolean)
@@ -824,7 +860,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun toList(): List<Any?> = (0 until length).map(::get)
     }
     private class GoMap(val keyType: GoTypeSyntax, val valueType: GoTypeSyntax, val elementZero: Any?, val values: MutableMap<Any?, Any?>)
-    private class GoStruct(val fields: MutableMap<String, Any?>)
+    private class GoStruct(val fields: MutableMap<String, Any?>, val namedType: String? = null)
+    private class GoPointer(var value: Any?)
     private class GoChannel(private val elementZero: Any?, val capacity: Int) {
         val queue = Channel<Any?>(capacity)
         private val buffered = AtomicInteger(0)
