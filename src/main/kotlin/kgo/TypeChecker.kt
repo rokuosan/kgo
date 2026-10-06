@@ -292,6 +292,7 @@ class TypeChecker {
         labelBlockPath = emptyList()
         blockStatementIndices = emptyMap()
         try {
+            validateBranchTargets(body)
             checkBlock(body, scope, reuseScope = true)
             if (function.resultTypes.isNotEmpty() && !endsWithTerminatingStatement(body))
                 error("missing return at end of function ${function.name}")
@@ -324,6 +325,75 @@ class TypeChecker {
             typeDeclarations.putAll(previousTypes)
             labelBlockPath = previousPath
         }
+    }
+
+    private fun validateBranchTargets(body: BlockStatement) {
+        fun visit(
+            statement: Statement,
+            loopDepth: Int,
+            breakDepth: Int,
+            loopLabels: Set<String>,
+            breakLabels: Set<String>,
+            allowFallthrough: Boolean = false
+        ) {
+            when (statement) {
+                is BranchStatement -> when (statement.kind) {
+                    TokenKind.BREAK -> if (statement.label == null) {
+                        if (breakDepth == 0) error("break is not inside a loop, switch, or select")
+                    } else if (statement.label !in breakLabels) error("invalid break label ${statement.label}")
+                    TokenKind.CONTINUE -> if (statement.label == null) {
+                        if (loopDepth == 0) error("continue is not inside a loop")
+                    } else if (statement.label !in loopLabels) error("invalid continue label ${statement.label}")
+                    TokenKind.FALLTHROUGH -> if (!allowFallthrough) error("fallthrough statement out of place")
+                    else -> Unit
+                }
+                is LabeledStatement -> {
+                    val target = statement.statement
+                    val isLoop = target is ForStatement
+                    val isBreakable = isLoop || target is SwitchStatement || target is TypeSwitchStatement || target is SelectStatement
+                    visit(target, loopDepth, breakDepth,
+                        if (isLoop) loopLabels + statement.label else loopLabels,
+                        if (isBreakable) breakLabels + statement.label else breakLabels,
+                        allowFallthrough)
+                }
+                is BlockStatement -> statement.statements.forEach {
+                    visit(it, loopDepth, breakDepth, loopLabels, breakLabels)
+                }
+                is IfStatement -> {
+                    statement.init?.let { visit(it, loopDepth, breakDepth, loopLabels, breakLabels) }
+                    visit(statement.thenBranch, loopDepth, breakDepth, loopLabels, breakLabels)
+                    statement.elseBranch?.let { visit(it, loopDepth, breakDepth, loopLabels, breakLabels) }
+                }
+                is ForStatement -> {
+                    statement.init?.let { visit(it, loopDepth, breakDepth, loopLabels, breakLabels) }
+                    statement.post?.let { visit(it, loopDepth, breakDepth, loopLabels, breakLabels) }
+                    visit(statement.body, loopDepth + 1, breakDepth + 1, loopLabels, breakLabels)
+                }
+                is SwitchStatement -> {
+                    statement.init?.let { visit(it, loopDepth, breakDepth, loopLabels, breakLabels) }
+                    statement.clauses.forEachIndexed { index, clause ->
+                        val last = clause.statements.lastOrNull { it != EmptyStatement }
+                        clause.statements.forEach { child ->
+                            val isFallthrough = index < statement.clauses.lastIndex && child === last &&
+                                (unwrapLabels(child) as? BranchStatement)?.kind == TokenKind.FALLTHROUGH
+                            visit(child, loopDepth, breakDepth + 1, loopLabels, breakLabels, isFallthrough)
+                        }
+                    }
+                }
+                is TypeSwitchStatement -> {
+                    statement.init?.let { visit(it, loopDepth, breakDepth, loopLabels, breakLabels) }
+                    statement.clauses.forEach { clause ->
+                        clause.statements.forEach { visit(it, loopDepth, breakDepth + 1, loopLabels, breakLabels) }
+                    }
+                }
+                is SelectStatement -> statement.cases.forEach { clause ->
+                    clause.communication?.let { visit(it, loopDepth, breakDepth + 1, loopLabels, breakLabels) }
+                    clause.statements.forEach { visit(it, loopDepth, breakDepth + 1, loopLabels, breakLabels) }
+                }
+                else -> Unit
+            }
+        }
+        visit(body, 0, 0, emptySet(), emptySet())
     }
 
     private fun endsWithTerminatingStatement(block: BlockStatement, labels: Set<String> = emptySet()): Boolean =
@@ -1006,6 +1076,7 @@ class TypeChecker {
             labelBlockPath = emptyList()
             blockStatementIndices = emptyMap()
             try {
+                validateBranchTargets(expression.body)
                 checkBlock(expression.body, literalScope, reuseScope = true)
                 if (results.isNotEmpty() && !endsWithTerminatingStatement(expression.body))
                     error("missing return at end of function literal")
