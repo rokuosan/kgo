@@ -503,7 +503,10 @@ class TypeChecker {
             var added = 0
             names.forEachIndexed { i, name ->
                 if (name == "_") return@forEachIndexed
-                if (scope.containsLocal(name)) requireAssignable(valueTypes[i], scope.get(name), "assignment", statement.values.getOrNull(i), scope)
+                if (scope.containsLocal(name)) {
+                    if (scope.isConstant(name)) error("cannot assign to constant $name")
+                    requireAssignable(valueTypes[i], scope.get(name), "assignment", statement.values.getOrNull(i), scope)
+                }
                 else {
                     val targetType = defaultType(valueTypes[i])
                     statement.values.getOrNull(i)?.let { requireIntegerConstantRepresentable(it, targetType, scope) }
