@@ -19,6 +19,8 @@ class Parser(private val tokens: List<Token>) {
                 match(TokenKind.IMPORT) -> declarations += parseImport()
                 match(TokenKind.FUNC) -> declarations += parseFunction()
                 match(TokenKind.VAR) -> declarations += parseVariables()
+                match(TokenKind.CONST) -> declarations += parseConstants()
+                match(TokenKind.TYPE) -> declarations += parseTypes()
                 else -> fail("expected top-level declaration")
             }
         }
@@ -44,44 +46,129 @@ class Parser(private val tokens: List<Token>) {
     }
 
     private fun parseFunction(): FunctionDeclaration {
+        val receiver = if (match(TokenKind.LPAREN)) {
+            val receiverName = expect(TokenKind.IDENT).lexeme
+            val receiverType = parseType()
+            expect(TokenKind.RPAREN)
+            ParameterSyntax(receiverName, receiverType)
+        } else null
         val name = expect(TokenKind.IDENT).lexeme
-        expect(TokenKind.LPAREN)
-        val parameters = mutableListOf<String>()
-        if (!at(TokenKind.RPAREN)) {
-            do {
-                parameters += expect(TokenKind.IDENT).lexeme
-                // Type syntax is consumed here; type checking is a later front-end layer.
-                if (at(TokenKind.IDENT)) take()
-                while (match(TokenKind.LBRACK)) { expect(TokenKind.RBRACK); if (at(TokenKind.IDENT)) take() }
-            } while (match(TokenKind.COMMA) && !at(TokenKind.RPAREN))
-        }
-        expect(TokenKind.RPAREN)
-        // Go function result types are accepted syntactically and ignored by this first AST layer.
-        if (at(TokenKind.IDENT)) take()
+        val parameters = parseParameters()
+        val results = parseResults()
         val body = parseBlock()
         optionalSemicolon()
-        return FunctionDeclaration(name, parameters, body)
+        return FunctionDeclaration(name, parameters.mapNotNull { it.name }, body, parameters.map { it.type }, results, receiver)
     }
 
-    private fun parseVariables(): VariableDeclaration {
-        val variables = parseVariableSpec()
-        return VariableDeclaration(variables.first, variables.second)
+    private fun parseParameters(): List<ParameterSyntax> {
+        expect(TokenKind.LPAREN)
+        val parameters = mutableListOf<ParameterSyntax>()
+        while (!at(TokenKind.RPAREN)) {
+            val variadic = match(TokenKind.ELLIPSIS)
+            val names = mutableListOf<String>()
+            val first = expect(TokenKind.IDENT).lexeme
+            names += first
+            while (at(TokenKind.COMMA) && isNamedParameterGroup()) {
+                take()
+                names += expect(TokenKind.IDENT).lexeme
+            }
+            val type = if (typeStart(current().kind)) parseType() else NamedGoType(first)
+            names.forEach { parameters += ParameterSyntax(it, type, variadic) }
+            if (!match(TokenKind.COMMA)) break
+        }
+        expect(TokenKind.RPAREN)
+        return parameters
+    }
+
+    private fun isNamedParameterGroup(): Boolean {
+        var look = index + 1
+        if (tokens.getOrNull(look)?.kind != TokenKind.IDENT) return false
+        look++
+        while (tokens.getOrNull(look)?.kind == TokenKind.COMMA && tokens.getOrNull(look + 1)?.kind == TokenKind.IDENT) look += 2
+        return tokens.getOrNull(look)?.kind?.let(::typeStart) == true
+    }
+
+    private fun parseResults(): List<GoTypeSyntax> {
+        if (at(TokenKind.LPAREN)) return parseParameters().map { it.type }
+        return if (typeStart(current().kind)) listOf(parseType()) else emptyList()
+    }
+
+    private fun parseVariables(): List<VariableDeclaration> {
+        if (!match(TokenKind.LPAREN)) return listOf(parseVariableSpec())
+        val declarations = mutableListOf<VariableDeclaration>()
+        while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
+            if (match(TokenKind.SEMICOLON)) continue
+            declarations += parseVariableSpec()
+        }
+        expect(TokenKind.RPAREN)
+        optionalSemicolon()
+        return declarations
+    }
+
+    private fun parseConstants(): List<ConstantDeclaration> {
+        val grouped = match(TokenKind.LPAREN)
+        val declarations = mutableListOf<ConstantDeclaration>()
+        var previousType: GoTypeSyntax? = null
+        var previousValues: List<Expression> = emptyList()
+        while (true) {
+            if (grouped && match(TokenKind.SEMICOLON)) {
+                if (at(TokenKind.RPAREN)) break
+                continue
+            }
+            val names = parseNameList()
+            var type: GoTypeSyntax? = null
+            if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) type = parseType()
+            val values = if (match(TokenKind.ASSIGN)) expressionList() else previousValues
+            if (type == null) type = previousType
+            declarations += ConstantDeclaration(names, values, type, declarations.size)
+            previousType = type
+            previousValues = values
+            if (!grouped) break
+            semicolon()
+            if (at(TokenKind.RPAREN)) break
+        }
+        if (grouped) { expect(TokenKind.RPAREN); optionalSemicolon() } else semicolon()
+        return declarations
+    }
+
+    private fun parseTypes(): List<TypeDeclaration> {
+        if (!match(TokenKind.LPAREN)) {
+            val declaration = TypeDeclaration(expect(TokenKind.IDENT).lexeme, parseType())
+            semicolon()
+            return listOf(declaration)
+        }
+        val declarations = mutableListOf<TypeDeclaration>()
+        while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
+            if (match(TokenKind.SEMICOLON)) continue
+            declarations += TypeDeclaration(expect(TokenKind.IDENT).lexeme, parseType())
+            semicolon()
+        }
+        expect(TokenKind.RPAREN)
+        optionalSemicolon()
+        return declarations
+    }
+
+    private fun parseVariableSpec(): VariableDeclaration {
+        val names = parseNameList()
+        val type = if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) parseType() else null
+        val values = if (match(TokenKind.ASSIGN)) expressionList() else emptyList()
+        if (type == null && values.isEmpty()) fail("expected a type or initializer")
+        semicolon()
+        return VariableDeclaration(names, values, type)
     }
 
     private fun parseVariableStatement(): VariableStatement {
-        val variables = parseVariableSpec()
-        return VariableStatement(variables.first, variables.second)
+        val names = parseNameList()
+        val type = if (typeStart(current().kind) && !at(TokenKind.DEFINE) && !at(TokenKind.ASSIGN)) parseType() else null
+        val values = if (match(TokenKind.DEFINE) || match(TokenKind.ASSIGN)) expressionList() else emptyList()
+        if (type == null && values.isEmpty()) fail("expected a type or initializer")
+        return VariableStatement(names, values)
     }
 
-    private fun parseVariableSpec(): Pair<List<String>, List<Expression>> {
+    private fun parseNameList(): List<String> {
         val names = mutableListOf(expect(TokenKind.IDENT).lexeme)
         while (match(TokenKind.COMMA)) names += expect(TokenKind.IDENT).lexeme
-        if (match(TokenKind.DEFINE) || match(TokenKind.ASSIGN)) {
-            return names to expressionList()
-        }
-        // Optional declared type (the static type system will validate it in a later stage).
-        if (at(TokenKind.IDENT)) take() else fail("expected a type or initializer")
-        return names to emptyList()
+        return names
     }
 
     private fun parseBlock(): BlockStatement {
@@ -102,7 +189,73 @@ class Parser(private val tokens: List<Token>) {
         match(TokenKind.VAR) -> parseVariableStatement()
         match(TokenKind.IF) -> parseIf()
         match(TokenKind.FOR) -> parseFor()
+        match(TokenKind.GO) -> GoStatement(expression())
+        match(TokenKind.DEFER) -> DeferStatement(expression())
+        match(TokenKind.BREAK) -> BranchStatement(TokenKind.BREAK, if (at(TokenKind.IDENT)) take().lexeme else null)
+        match(TokenKind.CONTINUE) -> BranchStatement(TokenKind.CONTINUE, if (at(TokenKind.IDENT)) take().lexeme else null)
+        match(TokenKind.FALLTHROUGH) -> BranchStatement(TokenKind.FALLTHROUGH, null)
+        match(TokenKind.SELECT) -> parseSelect()
+        match(TokenKind.SWITCH) -> parseSwitch()
         else -> parseSimpleStatement()
+    }
+
+    private fun parseSwitch(): SwitchStatement {
+        var init: Statement? = null
+        var tag: Expression? = null
+        if (!at(TokenKind.LBRACE)) {
+            val first = parseSimpleStatement()
+            if (match(TokenKind.SEMICOLON)) {
+                init = first
+                if (!at(TokenKind.LBRACE)) tag = expression()
+            } else {
+                tag = asExpression(first)
+            }
+        }
+        expect(TokenKind.LBRACE)
+        val clauses = mutableListOf<SwitchClause>()
+        while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+            if (match(TokenKind.SEMICOLON)) continue
+            val expressions = when {
+                match(TokenKind.CASE) -> expressionList()
+                match(TokenKind.DEFAULT) -> null
+                else -> fail("expected case or default in switch")
+            }
+            expect(TokenKind.COLON)
+            val statements = mutableListOf<Statement>()
+            while (!at(TokenKind.CASE) && !at(TokenKind.DEFAULT) && !at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+                if (match(TokenKind.SEMICOLON)) continue
+                statements += parseStatement()
+                if (!match(TokenKind.SEMICOLON) && !at(TokenKind.CASE) && !at(TokenKind.DEFAULT) && !at(TokenKind.RBRACE))
+                    fail("expected semicolon in switch clause")
+            }
+            clauses += SwitchClause(expressions, statements)
+        }
+        expect(TokenKind.RBRACE)
+        return SwitchStatement(init, tag, clauses)
+    }
+
+    private fun parseSelect(): SelectStatement {
+        expect(TokenKind.LBRACE)
+        val cases = mutableListOf<SelectCase>()
+        while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+            if (match(TokenKind.SEMICOLON)) continue
+            val communication = when {
+                match(TokenKind.CASE) -> parseSimpleStatement()
+                match(TokenKind.DEFAULT) -> null
+                else -> fail("expected case or default in select")
+            }
+            expect(TokenKind.COLON)
+            val statements = mutableListOf<Statement>()
+            while (!at(TokenKind.CASE) && !at(TokenKind.DEFAULT) && !at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+                if (match(TokenKind.SEMICOLON)) continue
+                statements += parseStatement()
+                if (!match(TokenKind.SEMICOLON) && !at(TokenKind.CASE) && !at(TokenKind.DEFAULT) && !at(TokenKind.RBRACE))
+                    fail("expected semicolon in select clause")
+            }
+            cases += SelectCase(communication, statements)
+        }
+        expect(TokenKind.RBRACE)
+        return SelectStatement(cases)
     }
 
     private fun parseIf(): IfStatement {
@@ -125,12 +278,28 @@ class Parser(private val tokens: List<Token>) {
 
     private fun parseFor(): ForStatement {
         if (at(TokenKind.LBRACE)) return ForStatement(null, null, null, parseBlock())
+        if (match(TokenKind.RANGE)) {
+            val expression = expression()
+            return ForStatement(null, null, null, parseBlock(), RangeClause(emptyList(), null, expression))
+        }
         if (match(TokenKind.SEMICOLON)) {
             val condition = if (at(TokenKind.SEMICOLON)) null else expression()
             expect(TokenKind.SEMICOLON)
             val post = if (at(TokenKind.LBRACE)) null else parseSimpleStatement()
             return ForStatement(null, condition, post, parseBlock())
         }
+        val start = index
+        val possibleTargets = expressionList()
+        val possibleOperator = if (current().kind == TokenKind.DEFINE || current().kind == TokenKind.ASSIGN) take().kind else null
+        if (possibleOperator != null && match(TokenKind.RANGE)) {
+            val expression = expression()
+            return ForStatement(null, null, null, parseBlock(), RangeClause(possibleTargets, possibleOperator, expression))
+        }
+        if (possibleOperator == null && match(TokenKind.RANGE)) {
+            val expression = expression()
+            return ForStatement(null, null, null, parseBlock(), RangeClause(possibleTargets, null, expression))
+        }
+        index = start
         val first = parseSimpleStatement()
         if (match(TokenKind.SEMICOLON)) {
             val condition = if (at(TokenKind.SEMICOLON)) null else expression()
@@ -180,6 +349,7 @@ class Parser(private val tokens: List<Token>) {
         var expr: Expression = when (current().kind) {
             TokenKind.IDENT -> NameExpression(take().lexeme)
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING -> LiteralExpression(take())
+            TokenKind.CHAN, TokenKind.ARROW, TokenKind.MUL, TokenKind.LBRACK -> TypeExpression(parseType())
             TokenKind.LPAREN -> { take(); val inner = expression(); expect(TokenKind.RPAREN); ParenthesizedExpression(inner) }
             else -> fail("expected expression")
         }
@@ -195,6 +365,89 @@ class Parser(private val tokens: List<Token>) {
                 else -> return expr
             }
         }
+    }
+
+    private fun parseType(): GoTypeSyntax = when {
+        match(TokenKind.MUL) -> PointerGoType(parseType())
+        match(TokenKind.LBRACK) -> {
+            if (match(TokenKind.RBRACK)) SliceGoType(parseType())
+            else {
+                val length = expression()
+                expect(TokenKind.RBRACK)
+                ArrayGoType(length, parseType())
+            }
+        }
+        match(TokenKind.MAP) -> {
+            expect(TokenKind.LBRACK)
+            val key = parseType()
+            expect(TokenKind.RBRACK)
+            MapGoType(key, parseType())
+        }
+        match(TokenKind.CHAN) -> {
+            val direction = if (match(TokenKind.ARROW)) ChannelDirection.SEND_ONLY else ChannelDirection.SEND_RECEIVE
+            ChannelGoType(parseType(), direction)
+        }
+        match(TokenKind.ARROW) -> {
+            expect(TokenKind.CHAN)
+            ChannelGoType(parseType(), ChannelDirection.RECEIVE_ONLY)
+        }
+        match(TokenKind.STRUCT) -> parseStructType()
+        match(TokenKind.INTERFACE) -> parseInterfaceType()
+        match(TokenKind.FUNC) -> {
+            val parameters = parseParameters()
+            FunctionGoType(parameters, parseResults())
+        }
+        at(TokenKind.IDENT) -> NamedGoType(take().lexeme)
+        else -> fail("expected type")
+    }
+
+    private fun parseStructType(): StructGoType {
+        expect(TokenKind.LBRACE)
+        val fields = mutableListOf<StructFieldSyntax>()
+        while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+            if (match(TokenKind.SEMICOLON)) continue
+            val names: List<String>
+            val type: GoTypeSyntax
+            if (at(TokenKind.MUL)) {
+                names = emptyList()
+                type = parseType()
+            } else {
+                val first = expect(TokenKind.IDENT).lexeme
+                val fieldNames = mutableListOf(first)
+                while (match(TokenKind.COMMA)) fieldNames += expect(TokenKind.IDENT).lexeme
+                if (typeStart(current().kind)) {
+                    names = fieldNames
+                    type = parseType()
+                } else {
+                    names = emptyList()
+                    type = NamedGoType(first)
+                }
+            }
+            val tag = if (at(TokenKind.STRING)) take().lexeme else null
+            fields += StructFieldSyntax(names, type, tag)
+            if (!match(TokenKind.SEMICOLON) && !at(TokenKind.RBRACE)) fail("expected semicolon or '}' in struct type")
+        }
+        expect(TokenKind.RBRACE)
+        return StructGoType(fields)
+    }
+
+    private fun parseInterfaceType(): InterfaceGoType {
+        expect(TokenKind.LBRACE)
+        val methods = mutableListOf<InterfaceMethodSyntax>()
+        val embedded = mutableListOf<GoTypeSyntax>()
+        while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+            if (match(TokenKind.SEMICOLON)) continue
+            val name = expect(TokenKind.IDENT).lexeme
+            if (at(TokenKind.LPAREN)) {
+                val parameters = parseParameters()
+                methods += InterfaceMethodSyntax(name, parameters, parseResults())
+            } else {
+                embedded += NamedGoType(name)
+            }
+            if (!match(TokenKind.SEMICOLON) && !at(TokenKind.RBRACE)) fail("expected semicolon or '}' in interface type")
+        }
+        expect(TokenKind.RBRACE)
+        return InterfaceGoType(methods, embedded)
     }
 
     private fun asExpression(statement: Statement): Expression =
@@ -217,6 +470,7 @@ class Parser(private val tokens: List<Token>) {
             TokenKind.AND_ASSIGN, TokenKind.OR_ASSIGN, TokenKind.XOR_ASSIGN, TokenKind.SHL_ASSIGN,
             TokenKind.SHR_ASSIGN, TokenKind.AND_NOT_ASSIGN)
         private val unaryOperators = setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR, TokenKind.AND, TokenKind.MUL, TokenKind.ARROW)
+        private fun typeStart(kind: TokenKind) = kind in setOf(TokenKind.IDENT, TokenKind.MUL, TokenKind.LBRACK, TokenKind.MAP, TokenKind.CHAN, TokenKind.ARROW, TokenKind.STRUCT, TokenKind.INTERFACE, TokenKind.FUNC)
         private fun precedence(kind: TokenKind) = when (kind) {
             TokenKind.LOR -> 1
             TokenKind.LAND -> 2

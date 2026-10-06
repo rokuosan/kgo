@@ -6,9 +6,19 @@ sealed interface Declaration
 data class FunctionDeclaration(
     val name: String,
     val parameters: List<String>,
-    val body: BlockStatement
+    val body: BlockStatement,
+    val parameterTypes: List<GoTypeSyntax> = emptyList(),
+    val resultTypes: List<GoTypeSyntax> = emptyList(),
+    val receiver: ParameterSyntax? = null
 ) : Declaration
-data class VariableDeclaration(val names: List<String>, val values: List<Expression>) : Declaration
+data class VariableDeclaration(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Declaration
+data class ConstantDeclaration(
+    val names: List<String>,
+    val values: List<Expression>,
+    val type: GoTypeSyntax? = null,
+    val iotaIndex: Int = 0
+) : Declaration
+data class TypeDeclaration(val name: String, val type: GoTypeSyntax) : Declaration
 data class ImportDeclaration(val paths: List<String>) : Declaration
 
 sealed interface Statement
@@ -17,6 +27,13 @@ data class VariableStatement(val names: List<String>, val values: List<Expressio
 data class ReturnStatement(val values: List<Expression>) : Statement
 data class ExpressionStatement(val expression: Expression) : Statement
 data class SendStatement(val channel: Expression, val value: Expression) : Statement
+data class GoStatement(val call: Expression) : Statement
+data class DeferStatement(val call: Expression) : Statement
+data class BranchStatement(val kind: TokenKind, val label: String?) : Statement
+data class SelectStatement(val cases: List<SelectCase>) : Statement
+data class SelectCase(val communication: Statement?, val statements: List<Statement>)
+data class SwitchStatement(val init: Statement?, val tag: Expression?, val clauses: List<SwitchClause>) : Statement
+data class SwitchClause(val expressions: List<Expression>?, val statements: List<Statement>)
 data class AssignmentStatement(
     val targets: List<Expression>,
     val operator: TokenKind,
@@ -33,8 +50,10 @@ data class ForStatement(
     val init: Statement?,
     val condition: Expression?,
     val post: Statement?,
-    val body: BlockStatement
+    val body: BlockStatement,
+    val rangeClause: RangeClause? = null
 ) : Statement
+data class RangeClause(val targets: List<Expression>, val operator: TokenKind?, val expression: Expression)
 data object EmptyStatement : Statement
 
 sealed interface Expression
@@ -46,3 +65,19 @@ data class CallExpression(val function: Expression, val arguments: List<Expressi
 data class SelectorExpression(val receiver: Expression, val field: String) : Expression
 data class IndexExpression(val receiver: Expression, val index: Expression) : Expression
 data class ParenthesizedExpression(val expression: Expression) : Expression
+data class TypeExpression(val type: GoTypeSyntax) : Expression
+
+sealed interface GoTypeSyntax
+data class ParameterSyntax(val name: String?, val type: GoTypeSyntax, val variadic: Boolean = false)
+data class StructFieldSyntax(val names: List<String>, val type: GoTypeSyntax, val tag: String? = null)
+data class InterfaceMethodSyntax(val name: String, val parameters: List<ParameterSyntax>, val results: List<GoTypeSyntax>)
+data class NamedGoType(val name: String) : GoTypeSyntax
+data class PointerGoType(val element: GoTypeSyntax) : GoTypeSyntax
+data class SliceGoType(val element: GoTypeSyntax) : GoTypeSyntax
+data class ArrayGoType(val length: Expression, val element: GoTypeSyntax) : GoTypeSyntax
+data class MapGoType(val key: GoTypeSyntax, val value: GoTypeSyntax) : GoTypeSyntax
+data class ChannelGoType(val element: GoTypeSyntax, val direction: ChannelDirection) : GoTypeSyntax
+data class StructGoType(val fields: List<StructFieldSyntax>) : GoTypeSyntax
+data class InterfaceGoType(val methods: List<InterfaceMethodSyntax>, val embeddedTypes: List<GoTypeSyntax> = emptyList()) : GoTypeSyntax
+data class FunctionGoType(val parameters: List<ParameterSyntax>, val results: List<GoTypeSyntax>) : GoTypeSyntax
+enum class ChannelDirection { SEND_RECEIVE, SEND_ONLY, RECEIVE_ONLY }

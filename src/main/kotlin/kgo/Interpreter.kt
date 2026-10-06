@@ -1,27 +1,54 @@
 package kgo
 
 import java.math.BigInteger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.selects.selectUnbiased
+import java.util.concurrent.atomic.AtomicInteger
 
 class RuntimeGoError(message: String) : RuntimeException(message)
 
 /** Runtime for the currently implemented Go 1.0 execution subset. */
-class Interpreter(private val output: (String) -> Unit = ::println) {
+class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private val functions = mutableMapOf<String, FunctionDeclaration>()
+    private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val globals = Environment()
+    private val typeDefinitions = mutableMapOf<String, GoTypeSyntax>()
+    private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) {
-        file.declarations.forEach { declaration ->
-            when (declaration) {
-                is FunctionDeclaration -> functions[declaration.name] = declaration
-                is VariableDeclaration -> initialize(declaration.names, declaration.values, globals)
-                is ImportDeclaration -> Unit
+        runBlocking {
+            goroutines = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            try {
+                file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
+                    if (function.name == "init") initFunctions += function else functions[function.name] = function
+                }
+                file.declarations.filterIsInstance<TypeDeclaration>().forEach { typeDefinitions[it.name] = it.type }
+                file.declarations.forEach { declaration ->
+                    when (declaration) {
+                        is FunctionDeclaration, is TypeDeclaration -> Unit
+                        is VariableDeclaration -> initialize(declaration.names, declaration.values, globals)
+                        is ConstantDeclaration -> initializeConstant(declaration)
+                        is ImportDeclaration -> Unit
+                    }
+                }
+                initFunctions.forEach { invoke(it, emptyList()) }
+                val main = functions["main"] ?: throw RuntimeGoError("main function not found")
+                invoke(main, emptyList())
+            } finally {
+                // Go exits when main returns; it does not wait for remaining goroutines.
+                goroutines.cancel()
             }
         }
-        val main = functions["main"] ?: throw RuntimeGoError("main function not found")
-        invoke(main, emptyList())
     }
 
-    private fun invoke(function: FunctionDeclaration, arguments: List<Any?>): List<Any?> {
+    private suspend fun invoke(function: FunctionDeclaration, arguments: List<Any?>): List<Any?> {
         if (function.parameters.size != arguments.size) {
             throw RuntimeGoError("${function.name} expects ${function.parameters.size} arguments, got ${arguments.size}")
         }
@@ -32,15 +59,17 @@ class Interpreter(private val output: (String) -> Unit = ::println) {
             emptyList()
         } catch (returned: ReturnSignal) {
             returned.values
+        } finally {
+            env.runDefers()
         }
     }
 
-    private fun executeBlock(block: BlockStatement, parent: Environment) {
-        val env = Environment(parent)
+    private suspend fun executeBlock(block: BlockStatement, parent: Environment) {
+        val env = parent.child()
         for (statement in block.statements) execute(statement, env)
     }
 
-    private fun execute(statement: Statement, env: Environment) {
+    private suspend fun execute(statement: Statement, env: Environment) {
         when (statement) {
             EmptyStatement -> Unit
             is BlockStatement -> executeBlock(statement, env)
@@ -54,56 +83,222 @@ class Interpreter(private val output: (String) -> Unit = ::println) {
                 env.set(name, old + statement.delta)
             }
             is IfStatement -> {
-                val scope = Environment(env)
+                val scope = env.child()
                 statement.init?.let { execute(it, scope) }
                 if (truth(evaluate(statement.condition, scope))) executeBlock(statement.thenBranch, scope)
                 else statement.elseBranch?.let { execute(it, scope) }
             }
             is ForStatement -> {
-                val scope = Environment(env)
-                statement.init?.let { execute(it, scope) }
-                while (statement.condition == null || truth(evaluate(statement.condition, scope))) {
-                    try { executeBlock(statement.body, scope) }
-                    catch (_: ContinueSignal) { }
-                    catch (_: BreakSignal) { break }
-                    statement.post?.let { execute(it, scope) }
+                val scope = env.child()
+                if (statement.rangeClause != null) {
+                    executeRange(statement.rangeClause, statement.body, scope)
+                } else {
+                    statement.init?.let { execute(it, scope) }
+                    while (statement.condition == null || truth(evaluate(statement.condition, scope))) {
+                        try { executeBlock(statement.body, scope) }
+                        catch (_: ContinueSignal) { }
+                        catch (_: BreakSignal) { break }
+                        statement.post?.let { execute(it, scope) }
+                    }
                 }
             }
-            is SendStatement -> throw RuntimeGoError("channel send requires channel runtime support")
+            is SendStatement -> {
+                val channel = evaluate(statement.channel, env) as? GoChannel ?: throw RuntimeGoError("send on non-channel")
+                channel.send(evaluate(statement.value, env))
+            }
+            is GoStatement -> {
+                val call = statement.call as? CallExpression ?: throw RuntimeGoError("go statement requires a function call")
+                val target = evaluate(call.function, env)
+                val arguments = call.arguments.map { evaluate(it, env) }
+                goroutines.launch { call(target, arguments) }
+            }
+            is DeferStatement -> {
+                val call = statement.call as? CallExpression ?: throw RuntimeGoError("defer statement requires a function call")
+                val target = evaluate(call.function, env)
+                val arguments = call.arguments.map { evaluate(it, env) }
+                env.defer { call(target, arguments) }
+            }
+            is BranchStatement -> when (statement.kind) {
+                TokenKind.BREAK -> throw BreakSignal()
+                TokenKind.CONTINUE -> throw ContinueSignal()
+                TokenKind.FALLTHROUGH -> throw FallthroughSignal()
+                else -> throw RuntimeGoError("invalid branch statement")
+            }
+            is SelectStatement -> executeSelect(statement, env)
+            is SwitchStatement -> executeSwitch(statement, env)
         }
     }
 
-    private fun assign(statement: AssignmentStatement, env: Environment) {
-        val values = statement.values.map { evaluate(it, env) }
-        if (statement.operator == TokenKind.DEFINE) {
-            val names = statement.targets.map { (it as? NameExpression)?.name ?: throw RuntimeGoError("short declaration targets must be names") }
+    private suspend fun assign(statement: AssignmentStatement, env: Environment) {
+        val values = expandValues(statement.values.map { evaluate(it, env) }, statement.targets.size)
+        assignValues(statement.targets, statement.operator, values, env)
+    }
+
+    private fun assignValues(targets: List<Expression>, operator: TokenKind, values: List<Any?>, env: Environment) {
+        if (operator == TokenKind.DEFINE) {
+            val names = targets.map { (it as? NameExpression)?.name ?: throw RuntimeGoError("short declaration targets must be names") }
             if (names.size != values.size) throw RuntimeGoError("assignment count mismatch")
             names.zip(values).forEach { (name, value) -> env.define(name, value) }
             return
         }
-        if (statement.targets.size != values.size) throw RuntimeGoError("assignment count mismatch")
-        statement.targets.zip(values).forEach { (target, value) ->
+        if (targets.size != values.size) throw RuntimeGoError("assignment count mismatch")
+        targets.zip(values).forEach { (target, value) ->
             val name = (target as? NameExpression)?.name ?: throw RuntimeGoError("assignment target must be a variable")
-            val result = if (statement.operator == TokenKind.ASSIGN) value else {
+            val result = if (operator == TokenKind.ASSIGN) value else {
                 val left = env.get(name)
-                binary(left, compoundOperator(statement.operator), value)
+                binary(left, compoundOperator(operator), value)
             }
             env.set(name, result)
         }
     }
 
-    private fun initialize(names: List<String>, expressions: List<Expression>, env: Environment) {
-        val values = expressions.map { evaluate(it, env) }
+    private suspend fun executeSelect(statement: SelectStatement, env: Environment) {
+        val operations = statement.cases.mapIndexedNotNull { caseIndex, clause ->
+            when (val communication = clause.communication) {
+                null -> null
+                is SendStatement -> {
+                    val channel = evaluate(communication.channel, env) as? GoChannel ?: throw RuntimeGoError("select send on non-channel")
+                    SelectSend(caseIndex, channel, evaluate(communication.value, env))
+                }
+                is ExpressionStatement -> {
+                    val receive = communication.expression as? UnaryExpression
+                    if (receive?.operator != TokenKind.ARROW) throw RuntimeGoError("invalid select receive clause")
+                    val channel = evaluate(receive.operand, env) as? GoChannel ?: throw RuntimeGoError("select receive from non-channel")
+                    SelectReceive(caseIndex, channel, null)
+                }
+                is AssignmentStatement -> {
+                    val receive = communication.values.singleOrNull() as? UnaryExpression
+                    if (receive?.operator != TokenKind.ARROW) throw RuntimeGoError("select assignment must receive from a channel")
+                    val channel = evaluate(receive.operand, env) as? GoChannel ?: throw RuntimeGoError("select receive from non-channel")
+                    SelectReceive(caseIndex, channel, communication)
+                }
+                else -> throw RuntimeGoError("invalid select communication clause")
+            }
+        }
+        val defaultIndex = statement.cases.indexOfFirst { it.communication == null }
+        for (operation in operations.shuffled()) {
+            when (operation) {
+                is SelectSend -> if (operation.channel.trySend(operation.value)) {
+                    executeSelectedCase(statement.cases[operation.caseIndex], env)
+                    return
+                }
+                is SelectReceive -> operation.channel.tryReceive()?.let { received ->
+                    operation.assignment?.let { assignValues(it.targets, it.operator, expandValues(listOf(received), it.targets.size), env) }
+                    executeSelectedCase(statement.cases[operation.caseIndex], env)
+                    return
+                }
+            }
+        }
+        if (defaultIndex >= 0) {
+            executeSelectedCase(statement.cases[defaultIndex], env)
+            return
+        }
+        val selected = selectUnbiased<SelectSelection> {
+            operations.forEach { operation ->
+                when (operation) {
+                    is SelectSend -> operation.channel.queue.onSend(operation.value) { SelectSelection(operation.caseIndex, null) }
+                    is SelectReceive -> operation.channel.queue.onReceiveCatching { result ->
+                        SelectSelection(operation.caseIndex, operation.channel.decode(result))
+                    }
+                }
+            }
+        }
+        val clause = statement.cases[selected.caseIndex]
+        val receive = operations.filterIsInstance<SelectReceive>().firstOrNull { it.caseIndex == selected.caseIndex }
+        if (receive?.assignment != null) {
+            assignValues(receive.assignment.targets, receive.assignment.operator,
+                expandValues(listOf(selected.received), receive.assignment.targets.size), env)
+        }
+        executeSelectedCase(clause, env)
+    }
+
+    private suspend fun executeSelectedCase(clause: SelectCase, env: Environment) {
+        try { for (statement in clause.statements) execute(statement, env) }
+        catch (_: BreakSignal) { }
+    }
+
+    private suspend fun executeSwitch(statement: SwitchStatement, env: Environment) {
+        val scope = env.child()
+        statement.init?.let { execute(it, scope) }
+        val tag = statement.tag?.let { evaluate(it, scope) } ?: true
+        var selected = -1
+        for ((clauseIndex, clause) in statement.clauses.withIndex()) {
+            if (clause.expressions?.any { evaluate(it, scope) == tag } == true) {
+                selected = clauseIndex
+                break
+            }
+        }
+        if (selected < 0) selected = statement.clauses.indexOfFirst { it.expressions == null }
+        if (selected < 0) return
+        var index = selected
+        while (index < statement.clauses.size) {
+            try {
+                statement.clauses[index].statements.forEach { execute(it, scope) }
+                return
+            } catch (_: FallthroughSignal) {
+                if (index == statement.clauses.lastIndex) throw RuntimeGoError("fallthrough in final switch clause")
+                index++
+            } catch (_: BreakSignal) {
+                return
+            }
+        }
+    }
+
+    private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment) {
+        val value = evaluate(range.expression, env)
+        when (value) {
+            is GoChannel -> while (true) {
+                val received = value.receive()
+                if (!received.ok) break
+                if (range.targets.isNotEmpty()) {
+                    val values = listOf(received.value).take(range.targets.size)
+                    assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env)
+                }
+                try { executeBlock(body, env) }
+                catch (_: ContinueSignal) { }
+                catch (_: BreakSignal) { break }
+            }
+            is String -> {
+                var byteIndex = 0L
+                var charIndex = 0
+                while (charIndex < value.length) {
+                    val cp = value.codePointAt(charIndex)
+                    if (range.targets.isNotEmpty()) {
+                        val values = listOf(byteIndex, cp.toLong()).take(range.targets.size)
+                        assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env)
+                    }
+                    try { executeBlock(body, env) }
+                    catch (_: ContinueSignal) { }
+                    catch (_: BreakSignal) { break }
+                    byteIndex += when { cp <= 0x7f -> 1; cp <= 0x7ff -> 2; cp <= 0xffff -> 3; else -> 4 }
+                    charIndex += Character.charCount(cp)
+                }
+            }
+            else -> throw RuntimeGoError("range over this value is not implemented")
+        }
+    }
+
+    private suspend fun initialize(names: List<String>, expressions: List<Expression>, env: Environment) {
+        val values = expandValues(expressions.map { evaluate(it, env) }, names.size)
         if (values.isNotEmpty() && values.size != names.size) throw RuntimeGoError("initializer count mismatch")
         names.forEachIndexed { i, name -> env.define(name, values.getOrNull(i) ?: 0L) }
     }
 
-    private fun evaluate(expression: Expression, env: Environment): Any? = when (expression) {
+    private suspend fun initializeConstant(declaration: ConstantDeclaration) {
+        val scope = globals.child()
+        scope.define("iota", declaration.iotaIndex.toLong())
+        val values = expandValues(declaration.values.map { evaluate(it, scope) }, declaration.names.size)
+        if (values.size != declaration.names.size) throw RuntimeGoError("constant initializer count mismatch")
+        declaration.names.zip(values).forEach { (name, value) -> globals.define(name, value) }
+    }
+
+    private suspend fun evaluate(expression: Expression, env: Environment): Any? = when (expression) {
         is NameExpression -> when (expression.name) {
             "true" -> true
             "false" -> false
             "nil" -> null
-            else -> env.getOrNull(expression.name) ?: if (functions.containsKey(expression.name)) FunctionValue(expression.name) else throw RuntimeGoError("undefined: ${expression.name}")
+            "make", "new", "close", "len", "cap", "print", "println", "panic" -> BuiltinValue(expression.name)
+            else -> env.lookup(expression.name)?.value ?: if (env.contains(expression.name)) null else if (functions.containsKey(expression.name)) FunctionValue(expression.name) else throw RuntimeGoError("undefined: ${expression.name}")
         }
         is LiteralExpression -> literal(expression.token)
         is ParenthesizedExpression -> evaluate(expression.expression, env)
@@ -120,26 +315,49 @@ class Interpreter(private val output: (String) -> Unit = ::println) {
         }
         is CallExpression -> call(expression, env)
         is IndexExpression -> throw RuntimeGoError("index expressions are not implemented")
+        is TypeExpression -> TypeValue(expression.type)
     }
 
-    private fun call(call: CallExpression, env: Environment): Any? {
+    private suspend fun call(call: CallExpression, env: Environment): Any? {
+        val target = evaluate(call.function, env)
         val args = call.arguments.map { evaluate(it, env) }
-        val fn = call.function
-        if (fn is NameExpression) {
-            when (fn.name) {
-                "print", "println" -> { output(args.joinToString(if (fn.name == "println") " " else "") { stringify(it) } + if (fn.name == "println") "\n" else ""); return null }
+        return call(target, args)
+    }
+
+    private suspend fun call(target: Any?, args: List<Any?>): Any? {
+        when (target) {
+            is FunctionValue -> {
+                val values = invoke(functions[target.name] ?: throw RuntimeGoError("undefined function ${target.name}"), args)
+                return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
+            }
+            is BuiltinValue -> when (target.name) {
+                "print", "println" -> {
+                    output(args.joinToString(if (target.name == "println") " " else "") { stringify(it) } + if (target.name == "println") "\n" else "")
+                    return null
+                }
                 "panic" -> throw RuntimeGoError(args.firstOrNull()?.toString() ?: "panic")
-                else -> functions[fn.name]?.let { return invoke(it, args) }
+                "make" -> return make(args)
+                "new" -> return null
+                "close" -> { (args.singleOrNull() as? GoChannel)?.close() ?: throw RuntimeGoError("close of non-channel"); return null }
+                "len" -> return when (val value = args.singleOrNull()) {
+                    is String -> value.codePointCount(0, value.length).toLong()
+                    is GoChannel -> value.len()
+                    else -> throw RuntimeGoError("len is not defined for this value")
+                }
+                "cap" -> return when (val value = args.singleOrNull()) {
+                    is GoChannel -> value.capacity.toLong()
+                    else -> throw RuntimeGoError("cap is not defined for this value")
+                }
+                "Print", "Fprint" -> {
+                    output(args.drop(if (target.name == "Fprint") 1 else 0).joinToString("") { stringify(it) })
+                    return null
+                }
+                "Println", "Fprintln" -> {
+                    output(args.drop(if (target.name == "Fprintln") 1 else 0).joinToString(" ") { stringify(it) } + "\n")
+                    return null
+                }
             }
         }
-        if (fn is SelectorExpression && fn.receiver is NameExpression && fn.receiver.name == "fmt") {
-            when (fn.field) {
-                "Print", "Fprint" -> { output(args.drop(if (fn.field == "Fprint") 1 else 0).joinToString("") { stringify(it) }); return null }
-                "Println", "Fprintln" -> { output(args.drop(if (fn.field == "Fprintln") 1 else 0).joinToString(" ") { stringify(it) } + "\n"); return null }
-            }
-        }
-        val value = evaluate(fn, env)
-        if (value is FunctionValue) return invoke(functions.getValue(value.name), args)
         throw RuntimeGoError("cannot call value")
     }
 
@@ -161,15 +379,50 @@ class Interpreter(private val output: (String) -> Unit = ::println) {
         n.longValueExact()
     } catch (_: Exception) { throw RuntimeGoError("integer literal overflows int: $text") }
 
-    private fun unary(operator: TokenKind, value: Any?): Any? = when (operator) {
+    private suspend fun unary(operator: TokenKind, value: Any?): Any? = when (operator) {
         TokenKind.ADD -> value
         TokenKind.SUB -> when (value) { is Long -> -value; is Double -> -value; else -> typeError("unary -", value) }
         TokenKind.NOT -> !(value as? Boolean ?: typeError("!", value))
         TokenKind.XOR -> number(value, "^").inv()
         TokenKind.AND -> throw RuntimeGoError("pointers are not implemented")
         TokenKind.MUL -> throw RuntimeGoError("pointer dereference is not implemented")
-        TokenKind.ARROW -> throw RuntimeGoError("channel receive requires channel runtime support")
+        TokenKind.ARROW -> (value as? GoChannel)?.receive() ?: throw RuntimeGoError("receive from non-channel")
         else -> value
+    }
+
+    private fun make(args: List<Any?>): Any? {
+        val type = (args.firstOrNull() as? TypeValue)?.type ?: throw RuntimeGoError("make requires a type")
+        return when (type) {
+            is ChannelGoType -> {
+                val capacity = args.getOrNull(1)?.let { number(it, "channel capacity").toInt() } ?: 0
+                if (capacity < 0) throw RuntimeGoError("negative channel capacity")
+                GoChannel(zeroValue(type.element), capacity)
+            }
+            else -> throw RuntimeGoError("make for this type is not implemented")
+        }
+    }
+
+    private fun expandValues(values: List<Any?>, targets: Int): List<Any?> {
+        if (values.size == 1) {
+            val only = values.single()
+            if (only is GoReceiveResult && targets == 2) return listOf(only.value, only.ok)
+            if (only is GoReceiveResult) return listOf(only.value)
+            if (only is GoMultiValue) return only.values
+            return listOf(only)
+        }
+        return values.map { if (it is GoReceiveResult) it.value else it }
+    }
+
+    private fun zeroValue(type: GoTypeSyntax): Any? = when (type) {
+        is NamedGoType -> when (type.name) {
+            "bool" -> false
+            "string" -> ""
+            "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune" -> 0L
+            "float32", "float64" -> 0.0
+            "complex64", "complex128" -> 0.0
+            else -> null
+        }
+        else -> null
     }
 
     private fun binary(left: Any?, op: TokenKind, right: Any?): Any? {
@@ -245,22 +498,68 @@ class Interpreter(private val output: (String) -> Unit = ::println) {
         return out.toString()
     }
 
-    private class Environment(private val parent: Environment? = null) {
+    private class Environment(
+        private val parent: Environment? = null,
+        private val deferredCalls: MutableList<suspend () -> Unit> = mutableListOf()
+    ) {
         private val values = mutableMapOf<String, Any?>()
+        fun child() = Environment(this, deferredCalls)
         fun define(name: String, value: Any?) { values[name] = value }
-        fun get(name: String): Any? = getOrNull(name) ?: throw RuntimeGoError("undefined: $name")
-        fun getOrNull(name: String): Any? = if (values.containsKey(name)) values[name] else parent?.getOrNull(name)
+        fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
+        fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
+        fun getOrNull(name: String): Any? = lookup(name)?.value
+        fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
+        fun defer(action: suspend () -> Unit) { deferredCalls += action }
+        suspend fun runDefers() {
+            for (action in deferredCalls.asReversed()) action()
+            deferredCalls.clear()
+        }
         fun set(name: String, value: Any?) {
             if (values.containsKey(name)) values[name] = value
             else if (parent != null && parent.contains(name)) parent.set(name, value)
             else throw RuntimeGoError("undefined: $name")
         }
-        private fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
     }
 
+    private data class Lookup(val value: Any?)
     private data class FunctionValue(val name: String)
     private data class BuiltinValue(val name: String)
+    private data class TypeValue(val type: GoTypeSyntax)
+    private data class GoMultiValue(val values: List<Any?>)
+    private data class GoReceiveResult(val value: Any?, val ok: Boolean)
+    private data class SelectSelection(val caseIndex: Int, val received: GoReceiveResult?)
+    private sealed interface SelectOperation { val caseIndex: Int }
+    private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation
+    private data class SelectReceive(override val caseIndex: Int, val channel: GoChannel, val assignment: AssignmentStatement?) : SelectOperation
+    private class GoChannel(private val elementZero: Any?, val capacity: Int) {
+        val queue = Channel<Any?>(capacity)
+        private val buffered = AtomicInteger(0)
+        suspend fun send(value: Any?) {
+            queue.send(value)
+            if (capacity > 0) buffered.incrementAndGet()
+        }
+        suspend fun receive(): GoReceiveResult {
+            val result = queue.receiveCatching()
+            return decode(result)
+        }
+        fun trySend(value: Any?): Boolean = queue.trySend(value).isSuccess.also { if (it && capacity > 0) buffered.incrementAndGet() }
+        fun tryReceive(): GoReceiveResult? {
+            val result = queue.tryReceive()
+            if (result.isFailure && !result.isClosed) return null
+            return decode(result)
+        }
+        fun decode(result: kotlinx.coroutines.channels.ChannelResult<Any?>): GoReceiveResult {
+            if (result.isSuccess) {
+                if (capacity > 0) buffered.updateAndGet { maxOf(0, it - 1) }
+                return GoReceiveResult(result.getOrThrow(), true)
+            }
+            return GoReceiveResult(elementZero, false)
+        }
+        fun close() { queue.close() }
+        fun len() = if (capacity == 0) 0L else buffered.get().toLong()
+    }
     private class ReturnSignal(val values: List<Any?>) : RuntimeException(null, null, false, false)
     private class BreakSignal : RuntimeException(null, null, false, false)
     private class ContinueSignal : RuntimeException(null, null, false, false)
+    private class FallthroughSignal : RuntimeException(null, null, false, false)
 }
