@@ -6,11 +6,12 @@ sealed interface Declaration
 data class FunctionDeclaration(
     val name: String,
     val parameters: List<String?>,
-    val body: BlockStatement,
+    val body: BlockStatement?,
     val parameterTypes: List<GoTypeSyntax> = emptyList(),
     val resultTypes: List<GoTypeSyntax> = emptyList(),
     val receiver: ParameterSyntax? = null,
-    val variadic: Boolean = false
+    val variadic: Boolean = false,
+    val resultNames: List<String?> = emptyList()
 ) : Declaration
 data class VariableDeclaration(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Declaration
 data class ConstantDeclaration(
@@ -73,17 +74,19 @@ data class BinaryExpression(val left: Expression, val operator: TokenKind, val r
 data class CallExpression(val function: Expression, val arguments: List<Expression>, val expandLastArgument: Boolean = false) : Expression
 data class SelectorExpression(val receiver: Expression, val field: String) : Expression
 data class IndexExpression(val receiver: Expression, val index: Expression) : Expression
-data class SliceExpression(val receiver: Expression, val low: Expression?, val high: Expression?, val max: Expression? = null) : Expression
+data class SliceExpression(val receiver: Expression, val low: Expression?, val high: Expression?) : Expression
 data class TypeAssertionExpression(val receiver: Expression, val type: GoTypeSyntax) : Expression
 data class TypeSwitchGuardExpression(val receiver: Expression) : Expression
 data class ParenthesizedExpression(val expression: Expression) : Expression
 data class TypeExpression(val type: GoTypeSyntax) : Expression
 data class CompositeLiteral(val type: GoTypeSyntax, val elements: List<CompositeElement>) : Expression
+data class ElidedCompositeLiteral(val elements: List<CompositeElement>) : Expression
 data class FunctionLiteralExpression(
     val parameters: List<ParameterSyntax>,
     val results: List<GoTypeSyntax>,
     val body: BlockStatement,
-    val variadic: Boolean = false
+    val variadic: Boolean = false,
+    val resultNames: List<String?> = emptyList()
 ) : Expression
 data class CompositeElement(val key: Expression?, val value: Expression)
 
@@ -95,7 +98,7 @@ data class NamedGoType(val name: String) : GoTypeSyntax
 data class QualifiedGoType(val packageName: String, val name: String) : GoTypeSyntax
 data class PointerGoType(val element: GoTypeSyntax) : GoTypeSyntax
 data class SliceGoType(val element: GoTypeSyntax) : GoTypeSyntax
-data class ArrayGoType(val length: Expression, val element: GoTypeSyntax) : GoTypeSyntax
+data class ArrayGoType(val length: Expression?, val element: GoTypeSyntax) : GoTypeSyntax
 data class MapGoType(val key: GoTypeSyntax, val value: GoTypeSyntax) : GoTypeSyntax
 data class ChannelGoType(val element: GoTypeSyntax, val direction: ChannelDirection) : GoTypeSyntax
 data class StructGoType(val fields: List<StructFieldSyntax>) : GoTypeSyntax

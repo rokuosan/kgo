@@ -72,15 +72,16 @@ class Lexer(private val source: String) {
     private fun number(start: Position): Token {
         val begin = offset
         var kind = TokenKind.INT
+        val hexadecimal = peek() == '0' && (peek(1) == 'x' || peek(1) == 'X')
         if (peek() == '.') {
             kind = TokenKind.FLOAT
             advance()
             while (isAsciiDigit(peek())) advance()
             scanExponent(start)
-        } else if (peek() == '0' && (peek(1) == 'x' || peek(1) == 'X')) {
+        } else if (hexadecimal) {
             advance(); advance()
             val digits = offset
-            while (offset < source.length && peek().digitToIntOrNull(16) != null) advance()
+            while (offset < source.length && isAsciiRadixDigit(peek(), 16)) advance()
             if (offset == digits) throw ScanError("hexadecimal literal has no digits", start)
         } else {
             while (isAsciiDigit(peek())) advance()
@@ -90,10 +91,16 @@ class Lexer(private val source: String) {
                 while (isAsciiDigit(peek())) advance()
             }
             if (scanExponent(start)) kind = TokenKind.FLOAT
-            if (kind == TokenKind.INT && source[begin] == '0' && offset - begin > 1 && source.substring(begin, offset).any { it in '8'..'9' })
-                throw ScanError("invalid digit in octal literal", start)
         }
-        if (peekOrNull() == 'i') { advance(); kind = TokenKind.IMAG }
+        val imaginary = !hexadecimal && peekOrNull() == 'i'
+        if (imaginary) {
+            advance()
+            kind = TokenKind.IMAG
+        }
+        if (!imaginary && kind == TokenKind.INT && source[begin] == '0' && offset - begin > 1 &&
+            source.substring(begin, offset).any { it in '8'..'9' }) {
+            throw ScanError("invalid digit in octal literal", start)
+        }
         return Token(kind, source.substring(begin, offset), start)
     }
 
@@ -138,11 +145,19 @@ class Lexer(private val source: String) {
         advance()
         if (offset >= source.length) throw ScanError("unfinished escape sequence", start)
         val escaped = peek()
-        if (escaped in "abfnrtv\\\"" || (escaped == '\'' && quote == '\'')) { advance(); return }
+        if (escaped in "abfnrtv\\" || (escaped == '"' && quote == '"') || (escaped == '\'' && quote == '\'')) {
+            advance()
+            return
+        }
         when (escaped) {
-            in '0'..'7' -> repeat(3) {
-                if (peek() !in '0'..'7') throw ScanError("octal escape must have three digits", start)
-                advance()
+            in '0'..'7' -> {
+                val begin = offset
+                repeat(3) {
+                    if (peek() !in '0'..'7') throw ScanError("octal escape must have three digits", start)
+                    advance()
+                }
+                if (source.substring(begin, offset).toInt(8) > 0xff)
+                    throw ScanError("octal escape value exceeds one byte", start)
             }
             'x' -> { advance(); consumeDigits(2, 16, start) }
             'u' -> { advance(); validateUnicodeEscape(4, start) }
@@ -154,7 +169,7 @@ class Lexer(private val source: String) {
     private fun consumeDigits(count: Int, radix: Int, start: Position): String {
         val begin = offset
         repeat(count) {
-            if (peek().digitToIntOrNull(radix) == null) throw ScanError("invalid escape sequence", start)
+            if (!isAsciiRadixDigit(peek(), radix)) throw ScanError("invalid escape sequence", start)
             advance()
         }
         return source.substring(begin, offset)
@@ -193,9 +208,15 @@ class Lexer(private val source: String) {
     }
 
     private fun codePointAtOffset() = if (offset < source.length) source.codePointAt(offset) else 0
-    private fun isIdentifierStart(c: Int) = c == '_'.code || Character.isLetter(c)
-    private fun isIdentifierContinue(c: Int) = isIdentifierStart(c) || Character.getType(c) == Character.DECIMAL_DIGIT_NUMBER.toInt()
+    private fun isIdentifierStart(c: Int) = c == '_'.code || GoUnicode6.isLetter(c)
+    private fun isIdentifierContinue(c: Int) = isIdentifierStart(c) || GoUnicode6.isDecimalDigit(c)
     private fun isAsciiDigit(c: Char) = c in '0'..'9'
+    private fun isAsciiRadixDigit(c: Char, radix: Int) = when (c) {
+        in '0'..'9' -> c - '0' < radix
+        in 'a'..'f' -> c - 'a' + 10 < radix
+        in 'A'..'F' -> c - 'A' + 10 < radix
+        else -> false
+    }
 
     companion object {
         private val semicolonEnders = setOf(TokenKind.IDENT, TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG,

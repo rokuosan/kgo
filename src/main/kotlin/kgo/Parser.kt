@@ -8,24 +8,27 @@ class ParseError(message: String, val position: Position) : RuntimeException(
 class Parser(private val tokens: List<Token>) {
     private var index = 0
     private var allowCompositeLiteral = true
+    private var parsingTopLevelDeclaration = false
 
     fun parseFile(): GoFile {
         expect(TokenKind.PACKAGE)
-        val packageName = expect(TokenKind.IDENT).lexeme
+        val packageToken = expect(TokenKind.IDENT)
+        if (packageToken.lexeme == "_") throw ParseError("package name cannot be blank", packageToken.position)
         semicolon()
         val declarations = mutableListOf<Declaration>()
+        while (match(TokenKind.IMPORT)) {
+            declarations += parseImport()
+        }
         while (!at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             when {
-                match(TokenKind.IMPORT) -> declarations += parseImport()
-                match(TokenKind.FUNC) -> declarations += parseFunction()
-                match(TokenKind.VAR) -> declarations += parseVariables()
-                match(TokenKind.CONST) -> declarations += parseConstants()
-                match(TokenKind.TYPE) -> declarations += parseTypes()
+                match(TokenKind.FUNC) -> declarations += parseTopLevelDeclaration(::parseFunction)
+                match(TokenKind.VAR) -> declarations += parseTopLevelDeclaration(::parseVariables)
+                match(TokenKind.CONST) -> declarations += parseTopLevelDeclaration(::parseConstants)
+                match(TokenKind.TYPE) -> declarations += parseTopLevelDeclaration(::parseTypes)
                 else -> fail("expected top-level declaration")
             }
         }
-        return GoFile(packageName, declarations)
+        return GoFile(packageToken.lexeme, declarations)
     }
 
     private fun parseImport(): ImportDeclaration {
@@ -35,9 +38,9 @@ class Parser(private val tokens: List<Token>) {
                 if (match(TokenKind.SEMICOLON)) continue
                 val alias = if (at(TokenKind.IDENT) || at(TokenKind.PERIOD)) take().lexeme else null
                 imports += ImportSpecSyntax(alias, expect(TokenKind.STRING).lexeme)
-                semicolon()
+                semicolonOrClose(TokenKind.RPAREN)
             }
-            expect(TokenKind.RPAREN); optionalSemicolon()
+            expect(TokenKind.RPAREN); semicolon()
         } else {
             val alias = if (at(TokenKind.IDENT) || at(TokenKind.PERIOD)) take().lexeme else null
             imports += ImportSpecSyntax(alias, expect(TokenKind.STRING).lexeme)
@@ -68,11 +71,18 @@ class Parser(private val tokens: List<Token>) {
         } else null
         val name = expect(TokenKind.IDENT).lexeme
         val parameters = parseParameters()
-        val results = parseResults()
-        val body = parseBlock()
+        val resultParameters = parseResults()
+        val body = if (at(TokenKind.LBRACE)) parseBlock() else null
         optionalSemicolon()
-        return FunctionDeclaration(name, parameters.map { it.name }, body, parameters.map { it.type }, results, receiver,
-            parameters.lastOrNull()?.variadic == true)
+        return FunctionDeclaration(name, parameters.map { it.name }, body, parameters.map { it.type },
+            resultParameters.map { it.type }, receiver, parameters.lastOrNull()?.variadic == true,
+            resultParameters.map { it.name })
+    }
+
+    private fun <T> parseTopLevelDeclaration(parse: () -> T): T {
+        val previous = parsingTopLevelDeclaration
+        parsingTopLevelDeclaration = true
+        return try { parse() } finally { parsingTopLevelDeclaration = previous }
     }
 
     private fun parseParameters(): List<ParameterSyntax> {
@@ -102,6 +112,8 @@ class Parser(private val tokens: List<Token>) {
         }
         expect(TokenKind.RPAREN)
         if (parameters.dropLast(1).any { it.variadic }) fail("variadic parameter must be last")
+        if (parameters.any { it.name != null } && parameters.any { it.name == null })
+            fail("parameter names must be either all present or all absent")
         return parameters
     }
 
@@ -113,9 +125,12 @@ class Parser(private val tokens: List<Token>) {
         return tokens.getOrNull(look)?.kind?.let(::typeStart) == true
     }
 
-    private fun parseResults(): List<GoTypeSyntax> {
-        if (at(TokenKind.LPAREN)) return parseParameters().map { it.type }
-        return if (typeStart(current().kind)) listOf(parseType()) else emptyList()
+    private fun parseResults(): List<ParameterSyntax> {
+        val results = if (at(TokenKind.LPAREN)) parseParameters()
+            else if (typeStart(current().kind)) listOf(ParameterSyntax(null, parseType()))
+            else emptyList()
+        if (results.any { it.variadic }) fail("result parameter cannot be variadic")
+        return results
     }
 
     private fun parseVariables(): List<VariableDeclaration> {
@@ -123,7 +138,7 @@ class Parser(private val tokens: List<Token>) {
         val declarations = mutableListOf<VariableDeclaration>()
         while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
             if (match(TokenKind.SEMICOLON)) continue
-            declarations += parseVariableSpec()
+            declarations += parseVariableSpec(grouped = true)
         }
         expect(TokenKind.RPAREN)
         optionalSemicolon()
@@ -149,36 +164,36 @@ class Parser(private val tokens: List<Token>) {
             previousType = type
             previousValues = values
             if (!grouped) break
-            semicolon()
+            semicolonOrClose(TokenKind.RPAREN)
             if (at(TokenKind.RPAREN)) break
         }
-        if (grouped) { expect(TokenKind.RPAREN); optionalSemicolon() } else semicolon()
+        if (grouped) { expect(TokenKind.RPAREN); optionalSemicolon() } else optionalSemicolon()
         return declarations
     }
 
     private fun parseTypes(): List<TypeDeclaration> {
         if (!match(TokenKind.LPAREN)) {
             val declaration = TypeDeclaration(expect(TokenKind.IDENT).lexeme, parseType())
-            semicolon()
+            optionalSemicolon()
             return listOf(declaration)
         }
         val declarations = mutableListOf<TypeDeclaration>()
         while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
             if (match(TokenKind.SEMICOLON)) continue
             declarations += TypeDeclaration(expect(TokenKind.IDENT).lexeme, parseType())
-            semicolon()
+            semicolonOrClose(TokenKind.RPAREN)
         }
         expect(TokenKind.RPAREN)
         optionalSemicolon()
         return declarations
     }
 
-    private fun parseVariableSpec(): VariableDeclaration {
+    private fun parseVariableSpec(grouped: Boolean = false): VariableDeclaration {
         val names = parseNameList()
         val type = if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) parseType() else null
         val values = if (match(TokenKind.ASSIGN)) expressionList() else emptyList()
         if (type == null && values.isEmpty()) fail("expected a type or initializer")
-        semicolon()
+        if (grouped) semicolonOrClose(TokenKind.RPAREN) else optionalSemicolon()
         return VariableDeclaration(names, values, type)
     }
 
@@ -452,7 +467,8 @@ class Parser(private val tokens: List<Token>) {
                 take()
                 val parameters = parseParameters()
                 val results = parseResults()
-                FunctionLiteralExpression(parameters, results, parseBlock(), parameters.lastOrNull()?.variadic == true)
+                FunctionLiteralExpression(parameters, results.map { it.type }, parseBlock(),
+                    parameters.lastOrNull()?.variadic == true, results.map { it.name })
             }
             TokenKind.LPAREN -> { take(); val inner = expressionWithComposite { expression() }; expect(TokenKind.RPAREN); ParenthesizedExpression(inner) }
             else -> fail("expected expression")
@@ -473,9 +489,8 @@ class Parser(private val tokens: List<Token>) {
                     val low = if (at(TokenKind.COLON) || at(TokenKind.RBRACK)) null else expression()
                     if (match(TokenKind.COLON)) {
                         val high = if (at(TokenKind.COLON) || at(TokenKind.RBRACK)) null else expression()
-                        val max = if (match(TokenKind.COLON)) expression() else null
                         expect(TokenKind.RBRACK)
-                        SliceExpression(expr, low, high, max)
+                        SliceExpression(expr, low, high)
                     } else {
                         expect(TokenKind.RBRACK)
                         IndexExpression(expr, low ?: fail("missing index expression"))
@@ -493,17 +508,27 @@ class Parser(private val tokens: List<Token>) {
     }
 
     private fun parseCompositeLiteral(type: GoTypeSyntax): CompositeLiteral {
+        return CompositeLiteral(type, parseCompositeElements())
+    }
+
+    private fun parseElidedCompositeLiteral(): ElidedCompositeLiteral = ElidedCompositeLiteral(parseCompositeElements())
+
+    private fun parseCompositeElements(): List<CompositeElement> {
         expect(TokenKind.LBRACE)
         val elements = mutableListOf<CompositeElement>()
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
-            val first = expression()
-            if (match(TokenKind.COLON)) elements += CompositeElement(first, expression())
+            val first = if (at(TokenKind.LBRACE)) parseElidedCompositeLiteral() else expression()
+            if (match(TokenKind.COLON)) elements += CompositeElement(first, parseCompositeElementValue())
             else elements += CompositeElement(null, first)
             if (!match(TokenKind.COMMA) && !at(TokenKind.RBRACE)) fail("expected ',' or '}' in composite literal")
         }
         expect(TokenKind.RBRACE)
-        return CompositeLiteral(type, elements)
+        return elements
     }
+
+    private fun parseCompositeElementValue(): Expression = if (at(TokenKind.LBRACE)) {
+        parseElidedCompositeLiteral()
+    } else expression()
 
     private fun <T> expressionHeader(block: () -> T): T {
         return withCompositeLiterals(false, block)
@@ -521,6 +546,10 @@ class Parser(private val tokens: List<Token>) {
         match(TokenKind.MUL) -> PointerGoType(parseType())
         match(TokenKind.LBRACK) -> {
             if (match(TokenKind.RBRACK)) SliceGoType(parseType())
+            else if (match(TokenKind.ELLIPSIS)) {
+                expect(TokenKind.RBRACK)
+                ArrayGoType(null, parseType())
+            }
             else {
                 val length = expression()
                 expect(TokenKind.RBRACK)
@@ -545,7 +574,7 @@ class Parser(private val tokens: List<Token>) {
         match(TokenKind.INTERFACE) -> parseInterfaceType()
         match(TokenKind.FUNC) -> {
             val parameters = parseParameters()
-            FunctionGoType(parameters, parseResults())
+            FunctionGoType(parameters, parseResults().map { it.type })
         }
         at(TokenKind.IDENT) -> {
             val name = take().lexeme
@@ -576,7 +605,7 @@ class Parser(private val tokens: List<Token>) {
                     type = NamedGoType(first)
                 }
             }
-            val tag = if (at(TokenKind.STRING)) take().lexeme else null
+            val tag = if (at(TokenKind.STRING)) canonicalGoStringLiteral(take().lexeme) else null
             fields += StructFieldSyntax(names, type, tag)
             if (!match(TokenKind.SEMICOLON) && !at(TokenKind.RBRACE)) fail("expected semicolon or '}' in struct type")
         }
@@ -593,7 +622,7 @@ class Parser(private val tokens: List<Token>) {
             val name = expect(TokenKind.IDENT).lexeme
             if (at(TokenKind.LPAREN)) {
                 val parameters = parseParameters()
-                methods += InterfaceMethodSyntax(name, parameters, parseResults())
+                methods += InterfaceMethodSyntax(name, parameters, parseResults().map { it.type })
             } else {
                 embedded += NamedGoType(name)
             }
@@ -607,7 +636,12 @@ class Parser(private val tokens: List<Token>) {
         (statement as? ExpressionStatement)?.expression ?: fail("expected condition expression")
 
     private fun semicolon() { expect(TokenKind.SEMICOLON) }
-    private fun optionalSemicolon() { match(TokenKind.SEMICOLON) }
+    private fun semicolonOrClose(close: TokenKind) {
+        if (!match(TokenKind.SEMICOLON) && !at(close)) fail("expected semicolon or $close")
+    }
+    private fun optionalSemicolon() {
+        if (parsingTopLevelDeclaration) semicolon() else match(TokenKind.SEMICOLON)
+    }
     private fun at(kind: TokenKind) = current().kind == kind
     private fun match(kind: TokenKind): Boolean = if (at(kind)) { take(); true } else false
     private fun expect(kind: TokenKind): Token = if (at(kind)) take() else fail("expected $kind, found ${current().kind}")
