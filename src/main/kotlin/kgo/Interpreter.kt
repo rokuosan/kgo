@@ -176,6 +176,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is NameExpression -> env.get(target.name)
         is IndexExpression -> index(evaluate(target.receiver, env), evaluate(target.index, env))
         is SelectorExpression -> evaluate(target, env)
+        is UnaryExpression -> if (target.operator == TokenKind.MUL) evaluate(target, env)
+            else throw RuntimeGoError("invalid assignment target")
         else -> throw RuntimeGoError("invalid assignment target")
     }
 
@@ -197,6 +199,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
                 if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
                 struct.fields[target.field] = value
+            }
+            is UnaryExpression -> {
+                if (target.operator != TokenKind.MUL) throw RuntimeGoError("invalid assignment target")
+                val pointer = evaluate(target.operand, env) as? GoPointer ?: throw RuntimeGoError("dereference of non-pointer")
+                pointer.set(value)
             }
             else -> throw RuntimeGoError("invalid assignment target")
         }
@@ -402,8 +409,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is LiteralExpression -> literal(expression.token)
         is ParenthesizedExpression -> evaluate(expression.expression, env)
         is UnaryExpression -> when (expression.operator) {
-            TokenKind.AND -> GoPointer(evaluate(expression.operand, env))
-            TokenKind.MUL -> dereference(evaluate(expression.operand, env))
+            TokenKind.AND -> addressOf(expression.operand, env)
+            TokenKind.MUL -> (evaluate(expression.operand, env) as? GoPointer)?.get()
+                ?: throw RuntimeGoError("dereference of non-pointer or nil")
             else -> unary(expression.operator, evaluate(expression.operand, env))
         }
         is BinaryExpression -> {
@@ -424,7 +432,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     val pointerReceiver = method.receiver?.type is PointerGoType
                     val boundReceiver = when {
                         pointerReceiver && receiver is GoPointer -> receiver
-                        pointerReceiver -> GoPointer(receiver)
+                        pointerReceiver -> GoPointer.cell(receiver)
                         receiver is GoPointer -> copyValue(dereference(receiver))
                         else -> copyValue(receiver)
                     }
@@ -438,6 +446,30 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             expression.high?.let { evaluate(it, env) }, expression.max?.let { evaluate(it, env) })
         is TypeExpression -> TypeValue(expression.type)
         is CompositeLiteral -> composite(expression, env)
+    }
+
+    private suspend fun addressOf(expression: Expression, env: Environment): GoPointer = when (expression) {
+        is NameExpression -> env.pointer(expression.name)
+        is SelectorExpression -> {
+            val receiver = dereference(evaluate(expression.receiver, env)) as? GoStruct
+                ?: throw RuntimeGoError("address-of selector requires a struct")
+            if (!receiver.fields.containsKey(expression.field)) throw RuntimeGoError("unknown struct field: ${expression.field}")
+            receiver.pointer(expression.field)
+        }
+        is IndexExpression -> {
+            val receiver = evaluate(expression.receiver, env)
+            val key = number(evaluate(expression.index, env), "index").toInt()
+            when (receiver) {
+                is GoSlice -> receiver.pointerAt(key)
+                is GoArray -> receiver.pointerAt(key)
+                else -> throw RuntimeGoError("address-of index requires an array or slice element")
+            }
+        }
+        is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
+            evaluate(expression.operand, env) as? GoPointer ?: throw RuntimeGoError("cannot take address through a non-pointer")
+        } else throw RuntimeGoError("expression is not addressable")
+        is CompositeLiteral -> GoPointer.cell(composite(expression, env))
+        else -> throw RuntimeGoError("expression is not addressable")
     }
 
     private suspend fun call(call: CallExpression, env: Environment): Any? {
@@ -463,7 +495,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 }
                 "panic" -> throw RuntimeGoError(args.firstOrNull()?.toString() ?: "panic")
                 "make" -> return make(args)
-                "new" -> return null
+                "new" -> {
+                    val type = (args.singleOrNull() as? TypeValue)?.type ?: throw RuntimeGoError("new requires a type")
+                    return GoPointer.cell(zeroValue(type))
+                }
                 "close" -> { (args.singleOrNull() as? GoChannel)?.close() ?: throw RuntimeGoError("close of non-channel"); return null }
                 "len" -> return when (val value = args.singleOrNull()) {
                     is String -> value.toByteArray(Charsets.UTF_8).size.toLong()
@@ -552,7 +587,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         return "${(base as? NamedGoType)?.name ?: base}.$name"
     }
 
-    private fun dereference(value: Any?): Any? = if (value is GoPointer) value.value else value
+    private fun dereference(value: Any?): Any? = if (value is GoPointer) value.get() else value
 
     private fun copyValue(value: Any?): Any? = when (value) {
         is GoStruct -> GoStruct(value.fields.toMutableMap(), value.namedType)
@@ -770,6 +805,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun truth(value: Any?) = value as? Boolean ?: typeError("condition", value)
     private fun stringify(value: Any?): String = when (value) {
         null -> "<nil>"
+        is GoPointer -> "&${stringify(value.get())}"
         is FunctionValue -> "<function ${value.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoArray -> value.values.joinToString(prefix = "[", postfix = "]") { stringify(it) }
@@ -823,12 +859,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         private val deferredCalls: MutableList<suspend () -> Unit> = mutableListOf()
     ) {
         private val values = mutableMapOf<String, Any?>()
+        private val addresses = mutableMapOf<String, GoPointer>()
         fun child() = Environment(this, deferredCalls)
         fun define(name: String, value: Any?) { values[name] = value }
         fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
         fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
         fun getOrNull(name: String): Any? = lookup(name)?.value
         fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
+        fun pointer(name: String): GoPointer {
+            val owner = owner(name) ?: throw RuntimeGoError("undefined: $name")
+            return owner.addresses.getOrPut(name) { GoPointer.reference({ owner.get(name) }, { owner.set(name, it) }) }
+        }
+        private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
         suspend fun runDefers() {
             for (action in deferredCalls.asReversed()) action()
@@ -853,8 +895,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private sealed interface SelectOperation { val caseIndex: Int }
     private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation
     private data class SelectReceive(override val caseIndex: Int, val channel: GoChannel, val assignment: AssignmentStatement?) : SelectOperation
-    private class GoArray(val elementType: GoTypeSyntax, val values: MutableList<Any?>)
+    private class GoArray(val elementType: GoTypeSyntax, val values: MutableList<Any?>) {
+        private val addresses = mutableMapOf<Int, GoPointer>()
+        fun pointerAt(index: Int): GoPointer {
+            if (index !in values.indices) throw RuntimeGoError("array index out of range")
+            return addresses.getOrPut(index) { GoPointer.reference({ values[index] }, { values[index] = it }) }
+        }
+    }
     private inner class GoSlice(val elementType: GoTypeSyntax, private val backing: MutableList<Any?>, private val start: Int, val length: Int, val capacity: Int) {
+        private val addresses = mutableMapOf<Int, GoPointer>()
         fun get(index: Int): Any? {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             return backing[start + index]
@@ -862,6 +911,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun set(index: Int, value: Any?) {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             backing[start + index] = value
+        }
+        fun pointerAt(index: Int): GoPointer {
+            if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
+            val absolute = start + index
+            return addresses.getOrPut(index) { GoPointer.reference({ backing[absolute] }, { backing[absolute] = it }) }
         }
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
@@ -881,8 +935,25 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun toList(): List<Any?> = (0 until length).map(::get)
     }
     private class GoMap(val keyType: GoTypeSyntax, val valueType: GoTypeSyntax, val elementZero: Any?, val values: MutableMap<Any?, Any?>)
-    private class GoStruct(val fields: MutableMap<String, Any?>, val namedType: String? = null)
-    private class GoPointer(var value: Any?)
+    private class GoStruct(val fields: MutableMap<String, Any?>, val namedType: String? = null) {
+        private val addresses = mutableMapOf<String, GoPointer>()
+        fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
+            GoPointer.reference({ fields[field] }, { fields[field] = it })
+        }
+    }
+    private class GoPointer(private val location: GoLocation) {
+        fun get(): Any? = location.get()
+        fun set(value: Any?) = location.set(value)
+        override fun equals(other: Any?) = other is GoPointer && location === other.location
+        override fun hashCode() = System.identityHashCode(location)
+
+        companion object {
+            fun reference(get: () -> Any?, set: (Any?) -> Unit) = GoPointer(GoLocation(get, set))
+            fun cell(value: Any?) = GoCell(value).let { cell -> reference({ cell.value }, { cell.value = it }) }
+        }
+    }
+    private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)
+    private class GoCell(var value: Any?)
     private class GoChannel(private val elementZero: Any?, val capacity: Int) {
         val queue = Channel<Any?>(capacity)
         private val buffered = AtomicInteger(0)
