@@ -481,7 +481,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 while (charIndex < value.length) {
                     val cp = value.codePointAt(charIndex)
                     if (range.targets.isNotEmpty()) {
-                        val values = listOf(byteIndex, cp.toLong()).take(range.targets.size)
+                        val values = listOf(byteIndex, GoInteger(cp.toLong(), NamedGoType("rune"))).take(range.targets.size)
                         assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env)
                     }
                     try { executeBlock(body, env) }
@@ -871,13 +871,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 "real" -> return when (val value = args.singleOrNull()) {
                     is GoComplex -> floatResult(value.real, value.type)
                     is GoFloat -> value.value
+                    is GoInteger -> integerAsDouble(value)
                     is Double -> value
                     is Long -> value.toDouble()
                     else -> throw RuntimeGoError("real requires a numeric argument")
                 }
                 "imag" -> return when (val value = args.singleOrNull()) {
                     is GoComplex -> floatResult(value.imaginary, value.type)
-                    is GoFloat, is Double, is Long -> 0.0
+                    is GoFloat, is GoInteger, is Double, is Long -> 0.0
                     else -> throw RuntimeGoError("imag requires a numeric argument")
                 }
                 "make" -> return make(args)
@@ -998,6 +999,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is GoNilValue -> value.type
         is GoComplex -> value.type
         is GoFloat -> value.type
+        is GoInteger -> value.type
         is GoSlice -> SliceGoType(value.elementType)
         is GoMap -> MapGoType(value.keyType, value.valueType)
         is GoChannel -> ChannelGoType(value.elementType, ChannelDirection.SEND_RECEIVE)
@@ -1085,7 +1087,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is PointerGoType -> GoPointer.nil(actual.element)
             is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
             else -> null
-        } else if (actual is NamedGoType && actual.name in setOf("complex64", "complex128", "float32")) convert(type, value)
+        } else if (actual is NamedGoType && (actual.name in integerTypeNames || actual.name in setOf("complex64", "complex128", "float32"))) convert(type, value)
         else copyValue(value)
         return boxInterface(copied, type)
     }
@@ -1169,7 +1171,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val converted = if (isByteType(target.element))
                     value.toByteArray(Charsets.UTF_8).map { (it.toInt() and 0xff).toLong() }
                 else value.codePoints().toArray().map(Int::toLong)
-                GoSlice(target.element, converted.toMutableList(), 0, converted.size, converted.size)
+                val backing = converted.mapTo(mutableListOf()) { copyForType(it, target.element) }
+                GoSlice(target.element, backing, 0, backing.size, backing.size)
             } else if (value == null || value is GoNilValue && underlying(value.type) is SliceGoType) GoNilValue(type)
             else throw RuntimeGoError("cannot convert value to $type")
         }
@@ -1179,6 +1182,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             "string" -> when (value) {
                 is String -> value
                 is Long -> codePointString(value)
+                is GoInteger -> codePointString(value.value)
                 is GoSlice -> when {
                     isByteType(value.elementType) -> String(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), Charsets.UTF_8)
                     isRuneType(value.elementType) -> value.toList().joinToString("") { codePointString(number(it, "string conversion")) }
@@ -1190,19 +1194,30 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             "bool" -> value as? Boolean ?: throw RuntimeGoError("cannot convert to bool")
             "float32", "float64" -> when (value) {
                 is Long -> if (target.name == "float32") GoFloat(value.toFloat().toDouble(), type) else value.toDouble()
+                is GoInteger -> integerAsDouble(value).let { if (target.name == "float32") GoFloat(it.toFloat().toDouble(), type) else it }
                 is Double -> if (target.name == "float32") GoFloat(value.toFloat().toDouble(), type) else value
                 is GoFloat -> if (target.name == "float32") GoFloat(value.value.toFloat().toDouble(), type) else value.value
                 is GoComplex -> if (target.name == "float32") GoFloat(value.real.toFloat().toDouble(), type) else value.real
                 else -> throw RuntimeGoError("cannot convert to float")
             }
             "complex64", "complex128" -> {
-                val real = when (value) { is Long -> value.toDouble(); is Double -> value; is GoFloat -> value.value; is GoComplex -> value.real; else -> throw RuntimeGoError("cannot convert to complex") }
+                val real = when (value) { is Long -> value.toDouble(); is GoInteger -> integerAsDouble(value); is Double -> value; is GoFloat -> value.value; is GoComplex -> value.real; else -> throw RuntimeGoError("cannot convert to complex") }
                 val imaginary = (value as? GoComplex)?.imaginary ?: 0.0
                 val convertedType = type
                 if (target.name == "complex64") GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), convertedType)
                 else GoComplex(real, imaginary, convertedType)
             }
-            "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uintptr", "byte", "rune" -> when (value) { is Long -> value; is Double -> value.toLong(); is GoFloat -> value.value.toLong(); is GoComplex -> value.real.toLong(); else -> throw RuntimeGoError("cannot convert to integer") }
+            in integerTypeNames -> {
+                val converted = when (value) {
+                    is Long -> value
+                    is GoInteger -> value.value
+                    is Double -> value.toLong()
+                    is GoFloat -> value.value.toLong()
+                    is GoComplex -> value.real.toLong()
+                    else -> throw RuntimeGoError("cannot convert to integer")
+                }
+                GoInteger(wrapInteger(converted, type), type)
+            }
             else -> value
         }
         else -> value
@@ -1213,6 +1228,30 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun isByteOrRuneType(type: GoTypeSyntax): Boolean = isByteType(type) || isRuneType(type)
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
         (underlying(type) as? SliceGoType)?.element?.let(::isByteOrRuneType) == true
+
+    private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
+        setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+
+    private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
+        "int8", "uint8", "byte" -> 8
+        "int16", "uint16" -> 16
+        "int32", "uint32", "rune" -> 32
+        else -> 64
+    }
+
+    private fun wrapInteger(value: Long, type: GoTypeSyntax): Long {
+        val bits = integerBitWidth(type)
+        if (bits == Long.SIZE_BITS) return value
+        val mask = (1L shl bits) - 1
+        val narrowed = value and mask
+        return if (!isUnsignedInteger(type) && narrowed.and(1L shl (bits - 1)) != 0L) narrowed or mask.inv() else narrowed
+    }
+
+    private fun shiftCount(value: Any?, number: Long): Long =
+        if (value is GoInteger && isUnsignedInteger(value.type) && number < 0) Long.MAX_VALUE else number
+
+    private fun integerAsDouble(value: GoInteger): Double = if (isUnsignedInteger(value.type) && value.value < 0)
+        java.lang.Long.toUnsignedString(value.value).toDouble() else value.value.toDouble()
 
     private fun codePointString(value: Long): String {
         val codePoint = value.toInt()
@@ -1285,13 +1324,17 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         TokenKind.ADD -> value
         TokenKind.SUB -> when (value) {
             is Long -> -value
+            is GoInteger -> value.copy(value = wrapInteger(-value.value, value.type))
             is Double -> -value
             is GoFloat -> value.copy(value = -value.value)
             is GoComplex -> value.copy(real = -value.real, imaginary = -value.imaginary)
             else -> typeError("unary -", value)
         }
         TokenKind.NOT -> !(value as? Boolean ?: typeError("!", value))
-        TokenKind.XOR -> number(value, "^").inv()
+        TokenKind.XOR -> when (value) {
+            is GoInteger -> value.copy(value = wrapInteger(value.value.inv(), value.type))
+            else -> number(value, "^").inv()
+        }
         TokenKind.AND -> throw RuntimeGoError("pointers are not implemented")
         TokenKind.MUL -> throw RuntimeGoError("pointer dereference is not implemented")
         TokenKind.ARROW -> when (value) {
@@ -1345,7 +1388,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is NamedGoType -> when (actual.name) {
             "bool" -> false
             "string" -> ""
-            "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune" -> 0L
+            in integerTypeNames -> GoInteger(0L, type)
             "float32" -> GoFloat(0.0, type)
             "float64" -> 0.0
             "complex64", "complex128" -> GoComplex(0.0, 0.0, type)
@@ -1458,31 +1501,49 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
         }
         val a = number(left, op.name); val b = number(right, op.name)
-        return when (op) {
-            TokenKind.ADD -> a + b; TokenKind.SUB -> a - b; TokenKind.MUL -> a * b
+        val integerType = if (op == TokenKind.SHL || op == TokenKind.SHR)
+            (left as? GoInteger)?.type else (left as? GoInteger)?.type ?: (right as? GoInteger)?.type
+        val unsigned = integerType?.let(::isUnsignedInteger) == true
+        val compare = if (unsigned) java.lang.Long.compareUnsigned(a, b) else a.compareTo(b)
+        when (op) {
+            TokenKind.LSS -> return compare < 0
+            TokenKind.LEQ -> return compare <= 0
+            TokenKind.GTR -> return compare > 0
+            TokenKind.GEQ -> return compare >= 0
+            else -> Unit
+        }
+        val bits = integerType?.let(::integerBitWidth) ?: Long.SIZE_BITS
+        val shift = if (op == TokenKind.SHL || op == TokenKind.SHR) shiftCount(right, b) else 0L
+        if ((op == TokenKind.SHL || op == TokenKind.SHR) && shift < 0) throw RuntimeGoError("negative shift count")
+        val result = when (op) {
+            TokenKind.ADD -> a + b
+            TokenKind.SUB -> a - b
+            TokenKind.MUL -> a * b
             TokenKind.QUO -> when {
                 b == 0L -> throw RuntimeGoError("integer divide by zero")
+                unsigned -> java.lang.Long.divideUnsigned(a, b)
                 a == Long.MIN_VALUE && b == -1L -> Long.MIN_VALUE
                 else -> a / b
             }
             TokenKind.REM -> when {
                 b == 0L -> throw RuntimeGoError("integer divide by zero")
+                unsigned -> java.lang.Long.remainderUnsigned(a, b)
                 a == Long.MIN_VALUE && b == -1L -> 0L
                 else -> a % b
             }
-            TokenKind.AND -> a and b; TokenKind.OR -> a or b; TokenKind.XOR -> a xor b
+            TokenKind.AND -> a and b
+            TokenKind.OR -> a or b
+            TokenKind.XOR -> a xor b
             TokenKind.AND_NOT -> a and b.inv()
-            TokenKind.SHL -> {
-                if (b < 0) throw RuntimeGoError("negative shift count")
-                if (b >= Long.SIZE_BITS) 0L else a shl b.toInt()
+            TokenKind.SHL -> if (shift >= bits) 0L else a shl shift.toInt()
+            TokenKind.SHR -> when {
+                shift >= bits -> if (!unsigned && a < 0) -1L else 0L
+                unsigned -> a ushr shift.toInt()
+                else -> a shr shift.toInt()
             }
-            TokenKind.SHR -> {
-                if (b < 0) throw RuntimeGoError("negative shift count")
-                if (b >= Long.SIZE_BITS) if (a < 0) -1L else 0L else a shr b.toInt()
-            }
-            TokenKind.LSS -> a < b; TokenKind.LEQ -> a <= b; TokenKind.GTR -> a > b; TokenKind.GEQ -> a >= b
             else -> throw RuntimeGoError("invalid operator $op")
         }
+        return integerType?.let { GoInteger(wrapInteger(result, it), it) } ?: result
     }
 
     private fun goEqual(left: Any?, right: Any?): Boolean {
@@ -1508,6 +1569,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val a = complexValue(left)
             val b = complexValue(right)
             return a.real == b.real && a.imaginary == b.imaginary
+        }
+        if (left is GoInteger || right is GoInteger) {
+            val a = (left as? GoInteger)?.value ?: (left as? Long) ?: return false
+            val b = (right as? GoInteger)?.value ?: (right as? Long) ?: return false
+            return a == b
         }
         if (left is GoFloat || right is GoFloat) return real(left) == real(right)
         if (left is Double && right is Double) return left == right
@@ -1555,9 +1621,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         else -> value.hashCode()
     }
 
-    private fun number(value: Any?, op: String): Long = value as? Long ?: typeError(op, value)
+    private fun number(value: Any?, op: String): Long = when (value) {
+        is Long -> value
+        is GoInteger -> value.value
+        else -> typeError(op, value)
+    }
     private fun complexValue(value: Any?): GoComplex = when (value) {
         is GoComplex -> value
+        is GoInteger -> GoComplex(integerAsDouble(value), 0.0, NamedGoType("complex128"))
         is Long -> GoComplex(value.toDouble(), 0.0, NamedGoType("complex128"))
         is Double -> GoComplex(value, 0.0, NamedGoType("complex128"))
         else -> typeError("complex arithmetic", value)
@@ -1569,6 +1640,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
     private fun real(value: Any?): Double = when (value) {
         is Long -> value.toDouble()
+        is GoInteger -> integerAsDouble(value)
         is Double -> value
         is GoFloat -> value.value
         is GoComplex -> value.real
@@ -1583,6 +1655,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is GoInterfaceValue -> stringify(value.value)
         is GoComplex -> "(${value.real}${if (value.imaginary < 0) "" else "+"}${value.imaginary}i)"
         is GoFloat -> value.value.toString()
+        is GoInteger -> if (isUnsignedInteger(value.type)) java.lang.Long.toUnsignedString(value.value) else value.value.toString()
         is GoPointer -> if (value.isNil) "<nil>" else "&${stringify(value.get())}"
         is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
@@ -1702,6 +1775,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private data class GoNilValue(val type: GoTypeSyntax)
     private data class GoComplex(val real: Double, val imaginary: Double, val type: GoTypeSyntax)
     private data class GoFloat(val value: Double, val type: GoTypeSyntax)
+    private data class GoInteger(val value: Long, val type: GoTypeSyntax)
     private data class RuntimeTarget(val get: () -> Any?, val set: (Any?) -> Unit)
     private class PanicState(var activePanic: PanicSignal? = null, var recoverAllowed: Boolean = false)
     private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
@@ -1827,6 +1901,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private class FallthroughSignal : RuntimeException(null, null, false, false)
 
     companion object {
+        private val integerTypeNames = setOf("int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")
     }
