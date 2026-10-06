@@ -36,7 +36,10 @@ methods on named types, with value and pointer receiver dispatch. Embedded
 struct-field method promotion and some interface assignment cases are still
 incomplete.
 Interface type assertions and type switches are supported for the runtime
-types currently represented, including typed nil pointers stored in interfaces.
+types currently represented, including typed nil pointers, slices, maps,
+channels, and functions stored in interfaces. Nil slices and maps have their
+specified zero-length behavior; nil channel operations block and are disabled
+as `select` cases.
 Full package resolution and standard-library/runtime support are also missing.
 Go features added after Go 1.0, such as generics and later literal syntax, are
 out of scope. The project builds and runs on JDK 27 with Gradle
