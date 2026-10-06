@@ -243,7 +243,7 @@ class TypeChecker {
         blockStatementIndices = emptyMap()
         try {
             checkBlock(body, scope, reuseScope = true)
-            if (function.resultTypes.isNotEmpty() && !endsWithReturnOrPanic(body))
+            if (function.resultTypes.isNotEmpty() && !endsWithTerminatingStatement(body))
                 error("missing return at end of function ${function.name}")
             val unused = functionLabels.keys - usedLabels
             if (unused.isNotEmpty()) error("label ${unused.first()} declared and not used")
@@ -276,11 +276,53 @@ class TypeChecker {
         }
     }
 
-    private fun endsWithReturnOrPanic(block: BlockStatement): Boolean = when (val last = block.statements.lastOrNull()) {
+    private fun endsWithTerminatingStatement(block: BlockStatement, labels: Set<String> = emptySet()): Boolean =
+        block.statements.lastOrNull { it != EmptyStatement }?.let { isTerminatingStatement(it, labels) } == true
+
+    private fun isTerminatingStatement(statement: Statement, labels: Set<String> = emptySet()): Boolean = when (statement) {
         is ReturnStatement -> true
-        is ExpressionStatement -> (last.expression as? CallExpression)?.let(terminatingPanicCalls::contains) == true
+        is BranchStatement -> statement.kind == TokenKind.GOTO
+        is ExpressionStatement -> (statement.expression as? CallExpression)?.let(terminatingPanicCalls::contains) == true
+        is BlockStatement -> endsWithTerminatingStatement(statement, labels)
+        is LabeledStatement -> isTerminatingStatement(statement.statement, labels + statement.label)
+        is IfStatement -> statement.elseBranch != null &&
+            endsWithTerminatingStatement(statement.thenBranch, labels) && isTerminatingStatement(statement.elseBranch, labels)
+        is ForStatement -> statement.rangeClause == null && statement.condition == null &&
+            !containsBreakTo(statement.body, labels)
+        is SwitchStatement -> statement.clauses.any { it.expressions == null } &&
+            !statement.clauses.any { containsBreakTo(it.statements, labels) } &&
+            statement.clauses.all { clauseTerminates(it.statements, allowFallthrough = true, labels) }
+        is TypeSwitchStatement -> statement.clauses.any { it.types == null } &&
+            !statement.clauses.any { containsBreakTo(it.statements, labels) } &&
+            statement.clauses.all { clauseTerminates(it.statements, allowFallthrough = false, labels) }
+        is SelectStatement -> statement.cases.none { containsBreakTo(it.statements, labels) } &&
+            statement.cases.all { clauseTerminates(it.statements, allowFallthrough = false, labels) }
         else -> false
     }
+
+    private fun clauseTerminates(statements: List<Statement>, allowFallthrough: Boolean, labels: Set<String>): Boolean {
+        val last = statements.lastOrNull { it != EmptyStatement } ?: return false
+        return if (allowFallthrough && unwrapLabels(last) is BranchStatement &&
+            (unwrapLabels(last) as BranchStatement).kind == TokenKind.FALLTHROUGH) true
+        else isTerminatingStatement(last, labels)
+    }
+
+    private fun containsBreakTo(statement: Statement, labels: Set<String>, nestedBreakables: Int = 0): Boolean = when (statement) {
+        is BranchStatement -> statement.kind == TokenKind.BREAK &&
+            if (statement.label == null) nestedBreakables == 0 else statement.label in labels
+        is LabeledStatement -> containsBreakTo(statement.statement, labels, nestedBreakables)
+        is BlockStatement -> statement.statements.any { containsBreakTo(it, labels, nestedBreakables) }
+        is IfStatement -> listOfNotNull(statement.init, statement.thenBranch, statement.elseBranch)
+            .any { containsBreakTo(it, labels, nestedBreakables) }
+        is ForStatement -> containsBreakTo(statement.body, labels, nestedBreakables + 1)
+        is SwitchStatement -> statement.clauses.any { containsBreakTo(it.statements, labels, nestedBreakables + 1) }
+        is TypeSwitchStatement -> statement.clauses.any { containsBreakTo(it.statements, labels, nestedBreakables + 1) }
+        is SelectStatement -> statement.cases.any { containsBreakTo(it.statements, labels, nestedBreakables + 1) }
+        else -> false
+    }
+
+    private fun containsBreakTo(statements: List<Statement>, labels: Set<String>, nestedBreakables: Int = 0): Boolean =
+        statements.any { containsBreakTo(it, labels, nestedBreakables) }
 
     private fun <T> withLocalTypeScope(action: () -> T): T {
         val previous = typeDeclarations.toMap()
@@ -350,6 +392,17 @@ class TypeChecker {
 
     private fun unwrapLabels(statement: Statement): Statement =
         if (statement is LabeledStatement) unwrapLabels(statement.statement) else statement
+
+    private fun containsFallthrough(statement: Statement): Boolean = when (statement) {
+        is BranchStatement -> statement.kind == TokenKind.FALLTHROUGH
+        is LabeledStatement -> containsFallthrough(statement.statement)
+        is BlockStatement -> statement.statements.any(::containsFallthrough)
+        is IfStatement -> listOfNotNull(statement.init, statement.thenBranch, statement.elseBranch).any(::containsFallthrough)
+        is ForStatement -> listOfNotNull(statement.init, statement.post, statement.body).any(::containsFallthrough)
+        // Nested clause-bearing statements validate their own fallthrough statements.
+        is SwitchStatement, is TypeSwitchStatement, is SelectStatement -> false
+        else -> false
+    }
 
     private fun checkStatement(statement: Statement, scope: Scope) {
         when (statement) {
@@ -588,6 +641,7 @@ class TypeChecker {
 
     private fun checkSelect(statement: SelectStatement, scope: Scope) {
         statement.cases.forEach { clause ->
+            if (clause.statements.any(::containsFallthrough)) error("fallthrough is not permitted in a select")
             val caseScope = scope.child()
             when (val communication = clause.communication) {
                 null -> Unit
@@ -634,7 +688,15 @@ class TypeChecker {
         if (tagType != null && !isComparable(tagType)) error("switch expression must be comparable")
         var sawDefault = false
         val seenCases = mutableSetOf<String>()
-        statement.clauses.forEach { clause ->
+        statement.clauses.forEachIndexed { clauseIndex, clause ->
+            val lastStatementIndex = clause.statements.indexOfLast { it != EmptyStatement }
+            clause.statements.forEachIndexed { statementIndex, child ->
+                val branch = unwrapLabels(child) as? BranchStatement
+                if (branch?.kind == TokenKind.FALLTHROUGH) {
+                    if (clauseIndex == statement.clauses.lastIndex || statementIndex != lastStatementIndex)
+                        error("fallthrough statement out of place")
+                } else if (containsFallthrough(child)) error("fallthrough statement out of place")
+            }
             val caseScope = switchScope.child()
             if (clause.expressions == null) {
                 if (sawDefault) error("multiple default cases in switch")
@@ -791,9 +853,7 @@ class TypeChecker {
                 if (seenTypes.any { sameType(it, caseType) }) error("duplicate type switch case $caseType")
                 seenTypes += caseType
             }
-            if (clause.statements.lastOrNull() is BranchStatement &&
-                (clause.statements.last() as BranchStatement).kind == TokenKind.FALLTHROUGH)
-                error("fallthrough is not permitted in a type switch")
+            if (clause.statements.any(::containsFallthrough)) error("fallthrough is not permitted in a type switch")
             val caseScope = switchScope.child()
             val singleType = clause.types?.singleOrNull()?.takeUnless { it == NamedGoType("nil") }
                 ?.let { resolveLocalType(it, switchScope) }
@@ -888,7 +948,7 @@ class TypeChecker {
             blockStatementIndices = emptyMap()
             try {
                 checkBlock(expression.body, literalScope, reuseScope = true)
-                if (results.isNotEmpty() && !endsWithReturnOrPanic(expression.body))
+                if (results.isNotEmpty() && !endsWithTerminatingStatement(expression.body))
                     error("missing return at end of function literal")
                 val unused = functionLabels.keys - usedLabels
                 if (unused.isNotEmpty()) error("label ${unused.first()} declared and not used")
