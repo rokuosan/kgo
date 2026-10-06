@@ -507,7 +507,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             "true" -> true
             "false" -> false
             "nil" -> null
-            "make", "new", "close", "len", "cap", "append", "copy", "delete", "print", "println", "panic" -> BuiltinValue(expression.name)
+            "make", "new", "close", "len", "cap", "append", "copy", "delete", "print", "println", "panic", "complex", "real", "imag" -> BuiltinValue(expression.name)
             in builtinTypes -> TypeValue(NamedGoType(expression.name))
             in typeDefinitions -> TypeValue(NamedGoType(expression.name))
             else -> env.lookup(expression.name)?.value ?: if (env.contains(expression.name)) null else functions[expression.name]
@@ -647,6 +647,24 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     return null
                 }
                 "panic" -> throw RuntimeGoError(args.firstOrNull()?.toString() ?: "panic")
+                "complex" -> {
+                    if (args.size != 2) throw RuntimeGoError("complex expects two arguments")
+                    val type = if (args.filterIsInstance<GoFloat>().any { underlying(it.type) == NamedGoType("float32") })
+                        NamedGoType("complex64") else NamedGoType("complex128")
+                    return GoComplex(real(args[0]), real(args[1]), type)
+                }
+                "real" -> return when (val value = args.singleOrNull()) {
+                    is GoComplex -> floatResult(value.real, value.type)
+                    is GoFloat -> value.value
+                    is Double -> value
+                    is Long -> value.toDouble()
+                    else -> throw RuntimeGoError("real requires a numeric argument")
+                }
+                "imag" -> return when (val value = args.singleOrNull()) {
+                    is GoComplex -> floatResult(value.imaginary, value.type)
+                    is GoFloat, is Double, is Long -> 0.0
+                    else -> throw RuntimeGoError("imag requires a numeric argument")
+                }
                 "make" -> return make(args)
                 "new" -> {
                     val type = (args.singleOrNull() as? TypeValue)?.type ?: throw RuntimeGoError("new requires a type")
@@ -763,6 +781,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is GoStruct -> value.namedType?.let(::NamedGoType)
         is GoPointer -> value.pointeeType?.let(::PointerGoType) ?: runtimeType(value.get())?.let(::PointerGoType)
         is GoNilValue -> value.type
+        is GoComplex -> value.type
+        is GoFloat -> value.type
         is GoSlice -> SliceGoType(value.elementType)
         is GoMap -> MapGoType(value.keyType, value.valueType)
         is GoChannel -> ChannelGoType(value.elementType, ChannelDirection.SEND_RECEIVE)
@@ -850,7 +870,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is PointerGoType -> GoPointer.nil(actual.element)
             is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
             else -> null
-        } else copyValue(value)
+        } else if (actual is NamedGoType && actual.name in setOf("complex64", "complex128", "float32")) convert(type, value)
+        else copyValue(value)
         return boxInterface(copied, type)
     }
 
@@ -905,8 +926,21 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is NamedGoType -> when (target.name) {
             "string" -> when (value) { is String -> value; is Long -> String(Character.toChars(value.toInt())); else -> throw RuntimeGoError("cannot convert to string") }
             "bool" -> value as? Boolean ?: throw RuntimeGoError("cannot convert to bool")
-            "float32", "float64" -> real(value)
-            "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune" -> when (value) { is Long -> value; is Double -> value.toLong(); else -> throw RuntimeGoError("cannot convert to integer") }
+            "float32", "float64" -> when (value) {
+                is Long -> if (target.name == "float32") GoFloat(value.toFloat().toDouble(), type) else value.toDouble()
+                is Double -> if (target.name == "float32") GoFloat(value.toFloat().toDouble(), type) else value
+                is GoFloat -> if (target.name == "float32") GoFloat(value.value.toFloat().toDouble(), type) else value.value
+                is GoComplex -> if (target.name == "float32") GoFloat(value.real.toFloat().toDouble(), type) else value.real
+                else -> throw RuntimeGoError("cannot convert to float")
+            }
+            "complex64", "complex128" -> {
+                val real = when (value) { is Long -> value.toDouble(); is Double -> value; is GoFloat -> value.value; is GoComplex -> value.real; else -> throw RuntimeGoError("cannot convert to complex") }
+                val imaginary = (value as? GoComplex)?.imaginary ?: 0.0
+                val convertedType = type
+                if (target.name == "complex64") GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), convertedType)
+                else GoComplex(real, imaginary, convertedType)
+            }
+            "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uintptr", "byte", "rune" -> when (value) { is Long -> value; is Double -> value.toLong(); is GoFloat -> value.value.toLong(); is GoComplex -> value.real.toLong(); else -> throw RuntimeGoError("cannot convert to integer") }
             else -> value
         }
         else -> value
@@ -958,7 +992,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun literal(token: Token): Any = when (token.kind) {
         TokenKind.INT -> integer(token.lexeme)
         TokenKind.FLOAT -> token.lexeme.toDoubleOrNull() ?: throw RuntimeGoError("invalid float ${token.lexeme}")
-        TokenKind.IMAG -> token.lexeme.removeSuffix("i").toDoubleOrNull() ?: throw RuntimeGoError("invalid imaginary literal")
+        TokenKind.IMAG -> GoComplex(0.0, imaginaryPart(token.lexeme.removeSuffix("i")), NamedGoType("complex128"))
         TokenKind.CHAR -> decodeQuoted(token.lexeme, '\'').codePointAt(0).toLong()
         TokenKind.STRING -> decodeString(token.lexeme)
         else -> throw RuntimeGoError("invalid literal")
@@ -975,7 +1009,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private suspend fun unary(operator: TokenKind, value: Any?): Any? = when (operator) {
         TokenKind.ADD -> value
-        TokenKind.SUB -> when (value) { is Long -> -value; is Double -> -value; else -> typeError("unary -", value) }
+        TokenKind.SUB -> when (value) {
+            is Long -> -value
+            is Double -> -value
+            is GoFloat -> value.copy(value = -value.value)
+            is GoComplex -> value.copy(real = -value.real, imaginary = -value.imaginary)
+            else -> typeError("unary -", value)
+        }
         TokenKind.NOT -> !(value as? Boolean ?: typeError("!", value))
         TokenKind.XOR -> number(value, "^").inv()
         TokenKind.AND -> throw RuntimeGoError("pointers are not implemented")
@@ -1032,8 +1072,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             "bool" -> false
             "string" -> ""
             "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune" -> 0L
-            "float32", "float64" -> 0.0
-            "complex64", "complex128" -> 0.0
+            "float32" -> GoFloat(0.0, type)
+            "float64" -> 0.0
+            "complex64", "complex128" -> GoComplex(0.0, 0.0, type)
             else -> null
         }
         is ArrayGoType -> {
@@ -1101,10 +1142,33 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             return if (op == TokenKind.LAND) a && b else a || b
         }
         if ((left is String) && (right is String) && op == TokenKind.ADD) return left + right
-        if (left is Double || right is Double) {
-            val a = real(left); val b = real(right)
+        if (left is GoComplex || right is GoComplex) {
+            val a = complexValue(left)
+            val b = complexValue(right)
+            val resultType = (left as? GoComplex)?.type ?: (right as? GoComplex)?.type ?: NamedGoType("complex128")
+            fun result(real: Double, imaginary: Double): GoComplex = if (underlying(resultType) == NamedGoType("complex64"))
+                GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), resultType)
+            else GoComplex(real, imaginary, resultType)
             return when (op) {
-                TokenKind.ADD -> a + b; TokenKind.SUB -> a - b; TokenKind.MUL -> a * b; TokenKind.QUO -> a / b
+                TokenKind.ADD -> result(a.real + b.real, a.imaginary + b.imaginary)
+                TokenKind.SUB -> result(a.real - b.real, a.imaginary - b.imaginary)
+                TokenKind.MUL -> result(a.real * b.real - a.imaginary * b.imaginary,
+                    a.real * b.imaginary + a.imaginary * b.real)
+                TokenKind.QUO -> {
+                    val denominator = b.real * b.real + b.imaginary * b.imaginary
+                    result((a.real * b.real + a.imaginary * b.imaginary) / denominator,
+                        (a.imaginary * b.real - a.real * b.imaginary) / denominator)
+                }
+                else -> throw RuntimeGoError("invalid complex operator $op")
+            }
+        }
+        if (left is Double || right is Double || left is GoFloat || right is GoFloat) {
+            val a = real(left); val b = real(right)
+            val float32Type = (left as? GoFloat)?.type?.takeIf { underlying(it) == NamedGoType("float32") }
+                ?: (right as? GoFloat)?.type?.takeIf { underlying(it) == NamedGoType("float32") }
+            fun result(value: Double): Any = if (float32Type == null) value else GoFloat(value.toFloat().toDouble(), float32Type)
+            return when (op) {
+                TokenKind.ADD -> result(a + b); TokenKind.SUB -> result(a - b); TokenKind.MUL -> result(a * b); TokenKind.QUO -> result(a / b)
                 TokenKind.LSS -> a < b; TokenKind.LEQ -> a <= b; TokenKind.GTR -> a > b; TokenKind.GEQ -> a >= b
                 else -> throw RuntimeGoError("invalid floating-point operator $op")
             }
@@ -1139,6 +1203,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 throw RuntimeGoError("comparing uncomparable type ${leftType ?: "interface value"}")
             return goEqual(leftValue, rightValue)
         }
+        if (left is GoComplex && right is GoComplex) return left.real == right.real && left.imaginary == right.imaginary
+        if (left is GoComplex || right is GoComplex) {
+            val a = complexValue(left)
+            val b = complexValue(right)
+            return a.real == b.real && a.imaginary == b.imaginary
+        }
+        if (left is GoFloat || right is GoFloat) return real(left) == real(right)
         if (left is Double && right is Double) return left == right
         if (left is GoArray && right is GoArray)
             return left.values.size == right.values.size &&
@@ -1164,6 +1235,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun goHash(value: Any?): Int = when (value) {
         null -> 0
         is Double -> if (value == 0.0) 0 else value.hashCode()
+        is GoFloat -> if (value.value == 0.0) 0 else value.value.hashCode()
+        is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
         is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
         is GoStruct -> value.fields.entries.fold(value.namedType?.hashCode() ?: 0) { hash, (name, element) ->
             31 * (31 * hash + name.hashCode()) + goHash(element)
@@ -1173,12 +1246,33 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun number(value: Any?, op: String): Long = value as? Long ?: typeError(op, value)
-    private fun real(value: Any?): Double = when (value) { is Long -> value.toDouble(); is Double -> value; else -> typeError("arithmetic", value) }
+    private fun complexValue(value: Any?): GoComplex = when (value) {
+        is GoComplex -> value
+        is Long -> GoComplex(value.toDouble(), 0.0, NamedGoType("complex128"))
+        is Double -> GoComplex(value, 0.0, NamedGoType("complex128"))
+        else -> typeError("complex arithmetic", value)
+    }
+    private fun imaginaryPart(text: String): Double = when {
+        text.startsWith("0x", true) -> integer(text).toDouble()
+        text.length > 1 && text.startsWith("0") && text[1].isDigit() -> integer(text).toDouble()
+        else -> text.toDoubleOrNull() ?: throw RuntimeGoError("invalid imaginary literal")
+    }
+    private fun real(value: Any?): Double = when (value) {
+        is Long -> value.toDouble()
+        is Double -> value
+        is GoFloat -> value.value
+        is GoComplex -> value.real
+        else -> typeError("arithmetic", value)
+    }
+    private fun floatResult(value: Double, complexType: GoTypeSyntax): Any =
+        if (underlying(complexType) == NamedGoType("complex64")) GoFloat(value.toFloat().toDouble(), NamedGoType("float32")) else value
     private fun truth(value: Any?) = value as? Boolean ?: typeError("condition", value)
     private fun stringify(value: Any?): String = when (value) {
         null -> "<nil>"
         is GoNilValue -> "<nil>"
         is GoInterfaceValue -> stringify(value.value)
+        is GoComplex -> "(${value.real}${if (value.imaginary < 0) "" else "+"}${value.imaginary}i)"
+        is GoFloat -> value.value.toString()
         is GoPointer -> if (value.isNil) "<nil>" else "&${stringify(value.get())}"
         is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
@@ -1275,6 +1369,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private data class GoAssertionResult(val value: Any?, val ok: Boolean, val dynamicType: GoTypeSyntax)
     private data class GoInterfaceValue(val dynamicType: GoTypeSyntax, val value: Any?)
     private data class GoNilValue(val type: GoTypeSyntax)
+    private data class GoComplex(val real: Double, val imaginary: Double, val type: GoTypeSyntax)
+    private data class GoFloat(val value: Double, val type: GoTypeSyntax)
     private data class SelectSelection(val caseIndex: Int, val received: GoReceiveResult?)
     private sealed interface SelectOperation { val caseIndex: Int }
     private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation

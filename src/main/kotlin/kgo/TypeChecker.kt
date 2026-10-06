@@ -719,8 +719,30 @@ class TypeChecker {
             }
             "copy" -> { requireCount(name, args, 2); listOf(intType) }
             "delete" -> { requireCount(name, args, 2); if (underlying(types[0]) !is MapGoType) error("delete requires a map"); emptyList() }
-            "complex" -> { requireCount(name, args, 2); listOf(NamedGoType("complex128")) }
-            "real", "imag" -> { requireCount(name, args, 1); listOf(NamedGoType("float64")) }
+            "complex" -> {
+                requireCount(name, args, 2)
+                if (types.any { !isFloatArgument(it) }) error("complex arguments must be floating-point values")
+                val first = types[0]
+                val second = types[1]
+                if (!isUntyped(first) && !isUntyped(second) && !sameType(first, second))
+                    error("complex arguments must have the same type")
+                val typed = listOf(first, second).firstOrNull { !isUntyped(it) }
+                listOf(when {
+                    typed == null -> untypedComplex
+                    underlying(typed) == NamedGoType("float32") -> NamedGoType("complex64")
+                    else -> NamedGoType("complex128")
+                })
+            }
+            "real", "imag" -> {
+                requireCount(name, args, 1)
+                val type = types.single()
+                if (type in setOf(untypedInt, untypedFloat, untypedComplex)) listOf(untypedFloat)
+                else when (underlying(type)) {
+                    NamedGoType("complex64") -> listOf(NamedGoType("float32"))
+                    NamedGoType("complex128") -> listOf(NamedGoType("float64"))
+                    else -> error("$name requires a complex argument")
+                }
+            }
             else -> null
         }
     }
@@ -742,7 +764,7 @@ class TypeChecker {
             return boolType
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
-            if (!((isNumeric(left) && isNumeric(right)) || (isString(left) && isString(right)))) error("invalid ordered comparison")
+            if (!((isOrderedNumeric(left) && isOrderedNumeric(right)) || (isString(left) && isString(right)))) error("invalid ordered comparison")
             requireSameOperands(left, right)
             return boolType
         }
@@ -1006,6 +1028,16 @@ class TypeChecker {
     private fun isNumeric(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
         untypedInt, untypedFloat, untypedComplex -> true
         is NamedGoType -> t.name in integerNames || t.name in floatNames || t.name in complexNames
+        else -> false
+    }
+    private fun isFloatArgument(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
+        untypedInt, untypedFloat -> true
+        is NamedGoType -> t.name in floatNames
+        else -> false
+    }
+    private fun isOrderedNumeric(type: GoTypeSyntax): Boolean = isInteger(type) || when (val t = underlying(type)) {
+        untypedFloat -> true
+        is NamedGoType -> t.name in floatNames
         else -> false
     }
     private fun isInteger(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
