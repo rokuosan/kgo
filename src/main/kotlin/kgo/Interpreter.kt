@@ -982,7 +982,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
-        is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: if (type.name == "error") errorInterfaceType else type
+        is NamedGoType -> when (type.name) {
+            "byte" -> NamedGoType("uint8")
+            "rune" -> NamedGoType("int32")
+            else -> typeDefinitions[type.name]?.let(::underlying) ?: if (type.name == "error") errorInterfaceType else type
+        }
         else -> type
     }
 
@@ -999,7 +1003,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is GoNilValue -> value.type
         is GoComplex -> value.type
         is GoFloat -> value.type
-        is GoInteger -> value.type
+        is GoInteger -> when (value.type) {
+            NamedGoType("byte") -> NamedGoType("uint8")
+            NamedGoType("rune") -> NamedGoType("int32")
+            else -> value.type
+        }
         is GoSlice -> SliceGoType(value.elementType)
         is GoMap -> MapGoType(value.keyType, value.valueType)
         is GoChannel -> ChannelGoType(value.elementType, ChannelDirection.SEND_RECEIVE)

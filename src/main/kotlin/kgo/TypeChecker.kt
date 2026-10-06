@@ -1053,7 +1053,12 @@ class TypeChecker {
 
     private fun underlying(type: GoTypeSyntax, seen: Set<String> = emptySet()): GoTypeSyntax = when (type) {
         is NamedGoType -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
-            ?: if (type.name == "error") errorInterfaceType else type
+            ?: when (type.name) {
+                "byte" -> NamedGoType("uint8")
+                "rune" -> NamedGoType("int32")
+                "error" -> errorInterfaceType
+                else -> type
+            }
         else -> type
     }
     private fun isNamed(type: GoTypeSyntax) = type is NamedGoType && !type.name.startsWith("#")
