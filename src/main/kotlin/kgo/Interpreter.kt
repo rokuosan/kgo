@@ -276,10 +276,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is BlockStatement -> executeBlock(statement, env)
             is VariableStatement -> initialize(statement.names, statement.values, env, statement.type)
             is ReturnStatement -> {
-                val values = statement.values.map { copyValue(evaluate(it, env)) }
-                val runeConstants = statement.values.mapIndexed { index, expression ->
+                val evaluated = statement.values.map { copyValue(evaluate(it, env)) }
+                val values = if (statement.values.size == 1 && evaluated.singleOrNull() is GoMultiValue)
+                    (evaluated.single() as GoMultiValue).values else evaluated
+                val runeConstants = if (values.size == statement.values.size) statement.values.mapIndexed { index, expression ->
                     values.getOrNull(index) is BigInteger && isRuneConstantExpression(expression, env)
-                }
+                } else List(values.size) { false }
                 throw ReturnSignal(values, runeConstants)
             }
             is ExpressionStatement -> evaluate(statement.expression, env)
