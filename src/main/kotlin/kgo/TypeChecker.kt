@@ -1335,7 +1335,11 @@ class TypeChecker {
         }
     }
 
-    private fun selectorType(expression: SelectorExpression, scope: Scope): GoTypeSyntax {
+    private fun selectorType(
+        expression: SelectorExpression,
+        scope: Scope,
+        allowBoundMethod: Boolean = false
+    ): GoTypeSyntax {
         if (expression.field == "_") error("cannot refer to blank struct field")
         if (expression.receiver is NameExpression && expression.receiver.name in packagePaths &&
             scope.getOrNull(expression.receiver.name) == null) {
@@ -1348,7 +1352,8 @@ class TypeChecker {
         val receiverType = expressionType(expression.receiver, scope)
         data class Candidate(
             val type: GoTypeSyntax,
-            val needsAddressableReceiver: Boolean = false
+            val needsAddressableReceiver: Boolean = false,
+            val isMethod: Boolean = false
         )
         data class SearchNode(val type: GoTypeSyntax, val pointer: Boolean, val ancestors: Set<String>)
         var level = listOf(SearchNode(receiverType, receiverType is PointerGoType, emptySet()))
@@ -1358,7 +1363,7 @@ class TypeChecker {
             level.forEach { node ->
                 when (val actual = selectorBaseType(node.type)) {
                     is InterfaceGoType -> interfaceMethods(actual)[expression.field]?.let {
-                        candidates += Candidate(it)
+                        candidates += Candidate(it, isMethod = true)
                     }
                     is StructGoType -> {
                         actual.fields.forEach { field ->
@@ -1370,7 +1375,7 @@ class TypeChecker {
                             val pointerReceiver = method.receiver?.type is PointerGoType
                             candidates += Candidate(
                                 functionType(method), pointerReceiver && !node.pointer &&
-                                    !isAddressable(expression.receiver, scope)
+                                    !isAddressable(expression.receiver, scope), isMethod = true
                             )
                         }
                         actual.fields.filter { it.names.isEmpty() }.forEach { field ->
@@ -1386,7 +1391,7 @@ class TypeChecker {
                             val pointerReceiver = method.receiver?.type is PointerGoType
                             candidates += Candidate(
                                 functionType(method), pointerReceiver && !node.pointer &&
-                                    !isAddressable(expression.receiver, scope)
+                                    !isAddressable(expression.receiver, scope), isMethod = true
                             )
                         }
                     }
@@ -1397,6 +1402,8 @@ class TypeChecker {
                 val candidate = candidates.single()
                 if (candidate.needsAddressableReceiver)
                     error("cannot call pointer method ${expression.field} on non-addressable value")
+                if (candidate.isMethod && !allowBoundMethod)
+                    error("method values are not supported by Go 1.0")
                 return candidate.type
             }
             level = next
@@ -1675,7 +1682,7 @@ class TypeChecker {
                 return builtin
             }
         }
-        val targetType = if (target is SelectorExpression) selectorType(target, scope)
+        val targetType = if (target is SelectorExpression) selectorType(target, scope, allowBoundMethod = true)
             else expressionType(target, scope)
         val functionType = underlying(targetType) as? FunctionGoType ?: error("called value is not a function")
         val variadic = functionType.parameters.lastOrNull()?.variadic == true
