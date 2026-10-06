@@ -43,14 +43,16 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     else functions[function.name] = function
                 }
                 file.declarations.filterIsInstance<TypeDeclaration>().forEach { typeDefinitions[it.name] = it.type }
-                file.declarations.forEach { declaration ->
-                    when (declaration) {
-                        is FunctionDeclaration, is TypeDeclaration -> Unit
-                        is VariableDeclaration -> initialize(declaration.names, declaration.values, globals, declaration.type)
-                        is ConstantDeclaration -> initializeConstant(declaration)
-                        is ImportDeclaration -> Unit
-                    }
-                }
+                val packageConstants = file.declarations.filterIsInstance<ConstantDeclaration>()
+                val packageVariables = file.declarations.filterIsInstance<VariableDeclaration>()
+                packageConstants.forEach { declaration -> declaration.names.forEach { name -> globals.define(name, null, declaration.type) } }
+                packageVariables.forEach { declaration -> declaration.names.forEach { name ->
+                    globals.define(name, declaration.type?.let(::zeroValue), declaration.type)
+                } }
+                orderPackageDeclarations(packageConstants, { it.names }, { it.values }, includeFunctionDependencies = false)
+                    .forEach { initializeConstant(it) }
+                orderPackageDeclarations(packageVariables, { it.names }, { it.values }, includeFunctionDependencies = true)
+                    .forEach { initialize(it.names, it.values, globals, it.type) }
                 initFunctions.forEach { invoke(it, emptyList()) }
                 val main = functions["main"] ?: throw RuntimeGoError("main function not found")
                 invoke(main, emptyList())
@@ -498,6 +500,137 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         val values = expandValues(declaration.values.map { evaluate(it, scope) }, declaration.names.size)
         if (values.size != declaration.names.size) throw RuntimeGoError("constant initializer count mismatch")
         declaration.names.zip(values).forEach { (name, value) -> target.define(name, value, declaration.type) }
+    }
+
+    private fun <T> orderPackageDeclarations(
+        declarations: List<T>,
+        names: (T) -> List<String>,
+        expressions: (T) -> List<Expression>,
+        includeFunctionDependencies: Boolean
+    ): List<T> {
+        val declarationByName = mutableMapOf<String, Int>()
+        declarations.forEachIndexed { index, declaration -> names(declaration).forEach { name ->
+            if (name != "_") declarationByName[name] = index
+        } }
+        val dependencies = declarations.indices.map { index ->
+            val refs = expressions(declarations[index]).flatMapTo(linkedSetOf(), ::expressionNames)
+            if (includeFunctionDependencies) addFunctionDependencies(refs)
+            refs.mapNotNullTo(linkedSetOf()) { declarationByName[it] }
+        }
+        val initialized = BooleanArray(declarations.size)
+        val ordered = mutableListOf<T>()
+        while (ordered.size < declarations.size) {
+            val next = declarations.indices.firstOrNull { i ->
+                !initialized[i] && dependencies[i].all { initialized[it] }
+            } ?: throw RuntimeGoError("package initialization cycle")
+            initialized[next] = true
+            ordered += declarations[next]
+        }
+        return ordered
+    }
+
+    private fun addFunctionDependencies(references: MutableSet<String>) {
+        val pending = ArrayDeque(references.filter { it in functions })
+        val visited = mutableSetOf<String>()
+        while (pending.isNotEmpty()) {
+            val name = pending.removeFirst()
+            if (!visited.add(name)) continue
+            val function = functions[name] ?: continue
+            val functionReferences = statementNames(function.body) - functionLocalNames(function)
+            functionReferences.filter { it !in references && it in functions }.forEach(pending::addLast)
+            references += functionReferences
+        }
+    }
+
+    private fun expressionNames(expression: Expression): Set<String> = when (expression) {
+        is NameExpression -> setOf(expression.name)
+        is LiteralExpression, is TypeExpression -> emptySet()
+        is UnaryExpression -> expressionNames(expression.operand)
+        is BinaryExpression -> expressionNames(expression.left) + expressionNames(expression.right)
+        is CallExpression -> expressionNames(expression.function) + expression.arguments.flatMap(::expressionNames)
+        is SelectorExpression -> expressionNames(expression.receiver)
+        is IndexExpression -> expressionNames(expression.receiver) + expressionNames(expression.index)
+        is SliceExpression -> expressionNames(expression.receiver) + listOfNotNull(expression.low, expression.high, expression.max).flatMap(::expressionNames)
+        is TypeAssertionExpression -> expressionNames(expression.receiver)
+        is TypeSwitchGuardExpression -> expressionNames(expression.receiver)
+        is ParenthesizedExpression -> expressionNames(expression.expression)
+        is CompositeLiteral -> expression.elements.flatMapTo(linkedSetOf()) { element ->
+            (element.key?.let(::expressionNames) ?: emptySet()) + expressionNames(element.value)
+        }
+        is FunctionLiteralExpression -> statementNames(expression.body) - functionLocalNames(expression.parameters.mapNotNull { it.name }.toSet(), expression.body)
+    }
+
+    private fun statementNames(statement: Statement): Set<String> = when (statement) {
+        EmptyStatement -> emptySet()
+        is LabeledStatement -> statementNames(statement.statement)
+        is DeclarationStatement -> statement.declarations.flatMapTo(linkedSetOf()) { declaration -> when (declaration) {
+            is VariableDeclaration -> declaration.values.flatMap(::expressionNames)
+            is ConstantDeclaration -> declaration.values.flatMap(::expressionNames)
+            else -> emptyList()
+        } }
+        is BlockStatement -> statement.statements.flatMapTo(linkedSetOf(), ::statementNames)
+        is VariableStatement -> statement.values.flatMapTo(linkedSetOf(), ::expressionNames)
+        is ReturnStatement -> statement.values.flatMapTo(linkedSetOf(), ::expressionNames)
+        is ExpressionStatement -> expressionNames(statement.expression)
+        is SendStatement -> expressionNames(statement.channel) + expressionNames(statement.value)
+        is GoStatement -> expressionNames(statement.call)
+        is DeferStatement -> expressionNames(statement.call)
+        is BranchStatement -> emptySet()
+        is SelectStatement -> statement.cases.flatMapTo(linkedSetOf()) { clause ->
+            (clause.communication?.let(::statementNames) ?: emptySet()) + clause.statements.flatMap(::statementNames)
+        }
+        is SwitchStatement -> (statement.init?.let(::statementNames) ?: emptySet()) +
+            (statement.tag?.let(::expressionNames) ?: emptySet()) + statement.clauses.flatMap { clause ->
+                (clause.expressions?.flatMap(::expressionNames) ?: emptyList()) + clause.statements.flatMap(::statementNames)
+            }
+        is TypeSwitchStatement -> (statement.init?.let(::statementNames) ?: emptySet()) + expressionNames(statement.guard.expression) +
+            statement.clauses.flatMap { it.statements.flatMap(::statementNames) }
+        is AssignmentStatement -> statement.targets.flatMapTo(linkedSetOf(), ::expressionNames) + statement.values.flatMap(::expressionNames)
+        is IncrementStatement -> expressionNames(statement.target)
+        is IfStatement -> (statement.init?.let(::statementNames) ?: emptySet()) + expressionNames(statement.condition) +
+            statementNames(statement.thenBranch) + (statement.elseBranch?.let(::statementNames) ?: emptySet())
+        is ForStatement -> (statement.init?.let(::statementNames) ?: emptySet()) +
+            (statement.condition?.let(::expressionNames) ?: emptySet()) + (statement.post?.let(::statementNames) ?: emptySet()) +
+            (statement.rangeClause?.let { expressionNames(it.expression) + it.targets.flatMap(::expressionNames) } ?: emptySet()) + statementNames(statement.body)
+    }
+
+    private fun functionLocalNames(function: FunctionDeclaration): Set<String> =
+        functionLocalNames(function.parameters.filterNotNull().toSet() + listOfNotNull(function.receiver?.name), function.body)
+
+    private fun functionLocalNames(initial: Set<String>, body: BlockStatement): Set<String> {
+        val names = initial.toMutableSet()
+        fun collect(statement: Statement) {
+            when (statement) {
+                is LabeledStatement -> collect(statement.statement)
+                is DeclarationStatement -> statement.declarations.forEach { declaration -> when (declaration) {
+                    is VariableDeclaration -> names += declaration.names
+                    is ConstantDeclaration -> names += declaration.names
+                    is TypeDeclaration -> names += declaration.name
+                    else -> Unit
+                } }
+                is VariableStatement -> names += statement.names
+                is AssignmentStatement -> if (statement.operator == TokenKind.DEFINE)
+                    names += statement.targets.mapNotNull { (it as? NameExpression)?.name }
+                is BlockStatement -> statement.statements.forEach(::collect)
+                is IfStatement -> { statement.init?.let(::collect); collect(statement.thenBranch); statement.elseBranch?.let(::collect) }
+                is ForStatement -> {
+                    statement.rangeClause?.takeIf { it.operator == TokenKind.DEFINE }?.targets?.mapNotNullTo(names) { (it as? NameExpression)?.name }
+                    statement.init?.let(::collect); statement.post?.let(::collect); collect(statement.body)
+                }
+                is SwitchStatement -> { statement.init?.let(::collect); statement.clauses.forEach { it.statements.forEach(::collect) } }
+                is TypeSwitchStatement -> {
+                    statement.init?.let(::collect)
+                    statement.guard.name?.let(names::add)
+                    statement.clauses.forEach { it.statements.forEach(::collect) }
+                }
+                is SelectStatement -> statement.cases.forEach { clause ->
+                    clause.communication?.let(::collect); clause.statements.forEach(::collect)
+                }
+                else -> Unit
+            }
+        }
+        collect(body)
+        return names
     }
 
     private suspend fun evaluateRhs(expressions: List<Expression>, arity: Int, env: Environment): List<Any?> {
