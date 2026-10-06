@@ -644,7 +644,11 @@ class TypeChecker {
                     statement.condition?.let {
                         requireBoolean(expressionType(it, loopScope), "for condition")
                     }
-                    statement.post?.let { checkStatement(it, loopScope) }
+                    statement.post?.let { post ->
+                        if (post is AssignmentStatement && post.operator == TokenKind.DEFINE)
+                            error("for post statement cannot be a short variable declaration")
+                        checkStatement(post, loopScope)
+                    }
                     checkBlock(statement.body, loopScope)
                 }
             }
