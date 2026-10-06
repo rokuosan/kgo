@@ -811,6 +811,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             else -> null
         }
         is CallExpression -> {
+            runtimeTypeConversion(expression, env)?.let { return it }
             val functionType = when (val target = expression.function) {
                 is FunctionLiteralExpression -> FunctionGoType(target.parameters, target.results)
                 else -> staticExpressionType(target, env)?.let(::underlying) as? FunctionGoType
@@ -1302,7 +1303,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         if (builtinName in setOf("len", "cap") && builtinName?.let {
                 !env.contains(it) && env.typeBinding(it) == null && !functions.containsKey(it) && !typeDefinitions.containsKey(it)
             } == true &&
-            call.arguments.size == 1 && !call.expandLastArgument && !containsCallOrReceive(call.arguments.single())) {
+            call.arguments.size == 1 && !call.expandLastArgument && !containsCallOrReceive(call.arguments.single(), env)) {
             staticRangeArrayLength(call.arguments.single(), env)?.let { return it.toLong() }
         }
         val target = evaluate(call.function, env)
@@ -1322,18 +1323,35 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         return call(target, args, call.expandLastArgument, env.panicState, environment = env)
     }
 
-    private fun containsCallOrReceive(expression: Expression): Boolean = when (expression) {
-        is CallExpression -> true
-        is UnaryExpression -> expression.operator == TokenKind.ARROW || containsCallOrReceive(expression.operand)
-        is BinaryExpression -> containsCallOrReceive(expression.left) || containsCallOrReceive(expression.right)
-        is SelectorExpression -> containsCallOrReceive(expression.receiver)
-        is IndexExpression -> containsCallOrReceive(expression.receiver) || containsCallOrReceive(expression.index)
-        is SliceExpression -> containsCallOrReceive(expression.receiver) ||
-            listOfNotNull(expression.low, expression.high).any(::containsCallOrReceive)
-        is TypeAssertionExpression -> containsCallOrReceive(expression.receiver)
-        is ParenthesizedExpression -> containsCallOrReceive(expression.expression)
-        is CompositeLiteral -> expression.elements.any { (it.key?.let(::containsCallOrReceive) ?: false) || containsCallOrReceive(it.value) }
-        is ElidedCompositeLiteral -> expression.elements.any { (it.key?.let(::containsCallOrReceive) ?: false) || containsCallOrReceive(it.value) }
+    private fun runtimeTypeConversion(call: CallExpression, env: Environment): GoTypeSyntax? = when (val target = call.function) {
+        is TypeExpression -> resolveRuntimeType(target.type, env)
+        is NameExpression -> {
+            val binding = env.binding(target.name)
+            when {
+                binding?.value is TypeValue -> (binding.value as TypeValue).type
+                binding == null && target.name in builtinTypes -> NamedGoType(target.name)
+                else -> null
+            }
+        }
+        else -> null
+    }
+
+    private fun containsCallOrReceive(expression: Expression, env: Environment): Boolean = when (expression) {
+        is CallExpression -> runtimeTypeConversion(expression, env)?.let {
+            expression.arguments.any { argument -> containsCallOrReceive(argument, env) }
+        } ?: true
+        is UnaryExpression -> expression.operator == TokenKind.ARROW || containsCallOrReceive(expression.operand, env)
+        is BinaryExpression -> containsCallOrReceive(expression.left, env) || containsCallOrReceive(expression.right, env)
+        is SelectorExpression -> containsCallOrReceive(expression.receiver, env)
+        is IndexExpression -> containsCallOrReceive(expression.receiver, env) || containsCallOrReceive(expression.index, env)
+        is SliceExpression -> containsCallOrReceive(expression.receiver, env) ||
+            listOfNotNull(expression.low, expression.high).any { containsCallOrReceive(it, env) }
+        is TypeAssertionExpression -> containsCallOrReceive(expression.receiver, env)
+        is ParenthesizedExpression -> containsCallOrReceive(expression.expression, env)
+        is CompositeLiteral -> expression.elements.any { (it.key?.let { key -> containsCallOrReceive(key, env) } ?: false) ||
+            containsCallOrReceive(it.value, env) }
+        is ElidedCompositeLiteral -> expression.elements.any { (it.key?.let { key -> containsCallOrReceive(key, env) } ?: false) ||
+            containsCallOrReceive(it.value, env) }
         is FunctionLiteralExpression -> true
         else -> false
     }

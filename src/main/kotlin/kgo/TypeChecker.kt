@@ -2173,7 +2173,7 @@ class TypeChecker {
                 expression.arguments.size == 1 && !expression.expandLastArgument) {
                 val operand = expression.arguments.single()
                 (if (expression.function == NameExpression("len")) constantStringLength(operand, scope) else null)
-                    ?: if (!containsCallOrReceive(operand)) {
+                    ?: if (!containsCallOrReceive(operand, scope)) {
                     val type = runCatching { underlying(expressionType(operand, scope)) }.getOrNull()
                     val array = when (type) {
                         is ArrayGoType -> type
@@ -2288,17 +2288,28 @@ class TypeChecker {
         length
     }.getOrNull()
 
-    private fun containsCallOrReceive(expression: Expression): Boolean = when (expression) {
-        is CallExpression -> true
-        is UnaryExpression -> expression.operator == TokenKind.ARROW || containsCallOrReceive(expression.operand)
-        is BinaryExpression -> containsCallOrReceive(expression.left) || containsCallOrReceive(expression.right)
-        is ParenthesizedExpression -> containsCallOrReceive(expression.expression)
-        is SelectorExpression -> containsCallOrReceive(expression.receiver)
-        is IndexExpression -> containsCallOrReceive(expression.receiver) || containsCallOrReceive(expression.index)
-        is SliceExpression -> containsCallOrReceive(expression.receiver) || listOfNotNull(expression.low, expression.high).any(::containsCallOrReceive)
-        is TypeAssertionExpression -> containsCallOrReceive(expression.receiver)
-        is CompositeLiteral -> expression.elements.any { (it.key?.let(::containsCallOrReceive) ?: false) || containsCallOrReceive(it.value) }
-        is ElidedCompositeLiteral -> expression.elements.any { (it.key?.let(::containsCallOrReceive) ?: false) || containsCallOrReceive(it.value) }
+    private fun containsCallOrReceive(expression: Expression, scope: Scope): Boolean = when (expression) {
+        is CallExpression -> {
+            val conversion = when (val target = expression.function) {
+                is TypeExpression -> true
+                is NameExpression -> scope.getOrNull(target.name) == null &&
+                    (scope.typeBinding(target.name) != null || isBuiltinType(target.name) || target.name in typeDeclarations)
+                else -> false
+            }
+            !conversion || expression.arguments.any { containsCallOrReceive(it, scope) }
+        }
+        is UnaryExpression -> expression.operator == TokenKind.ARROW || containsCallOrReceive(expression.operand, scope)
+        is BinaryExpression -> containsCallOrReceive(expression.left, scope) || containsCallOrReceive(expression.right, scope)
+        is ParenthesizedExpression -> containsCallOrReceive(expression.expression, scope)
+        is SelectorExpression -> containsCallOrReceive(expression.receiver, scope)
+        is IndexExpression -> containsCallOrReceive(expression.receiver, scope) || containsCallOrReceive(expression.index, scope)
+        is SliceExpression -> containsCallOrReceive(expression.receiver, scope) ||
+            listOfNotNull(expression.low, expression.high).any { containsCallOrReceive(it, scope) }
+        is TypeAssertionExpression -> containsCallOrReceive(expression.receiver, scope)
+        is CompositeLiteral -> expression.elements.any { (it.key?.let { key -> containsCallOrReceive(key, scope) } ?: false) ||
+            containsCallOrReceive(it.value, scope) }
+        is ElidedCompositeLiteral -> expression.elements.any { (it.key?.let { key -> containsCallOrReceive(key, scope) } ?: false) ||
+            containsCallOrReceive(it.value, scope) }
         is FunctionLiteralExpression -> true
         else -> false
     }
