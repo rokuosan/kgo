@@ -1346,7 +1346,17 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val b = right as? Boolean ?: typeError("logical operator", right)
             return if (op == TokenKind.LAND) a && b else a || b
         }
-        if ((left is String) && (right is String) && op == TokenKind.ADD) return left + right
+        if (left is String && right is String) {
+            if (op == TokenKind.ADD) return left + right
+            val comparison = compareGoStrings(left, right)
+            return when (op) {
+                TokenKind.LSS -> comparison < 0
+                TokenKind.LEQ -> comparison <= 0
+                TokenKind.GTR -> comparison > 0
+                TokenKind.GEQ -> comparison >= 0
+                else -> throw RuntimeGoError("invalid string operator $op")
+            }
+        }
         if (left is GoComplex || right is GoComplex) {
             val a = complexValue(left)
             val b = complexValue(right)
@@ -1423,6 +1433,16 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             return left.namedType == right.namedType && left.fields.keys == right.fields.keys &&
                 left.fields.keys.all { goEqual(left.fields[it], right.fields[it]) }
         return left == right
+    }
+
+    private fun compareGoStrings(left: String, right: String): Int {
+        val leftBytes = left.toByteArray(Charsets.UTF_8)
+        val rightBytes = right.toByteArray(Charsets.UTF_8)
+        for (i in 0 until minOf(leftBytes.size, rightBytes.size)) {
+            val difference = (leftBytes[i].toInt() and 0xff) - (rightBytes[i].toInt() and 0xff)
+            if (difference != 0) return difference
+        }
+        return leftBytes.size.compareTo(rightBytes.size)
     }
 
     private fun runtimeComparable(value: Any?): Boolean = when (value) {
