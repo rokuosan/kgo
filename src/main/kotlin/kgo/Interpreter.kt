@@ -451,8 +451,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         canonicalAliasType(left) == canonicalAliasType(right)
 
     private fun canonicalAliasType(type: GoTypeSyntax): GoTypeSyntax = when (type) {
-        NamedGoType("byte") -> NamedGoType("uint8")
-        NamedGoType("rune") -> NamedGoType("int32")
+        NamedGoType("byte") -> if ("byte" !in typeDefinitions) NamedGoType("uint8") else type
+        NamedGoType("rune") -> if ("rune" !in typeDefinitions) NamedGoType("int32") else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
         is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
@@ -1008,10 +1008,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
-        is NamedGoType -> when (type.name) {
+        is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> NamedGoType("uint8")
             "rune" -> NamedGoType("int32")
-            else -> typeDefinitions[type.name]?.let(::underlying) ?: if (type.name == "error") errorInterfaceType else type
+            "error" -> errorInterfaceType
+            else -> type
         }
         else -> type
     }
@@ -1029,9 +1030,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is GoNilValue -> value.type
         is GoComplex -> value.type
         is GoFloat -> value.type
-        is GoInteger -> when (value.type) {
-            NamedGoType("byte") -> NamedGoType("uint8")
-            NamedGoType("rune") -> NamedGoType("int32")
+        is GoInteger -> when {
+            value.type == NamedGoType("byte") && "byte" !in typeDefinitions -> NamedGoType("uint8")
+            value.type == NamedGoType("rune") && "rune" !in typeDefinitions -> NamedGoType("int32")
             else -> value.type
         }
         is GoSlice -> SliceGoType(value.elementType)
@@ -1259,6 +1260,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun isByteType(type: GoTypeSyntax): Boolean = underlying(type) == NamedGoType("uint8")
     private fun isRuneType(type: GoTypeSyntax): Boolean = underlying(type) == NamedGoType("int32")
+    private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
+        type == NamedGoType("byte") && "byte" !in typeDefinitions ||
+            type == NamedGoType("uint8") && "uint8" !in typeDefinitions
     private fun isByteOrRuneType(type: GoTypeSyntax): Boolean = isByteType(type) || isRuneType(type)
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
         (underlying(type) as? SliceGoType)?.element?.let(::isByteOrRuneType) == true
@@ -1306,18 +1310,33 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun copy(args: List<Any?>): Long {
-        val destination = args.getOrNull(0) as? GoSlice ?: when (val nilDestination = args.getOrNull(0)) {
-            is GoNilValue -> if (underlying(nilDestination.type) is SliceGoType) return 0L
-                else throw RuntimeGoError("copy destination must be a slice")
+        val destinationValue = args.getOrNull(0)
+        val destination = destinationValue as? GoSlice
+        val destinationType = when (destinationValue) {
+            is GoSlice -> SliceGoType(destinationValue.elementType)
+            is GoNilValue -> underlying(destinationValue.type).takeIf { it is SliceGoType }
+            null -> null
             else -> throw RuntimeGoError("copy destination must be a slice")
-        }
+        } as? SliceGoType ?: if (destinationValue == null) return 0L else throw RuntimeGoError("copy destination must be a slice")
         val values = when (val source = args.getOrNull(1)) {
-            is GoSlice -> source.toList()
-            is GoNilValue -> if (underlying(source.type) is SliceGoType) emptyList() else throw RuntimeGoError("copy source must be a slice or string")
-            is GoArray -> source.values.toList()
-            is String -> source.toByteArray(Charsets.UTF_8).map { (it.toInt() and 0xff).toLong() }
+            is GoSlice -> {
+                if (!sameRuntimeType(destinationType.element, source.elementType)) throw RuntimeGoError("copy slice element types do not match")
+                source.toList()
+            }
+            is GoNilValue -> {
+                val sourceType = underlying(source.type) as? SliceGoType
+                    ?: throw RuntimeGoError("copy source must be a slice or string")
+                if (!sameRuntimeType(destinationType.element, sourceType.element)) throw RuntimeGoError("copy slice element types do not match")
+                emptyList()
+            }
+            null -> emptyList()
+            is String -> {
+                if (!isPredeclaredByteType(destinationType.element)) throw RuntimeGoError("copy from string requires a byte slice")
+                source.toByteArray(Charsets.UTF_8).map { (it.toInt() and 0xff).toLong() }
+            }
             else -> throw RuntimeGoError("copy source must be a slice or string")
         }
+        if (destination == null) return 0L
         val count = minOf(destination.length, values.size)
         repeat(count) { destination.set(it, values[it]) }
         return count.toLong()

@@ -768,7 +768,21 @@ class TypeChecker {
                 } else types.drop(1).forEachIndexed { i, type -> requireAssignable(type, slice.element, "append", args.getOrNull(i + 1), scope) }
                 listOf(types[0])
             }
-            "copy" -> { requireCount(name, args, 2); listOf(intType) }
+            "copy" -> {
+                requireCount(name, args, 2)
+                val destination = underlying(types[0])
+                val source = underlying(types[1])
+                when {
+                    destination is SliceGoType && source is SliceGoType ->
+                        if (!sameType(destination.element, source.element)) error("copy slice element types do not match")
+                    destination is SliceGoType && isString(types[1]) ->
+                        if (!isPredeclaredByteType(destination.element)) error("copy from string requires a byte slice")
+                    destination == nilType && (source is SliceGoType || isString(types[1])) -> Unit
+                    source == nilType && destination is SliceGoType -> Unit
+                    else -> error("copy requires slices, or a byte slice and string")
+                }
+                listOf(intType)
+            }
             "delete" -> { requireCount(name, args, 2); if (underlying(types[0]) !is MapGoType) error("delete requires a map"); emptyList() }
             "complex" -> {
                 requireCount(name, args, 2)
@@ -928,6 +942,10 @@ class TypeChecker {
         return element == NamedGoType("uint8") || element == NamedGoType("int32")
     }
 
+    private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
+        type == NamedGoType("byte") && "byte" !in typeDeclarations ||
+            type == NamedGoType("uint8") && "uint8" !in typeDeclarations
+
     private fun validateType(type: GoTypeSyntax, active: Set<String> = emptySet(), indirect: Boolean = false) {
         when (type) {
             is NamedGoType -> {
@@ -1014,6 +1032,10 @@ class TypeChecker {
 
     private fun sameType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
         if (left == right) return true
+        if ("byte" !in typeDeclarations && "uint8" !in typeDeclarations &&
+            (left == byteType && right == NamedGoType("uint8") || right == byteType && left == NamedGoType("uint8"))) return true
+        if ("rune" !in typeDeclarations && "int32" !in typeDeclarations &&
+            (left == runeType && right == NamedGoType("int32") || right == runeType && left == NamedGoType("int32"))) return true
         return when {
             left is QualifiedGoType && right is QualifiedGoType -> left.packageName == right.packageName && left.name == right.name
             left is PointerGoType && right is PointerGoType -> sameType(left.element, right.element)
