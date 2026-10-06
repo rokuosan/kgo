@@ -13,7 +13,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.selectUnbiased
 import java.util.concurrent.atomic.AtomicInteger
 
-class RuntimeGoError(message: String) : RuntimeException(message)
+open class RuntimeGoError(message: String) : RuntimeException(message)
 
 /** Runtime for the currently implemented Go 1.0 execution subset. */
 class Interpreter(private val output: (String) -> Unit = { print(it) }) {
@@ -66,7 +66,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         arguments: List<Any?>,
         receiver: Any? = null,
         parent: Environment = globals,
-        expandedVariadic: Boolean = false
+        expandedVariadic: Boolean = false,
+        panicState: PanicState = parent.panicState,
+        deferredCall: Boolean = false
     ): List<Any?> {
         val fixedCount = if (function.variadic) function.parameters.size - 1 else function.parameters.size
         if ((!function.variadic && arguments.size != fixedCount) ||
@@ -79,18 +81,33 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val extras = arguments.drop(fixedCount)
             arguments.take(fixedCount) + GoSlice(sliceType.element, extras.mapTo(mutableListOf(), ::copyValue), 0, extras.size, extras.size)
         }
-        val env = Environment(parent)
+        val env = Environment(parent, panicState = panicState)
         function.receiver?.let { env.define(it.name ?: "", receiver, it.type) }
         function.parameters.zip(boundArguments).forEachIndexed { i, (name, value) ->
             name?.let { env.define(it, value, function.parameterTypes.getOrNull(i)) }
         }
+        val priorRecoverAllowed = panicState.recoverAllowed
+        panicState.recoverAllowed = deferredCall
+        var defersRun = false
         return try {
             executeBlock(function.body, env)
             emptyList()
         } catch (returned: ReturnSignal) {
             returned.values.mapIndexed { i, value -> function.resultTypes.getOrNull(i)?.let { boxInterface(value, it) } ?: value }
-        } finally {
+        } catch (panic: PanicSignal) {
+            panicState.activePanic = panic
+            defersRun = true
             env.runDefers()
+            if (panic.recovered) function.resultTypes.map(::zeroValue) else throw panic
+        } catch (failure: RuntimeGoError) {
+            val panic = PanicSignal(failure.message ?: "runtime panic", failure.message ?: "runtime panic")
+            panicState.activePanic = panic
+            defersRun = true
+            env.runDefers()
+            if (panic.recovered) function.resultTypes.map(::zeroValue) else throw panic
+        } finally {
+            if (!defersRun) env.runDefers()
+            panicState.recoverAllowed = priorRecoverAllowed
         }
     }
 
@@ -161,13 +178,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val call = statement.call as? CallExpression ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
-                goroutines.launch { call(target, arguments, call.expandLastArgument) }
+                goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState()) }
             }
             is DeferStatement -> {
                 val call = statement.call as? CallExpression ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
-                env.defer { call(target, arguments, call.expandLastArgument) }
+                env.defer { call(target, arguments, call.expandLastArgument, env.panicState, deferredCall = true) }
             }
             is BranchStatement -> when (statement.kind) {
                 TokenKind.BREAK -> throw BreakSignal(statement.label)
@@ -507,7 +524,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             "true" -> true
             "false" -> false
             "nil" -> null
-            "make", "new", "close", "len", "cap", "append", "copy", "delete", "print", "println", "panic", "complex", "real", "imag" -> BuiltinValue(expression.name)
+            "make", "new", "close", "len", "cap", "append", "copy", "delete", "print", "println", "panic", "recover", "complex", "real", "imag" -> BuiltinValue(expression.name)
             in builtinTypes -> TypeValue(NamedGoType(expression.name))
             in typeDefinitions -> TypeValue(NamedGoType(expression.name))
             else -> env.lookup(expression.name)?.value ?: if (env.contains(expression.name)) null else functions[expression.name]
@@ -618,10 +635,16 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun call(call: CallExpression, env: Environment): Any? {
         val target = evaluate(call.function, env)
         val args = call.arguments.map { copyValue(evaluate(it, env)) }
-        return call(target, args, call.expandLastArgument)
+        return call(target, args, call.expandLastArgument, env.panicState)
     }
 
-    private suspend fun call(target: Any?, args: List<Any?>, expandLastArgument: Boolean = false): Any? {
+    private suspend fun call(
+        target: Any?,
+        args: List<Any?>,
+        expandLastArgument: Boolean = false,
+        panicState: PanicState = PanicState(),
+        deferredCall: Boolean = false
+    ): Any? {
         val effectiveArgs = if (expandLastArgument) {
             val last = args.lastOrNull()
             args.dropLast(1).map(::copyValue) + when (last) {
@@ -632,11 +655,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         } else args.map(::copyValue)
         when (target) {
             is FunctionValue -> {
-                val values = invoke(target.function, args, parent = target.closure, expandedVariadic = expandLastArgument)
+                val values = invoke(target.function, args, parent = target.closure, expandedVariadic = expandLastArgument,
+                    panicState = panicState, deferredCall = deferredCall)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
             is MethodValue -> {
-                val values = invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument)
+                val values = invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument,
+                    panicState = panicState, deferredCall = deferredCall)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
             is GoNilValue -> if (underlying(target.type) is FunctionGoType)
@@ -646,7 +671,17 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     output(effectiveArgs.joinToString(if (target.name == "println") " " else "") { stringify(it) } + if (target.name == "println") "\n" else "")
                     return null
                 }
-                "panic" -> throw RuntimeGoError(args.firstOrNull()?.toString() ?: "panic")
+                "panic" -> args.singleOrNull().let { throw PanicSignal(it, stringify(it)) }
+                "recover" -> {
+                    if (!panicState.recoverAllowed) return null
+                    val activePanic = panicState.activePanic ?: return null
+                    activePanic.recovered = true
+                    panicState.activePanic = null
+                    return when (val value = activePanic.value) {
+                        null, is GoInterfaceValue -> value
+                        else -> runtimeType(value)?.let { GoInterfaceValue(it, value) } ?: value
+                    }
+                }
                 "complex" -> {
                     if (args.size != 2) throw RuntimeGoError("complex expects two arguments")
                     val type = if (args.filterIsInstance<GoFloat>().any { underlying(it.type) == NamedGoType("float32") })
@@ -1324,12 +1359,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private inner class Environment(
         private val parent: Environment? = null,
-        private val deferredCalls: MutableList<suspend () -> Unit> = mutableListOf()
+        private val deferredCalls: MutableList<suspend () -> Unit> = mutableListOf(),
+        val panicState: PanicState = parent?.panicState ?: PanicState()
     ) {
         private val values = mutableMapOf<String, Any?>()
         private val types = mutableMapOf<String, GoTypeSyntax>()
         private val addresses = mutableMapOf<String, GoPointer>()
-        fun child() = Environment(this, deferredCalls)
+        fun child() = Environment(this, deferredCalls, panicState)
         fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
             values[name] = type?.let { copyForType(value, it) } ?: copyValue(value)
             if (type != null) types[name] = type
@@ -1348,8 +1384,27 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
         suspend fun runDefers() {
-            for (action in deferredCalls.asReversed()) action()
+            val actions = deferredCalls.asReversed().toList()
             deferredCalls.clear()
+            var panicFromDefer: PanicSignal? = null
+            for (action in actions) {
+                val previousPermission = panicState.recoverAllowed
+                panicState.recoverAllowed = true
+                try {
+                    action()
+                } catch (panic: PanicSignal) {
+                    panicFromDefer = panic
+                    panicState.activePanic = panic
+                } catch (failure: RuntimeGoError) {
+                    val panic = PanicSignal(failure.message ?: "runtime panic", failure.message ?: "runtime panic")
+                    panicFromDefer = panic
+                    panicState.activePanic = panic
+                } finally {
+                    panicState.recoverAllowed = previousPermission
+                }
+                if (panicState.activePanic == null && panicFromDefer?.recovered == true) panicFromDefer = null
+            }
+            panicFromDefer?.takeUnless { it.recovered }?.let { throw it }
         }
         fun set(name: String, value: Any?) {
             if (values.containsKey(name)) values[name] = types[name]?.let { copyForType(value, it) } ?: copyValue(value)
@@ -1371,6 +1426,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private data class GoNilValue(val type: GoTypeSyntax)
     private data class GoComplex(val real: Double, val imaginary: Double, val type: GoTypeSyntax)
     private data class GoFloat(val value: Double, val type: GoTypeSyntax)
+    private class PanicState(var activePanic: PanicSignal? = null, var recoverAllowed: Boolean = false)
+    private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
+        var recovered: Boolean = false
+    }
     private data class SelectSelection(val caseIndex: Int, val received: GoReceiveResult?)
     private sealed interface SelectOperation { val caseIndex: Int }
     private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation

@@ -7,6 +7,8 @@ type syntax, functions, scalar expressions, variables, assignments, `if`, `for`,
 `switch`, `select`, `defer`, channels, goroutines, and string/channel `range`.
 Complex values, complex arithmetic, and the `complex`, `real`, and `imag`
 built-ins are supported for represented numeric types.
+`panic` and `recover` unwind deferred calls per goroutine, and `recover` succeeds
+only when called directly from a deferred function.
 Composite literals, structs, arrays, slices, maps, indexing, slicing, and their
 basic built-ins (`make`, `append`, `copy`, `delete`, `len`, and `cap`) are also
 implemented in the runtime subset. Named struct methods support value and pointer
