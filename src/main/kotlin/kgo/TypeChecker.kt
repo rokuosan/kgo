@@ -413,6 +413,10 @@ class TypeChecker {
                 val channel = underlying(expressionType(expression.operand, scope)) as? ChannelGoType ?: error("receive requires a channel")
                 return if (arity == 2) listOf(channel.element, boolType) else listOf(channel.element)
             }
+            if (expression is TypeAssertionExpression) {
+                val asserted = expressionType(expression, scope)
+                return if (arity == 2) listOf(asserted, boolType) else listOf(asserted)
+            }
             if (expression is IndexExpression && arity == 2) {
                 val map = underlying(expressionType(expression.receiver, scope)) as? MapGoType
                 if (map != null) return listOf(map.value, boolType)
@@ -506,6 +510,12 @@ class TypeChecker {
                 is NamedGoType -> if (receiver.name == "string") receiver else error("cannot slice ${receiver.name}")
                 else -> error("cannot slice this value")
             }
+        }
+        is TypeAssertionExpression -> {
+            if (underlying(expressionType(expression.receiver, scope)) !is InterfaceGoType)
+                error("type assertion requires an interface operand")
+            validateType(expression.type)
+            expression.type
         }
         is TypeExpression -> expression.type
         is CompositeLiteral -> {
@@ -701,6 +711,7 @@ class TypeChecker {
     private fun assignable(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
         if (from == to) return true
         if (from == nilType) return isNilable(to)
+        if (isEmptyInterface(to)) return true
         if (isUntyped(from)) {
             val f = underlying(from)
             val t = underlying(to)
@@ -774,6 +785,7 @@ class TypeChecker {
     }
     private fun isString(type: GoTypeSyntax) = underlying(type) == stringType || type == untypedString
     private fun isBoolean(type: GoTypeSyntax) = underlying(type) == boolType || type == untypedBool
+    private fun isEmptyInterface(type: GoTypeSyntax) = (underlying(type) as? InterfaceGoType)?.let { it.methods.isEmpty() && it.embeddedTypes.isEmpty() } == true
     private fun isNilable(type: GoTypeSyntax) = when (underlying(type)) { is PointerGoType, is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType, is InterfaceGoType -> true; else -> false }
     private fun isComparable(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
         is SliceGoType, is MapGoType, is FunctionGoType -> false

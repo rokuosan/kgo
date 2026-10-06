@@ -71,6 +71,7 @@ data class CallExpression(val function: Expression, val arguments: List<Expressi
 data class SelectorExpression(val receiver: Expression, val field: String) : Expression
 data class IndexExpression(val receiver: Expression, val index: Expression) : Expression
 data class SliceExpression(val receiver: Expression, val low: Expression?, val high: Expression?, val max: Expression? = null) : Expression
+data class TypeAssertionExpression(val receiver: Expression, val type: GoTypeSyntax) : Expression
 data class ParenthesizedExpression(val expression: Expression) : Expression
 data class TypeExpression(val type: GoTypeSyntax) : Expression
 data class CompositeLiteral(val type: GoTypeSyntax, val elements: List<CompositeElement>) : Expression

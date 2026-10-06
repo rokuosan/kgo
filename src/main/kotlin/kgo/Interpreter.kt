@@ -79,13 +79,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             arguments.take(fixedCount) + GoSlice(sliceType.element, extras.toMutableList(), 0, extras.size, extras.size)
         }
         val env = Environment(parent)
-        function.receiver?.let { env.define(it.name ?: "", receiver) }
-        function.parameters.zip(boundArguments).forEach { (name, value) -> name?.let { env.define(it, value) } }
+        function.receiver?.let { env.define(it.name ?: "", receiver, it.type) }
+        function.parameters.zip(boundArguments).forEachIndexed { i, (name, value) ->
+            name?.let { env.define(it, value, function.parameterTypes.getOrNull(i)) }
+        }
         return try {
             executeBlock(function.body, env)
             emptyList()
         } catch (returned: ReturnSignal) {
-            returned.values
+            returned.values.mapIndexed { i, value -> function.resultTypes.getOrNull(i)?.let { boxInterface(value, it) } ?: value }
         } finally {
             env.runDefers()
         }
@@ -397,7 +399,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         names.forEachIndexed { i, name ->
             val value = if (values.isNotEmpty()) values[i].let { if (type != null) convert(type, it) else it }
             else if (type != null) zeroValue(type) else 0L
-            env.define(name, value)
+            env.define(name, value, type)
         }
     }
 
@@ -410,10 +412,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         scope.define("iota", declaration.iotaIndex.toLong())
         val values = expandValues(declaration.values.map { evaluate(it, scope) }, declaration.names.size)
         if (values.size != declaration.names.size) throw RuntimeGoError("constant initializer count mismatch")
-        declaration.names.zip(values).forEach { (name, value) -> target.define(name, value) }
+        declaration.names.zip(values).forEach { (name, value) -> target.define(name, value, declaration.type) }
     }
 
     private suspend fun evaluateRhs(expressions: List<Expression>, arity: Int, env: Environment): List<Any?> {
+        if (expressions.size == 1 && arity == 2 && expressions[0] is TypeAssertionExpression) {
+            val assertion = expressions[0] as TypeAssertionExpression
+            return listOf(assertType(evaluate(assertion.receiver, env), assertion.type))
+        }
         if (expressions.size == 1 && arity == 2 && expressions[0] is IndexExpression) {
             val index = expressions[0] as IndexExpression
             val receiver = evaluate(index.receiver, env)
@@ -475,6 +481,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is IndexExpression -> index(evaluate(expression.receiver, env), evaluate(expression.index, env))
         is SliceExpression -> slice(evaluate(expression.receiver, env), expression.low?.let { evaluate(it, env) },
             expression.high?.let { evaluate(it, env) }, expression.max?.let { evaluate(it, env) })
+        is TypeAssertionExpression -> {
+            val assertion = assertType(evaluate(expression.receiver, env), expression.type)
+            if (!assertion.ok) throw RuntimeGoError("type assertion failed: ${assertion.dynamicType} is not ${expression.type}")
+            assertion.value
+        }
         is TypeExpression -> TypeValue(expression.type)
         is CompositeLiteral -> composite(expression, env)
         is FunctionLiteralExpression -> {
@@ -628,6 +639,40 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         else -> type
     }
 
+    private fun boxInterface(value: Any?, targetType: GoTypeSyntax): Any? {
+        if ((underlying(targetType) as? InterfaceGoType) == null || value == null || value is GoInterfaceValue) return value
+        val dynamicType = runtimeType(value) ?: return value
+        return GoInterfaceValue(dynamicType, value)
+    }
+
+    private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
+        is GoInterfaceValue -> value.dynamicType
+        is GoStruct -> value.namedType?.let(::NamedGoType)
+        is GoSlice -> SliceGoType(value.elementType)
+        is GoMap -> MapGoType(value.keyType, value.valueType)
+        is GoChannel -> ChannelGoType(value.elementType, ChannelDirection.SEND_RECEIVE)
+        is FunctionValue -> FunctionGoType(value.function.parameterTypes.mapIndexed { i, type ->
+            ParameterSyntax(value.function.parameters.getOrNull(i), type, value.function.variadic && i == value.function.parameterTypes.lastIndex)
+        }, value.function.resultTypes)
+        is Long -> NamedGoType("int")
+        is Double -> NamedGoType("float64")
+        is String -> NamedGoType("string")
+        is Boolean -> NamedGoType("bool")
+        else -> null
+    }
+
+    private fun assertType(value: Any?, target: GoTypeSyntax): GoAssertionResult {
+        if (value == null) return GoAssertionResult(zeroValue(target), false, NamedGoType("<nil>"))
+        val iface = value as? GoInterfaceValue ?: throw RuntimeGoError("type assertion on non-interface value")
+        val targetInterface = underlying(target) as? InterfaceGoType
+        val matches = when {
+            targetInterface != null && targetInterface.methods.isEmpty() && targetInterface.embeddedTypes.isEmpty() -> true
+            targetInterface != null -> false
+            else -> iface.dynamicType == target
+        }
+        return GoAssertionResult(if (matches) iface.value else zeroValue(target), matches, iface.dynamicType)
+    }
+
     private fun methodKey(type: GoTypeSyntax, name: String): String {
         val base = if (type is PointerGoType) type.element else type
         return "${(base as? NamedGoType)?.name ?: base}.$name"
@@ -752,7 +797,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is ChannelGoType -> {
                 val capacity = args.getOrNull(1)?.let { number(it, "channel capacity").toInt() } ?: 0
                 if (capacity < 0) throw RuntimeGoError("negative channel capacity")
-                GoChannel(zeroValue(type.element), capacity)
+                GoChannel(type.element, zeroValue(type.element), capacity)
             }
             is SliceGoType -> {
                 val length = args.getOrNull(1)?.let { number(it, "slice length").toInt() }
@@ -773,6 +818,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun expandValues(values: List<Any?>, targets: Int): List<Any?> {
         if (values.size == 1) {
             val only = values.single()
+            if (only is GoAssertionResult && targets == 2) return listOf(only.value, only.ok)
+            if (only is GoAssertionResult) return listOf(only.value)
             if (only is GoReceiveResult && targets == 2) return listOf(only.value, only.ok)
             if (only is GoReceiveResult) return listOf(only.value)
             if (only is MapLookupResult && targets == 2) return listOf(only.value, only.ok)
@@ -851,6 +898,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun truth(value: Any?) = value as? Boolean ?: typeError("condition", value)
     private fun stringify(value: Any?): String = when (value) {
         null -> "<nil>"
+        is GoInterfaceValue -> stringify(value.value)
         is GoPointer -> "&${stringify(value.get())}"
         is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
@@ -900,14 +948,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         return out.toString()
     }
 
-    private class Environment(
+    private inner class Environment(
         private val parent: Environment? = null,
         private val deferredCalls: MutableList<suspend () -> Unit> = mutableListOf()
     ) {
         private val values = mutableMapOf<String, Any?>()
+        private val types = mutableMapOf<String, GoTypeSyntax>()
         private val addresses = mutableMapOf<String, GoPointer>()
         fun child() = Environment(this, deferredCalls)
-        fun define(name: String, value: Any?) { values[name] = value }
+        fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
+            values[name] = type?.let { boxInterface(value, it) } ?: value
+            if (type != null) types[name] = type
+        }
         fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
         fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
         fun getOrNull(name: String): Any? = lookup(name)?.value
@@ -923,7 +975,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             deferredCalls.clear()
         }
         fun set(name: String, value: Any?) {
-            if (values.containsKey(name)) values[name] = value
+            if (values.containsKey(name)) values[name] = types[name]?.let { boxInterface(value, it) } ?: value
             else if (parent != null && parent.contains(name)) parent.set(name, value)
             else throw RuntimeGoError("undefined: $name")
         }
@@ -937,6 +989,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private data class GoMultiValue(val values: List<Any?>)
     private data class GoReceiveResult(val value: Any?, val ok: Boolean)
     private data class MapLookupResult(val value: Any?, val ok: Boolean)
+    private data class GoAssertionResult(val value: Any?, val ok: Boolean, val dynamicType: GoTypeSyntax)
+    private data class GoInterfaceValue(val dynamicType: GoTypeSyntax, val value: Any?)
     private data class SelectSelection(val caseIndex: Int, val received: GoReceiveResult?)
     private sealed interface SelectOperation { val caseIndex: Int }
     private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation
@@ -1000,7 +1054,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
     private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)
     private class GoCell(var value: Any?)
-    private class GoChannel(private val elementZero: Any?, val capacity: Int) {
+    private class GoChannel(val elementType: GoTypeSyntax, private val elementZero: Any?, val capacity: Int) {
         val queue = Channel<Any?>(capacity)
         private val buffered = AtomicInteger(0)
         suspend fun send(value: Any?) {

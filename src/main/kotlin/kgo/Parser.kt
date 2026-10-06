@@ -398,7 +398,11 @@ class Parser(private val tokens: List<Token>) {
         }
         while (true) {
             expr = when {
-                match(TokenKind.PERIOD) -> SelectorExpression(expr, expect(TokenKind.IDENT).lexeme)
+                match(TokenKind.PERIOD) -> if (match(TokenKind.LPAREN)) {
+                    val assertedType = parseType()
+                    expect(TokenKind.RPAREN)
+                    TypeAssertionExpression(expr, assertedType)
+                } else SelectorExpression(expr, expect(TokenKind.IDENT).lexeme)
                 match(TokenKind.LBRACK) -> {
                     val low = if (at(TokenKind.COLON) || at(TokenKind.RBRACK)) null else expression()
                     if (match(TokenKind.COLON)) {
