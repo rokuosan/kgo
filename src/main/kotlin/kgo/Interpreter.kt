@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -150,8 +151,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 }
             }
             is SendStatement -> {
-                val channel = evaluate(statement.channel, env) as? GoChannel ?: throw RuntimeGoError("send on non-channel")
-                channel.send(evaluate(statement.value, env))
+                when (val channel = evaluate(statement.channel, env)) {
+                    is GoChannel -> channel.send(evaluate(statement.value, env))
+                    is GoNilValue -> if (underlying(channel.type) is ChannelGoType) awaitCancellation() else throw RuntimeGoError("send on non-channel")
+                    else -> throw RuntimeGoError("send on non-channel")
+                }
             }
             is GoStatement -> {
                 val call = statement.call as? CallExpression ?: throw RuntimeGoError("go statement requires a function call")
@@ -222,6 +226,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     is GoSlice -> receiver.set(number(key, "index").toInt(), copyForType(value, receiver.elementType))
                     is GoArray -> receiver.values[number(key, "index").toInt()] = copyForType(value, receiver.elementType)
                     is GoMap -> receiver.values[mapKey(key)] = copyForType(value, receiver.valueType)
+                    is GoNilValue -> {
+                        if (underlying(receiver.type) is MapGoType) throw RuntimeGoError("assignment to entry in nil map")
+                        else throw RuntimeGoError("cannot assign through index")
+                    }
                     else -> throw RuntimeGoError("cannot assign through index")
                 }
             }
@@ -245,19 +253,21 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             when (val communication = clause.communication) {
                 null -> null
                 is SendStatement -> {
-                    val channel = evaluate(communication.channel, env) as? GoChannel ?: throw RuntimeGoError("select send on non-channel")
-                    SelectSend(caseIndex, channel, copyForType(evaluate(communication.value, env), channel.elementType))
+                    val channelValue = evaluate(communication.channel, env)
+                    val sendValue = evaluate(communication.value, env)
+                    val channel = selectChannelOrNull(channelValue) ?: return@mapIndexedNotNull null
+                    SelectSend(caseIndex, channel, copyForType(sendValue, channel.elementType))
                 }
                 is ExpressionStatement -> {
                     val receive = communication.expression as? UnaryExpression
                     if (receive?.operator != TokenKind.ARROW) throw RuntimeGoError("invalid select receive clause")
-                    val channel = evaluate(receive.operand, env) as? GoChannel ?: throw RuntimeGoError("select receive from non-channel")
+                    val channel = selectChannelOrNull(evaluate(receive.operand, env)) ?: return@mapIndexedNotNull null
                     SelectReceive(caseIndex, channel, null)
                 }
                 is AssignmentStatement -> {
                     val receive = communication.values.singleOrNull() as? UnaryExpression
                     if (receive?.operator != TokenKind.ARROW) throw RuntimeGoError("select assignment must receive from a channel")
-                    val channel = evaluate(receive.operand, env) as? GoChannel ?: throw RuntimeGoError("select receive from non-channel")
+                    val channel = selectChannelOrNull(evaluate(receive.operand, env)) ?: return@mapIndexedNotNull null
                     SelectReceive(caseIndex, channel, communication)
                 }
                 else -> throw RuntimeGoError("invalid select communication clause")
@@ -281,6 +291,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             executeSelectedCase(statement.cases[defaultIndex], env, labels)
             return
         }
+        if (operations.isEmpty()) awaitCancellation()
         val selected = selectUnbiased<SelectSelection> {
             operations.forEach { operation ->
                 when (operation) {
@@ -298,6 +309,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 expandValues(listOf(selected.received), receive.assignment.targets.size), env)
         }
         executeSelectedCase(clause, env, labels)
+    }
+
+    private fun selectChannelOrNull(value: Any?): GoChannel? = when (value) {
+        is GoChannel -> value
+        is GoNilValue -> if (underlying(value.type) is ChannelGoType) null else throw RuntimeGoError("select operation requires a channel")
+        else -> throw RuntimeGoError("select operation requires a channel")
     }
 
     private suspend fun executeSelectedCase(clause: SelectCase, env: Environment, labels: Set<String>) {
@@ -389,6 +406,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                 catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
             }
+            is GoNilValue -> when (underlying(value.type)) {
+                is SliceGoType, is MapGoType -> Unit
+                is ChannelGoType -> awaitCancellation()
+                else -> throw RuntimeGoError("range over this value is not implemented")
+            }
             is String -> {
                 var byteIndex = 0L
                 var charIndex = 0
@@ -471,6 +493,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val mapKey = mapKey(key)
                 val found = receiver.values.containsKey(mapKey)
                 return listOf(MapLookupResult(if (found) receiver.values[mapKey] else receiver.elementZero, found))
+            }
+            if (receiver is GoNilValue && underlying(receiver.type) is MapGoType) {
+                val mapType = underlying(receiver.type) as MapGoType
+                return listOf(MapLookupResult(zeroValue(mapType.value), false))
             }
         }
         return expressions.map { evaluate(it, env) }
@@ -613,6 +639,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val values = invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
+            is GoNilValue -> if (underlying(target.type) is FunctionGoType)
+                throw RuntimeGoError("call of nil function")
             is BuiltinValue -> when (target.name) {
                 "print", "println" -> {
                     output(effectiveArgs.joinToString(if (target.name == "println") " " else "") { stringify(it) } + if (target.name == "println") "\n" else "")
@@ -624,19 +652,34 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     val type = (args.singleOrNull() as? TypeValue)?.type ?: throw RuntimeGoError("new requires a type")
                     return GoPointer.cell(zeroValue(type), type)
                 }
-                "close" -> { (args.singleOrNull() as? GoChannel)?.close() ?: throw RuntimeGoError("close of non-channel"); return null }
+                "close" -> {
+                    when (val channel = args.singleOrNull()) {
+                        is GoChannel -> channel.close()
+                        is GoNilValue -> if (underlying(channel.type) is ChannelGoType) throw RuntimeGoError("close of nil channel") else throw RuntimeGoError("close of non-channel")
+                        else -> throw RuntimeGoError("close of non-channel")
+                    }
+                    return null
+                }
                 "len" -> return when (val value = args.singleOrNull()) {
                     is String -> value.toByteArray(Charsets.UTF_8).size.toLong()
                     is GoSlice -> value.length.toLong()
                     is GoArray -> value.values.size.toLong()
                     is GoMap -> value.values.size.toLong()
                     is GoChannel -> value.len()
+                    is GoNilValue -> when (underlying(value.type)) {
+                        is SliceGoType, is MapGoType, is ChannelGoType -> 0L
+                        else -> throw RuntimeGoError("len is not defined for this value")
+                    }
                     else -> throw RuntimeGoError("len is not defined for this value")
                 }
                 "cap" -> return when (val value = args.singleOrNull()) {
                     is GoChannel -> value.capacity.toLong()
                     is GoSlice -> value.capacity.toLong()
                     is GoArray -> value.values.size.toLong()
+                    is GoNilValue -> when (underlying(value.type)) {
+                        is SliceGoType, is ChannelGoType -> 0L
+                        else -> throw RuntimeGoError("cap is not defined for this value")
+                    }
                     else -> throw RuntimeGoError("cap is not defined for this value")
                 }
                 "append" -> return append(effectiveArgs)
@@ -719,6 +762,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is GoInterfaceValue -> value.dynamicType
         is GoStruct -> value.namedType?.let(::NamedGoType)
         is GoPointer -> value.pointeeType?.let(::PointerGoType) ?: runtimeType(value.get())?.let(::PointerGoType)
+        is GoNilValue -> value.type
         is GoSlice -> SliceGoType(value.elementType)
         is GoMap -> MapGoType(value.keyType, value.valueType)
         is GoChannel -> ChannelGoType(value.elementType, ChannelDirection.SEND_RECEIVE)
@@ -800,13 +844,23 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         else -> value
     }
 
-    private fun copyForType(value: Any?, type: GoTypeSyntax): Any? = boxInterface(copyValue(value), type)
+    private fun copyForType(value: Any?, type: GoTypeSyntax): Any? {
+        val actual = underlying(type)
+        val copied = if (value == null) when (actual) {
+            is PointerGoType -> GoPointer.nil(actual.element)
+            is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
+            else -> null
+        } else copyValue(value)
+        return boxInterface(copied, type)
+    }
 
     private fun index(receiver: Any?, rawIndex: Any?): Any? {
         return when (receiver) {
             is GoSlice -> receiver.get(number(rawIndex, "index").toInt())
             is GoArray -> receiver.values.getOrNull(number(rawIndex, "index").toInt()) ?: throw RuntimeGoError("array index out of range")
             is GoMap -> mapKey(rawIndex).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
+            is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { zeroValue(it.value) }
+                ?: throw RuntimeGoError("cannot index this value")
             is GoStruct -> {
                 val field = rawIndex as? String ?: throw RuntimeGoError("struct field must be a name")
                 if (receiver.fields.containsKey(field)) receiver.fields[field] else throw RuntimeGoError("unknown struct field: $field")
@@ -846,6 +900,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun convert(type: GoTypeSyntax, value: Any?): Any? = when (val target = underlying(type)) {
         is PointerGoType -> if (value == null) GoPointer.nil(target.element) else value
+        is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType ->
+            if (value == null || value is GoNilValue) GoNilValue(type) else value
         is NamedGoType -> when (target.name) {
             "string" -> when (value) { is String -> value; is Long -> String(Character.toChars(value.toInt())); else -> throw RuntimeGoError("cannot convert to string") }
             "bool" -> value as? Boolean ?: throw RuntimeGoError("cannot convert to bool")
@@ -857,14 +913,26 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun append(args: List<Any?>): GoSlice {
-        val slice = args.firstOrNull() as? GoSlice ?: throw RuntimeGoError("append requires a slice")
+        val first = args.firstOrNull()
+        val slice = when (first) {
+            is GoSlice -> first
+            is GoNilValue -> (underlying(first.type) as? SliceGoType)?.let {
+                GoSlice(it.element, mutableListOf(), 0, 0, 0)
+            } ?: throw RuntimeGoError("append requires a slice")
+            else -> throw RuntimeGoError("append requires a slice")
+        }
         return slice.append(args.drop(1))
     }
 
     private fun copy(args: List<Any?>): Long {
-        val destination = args.getOrNull(0) as? GoSlice ?: throw RuntimeGoError("copy destination must be a slice")
+        val destination = args.getOrNull(0) as? GoSlice ?: when (val nilDestination = args.getOrNull(0)) {
+            is GoNilValue -> if (underlying(nilDestination.type) is SliceGoType) return 0L
+                else throw RuntimeGoError("copy destination must be a slice")
+            else -> throw RuntimeGoError("copy destination must be a slice")
+        }
         val values = when (val source = args.getOrNull(1)) {
             is GoSlice -> source.toList()
+            is GoNilValue -> if (underlying(source.type) is SliceGoType) emptyList() else throw RuntimeGoError("copy source must be a slice or string")
             is GoArray -> source.values.toList()
             is String -> source.toByteArray(Charsets.UTF_8).map { (it.toInt() and 0xff).toLong() }
             else -> throw RuntimeGoError("copy source must be a slice or string")
@@ -875,7 +943,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun delete(args: List<Any?>) {
-        val map = args.getOrNull(0) as? GoMap ?: throw RuntimeGoError("delete requires a map")
+        val map = args.getOrNull(0) as? GoMap ?: when (val nilMap = args.getOrNull(0)) {
+            is GoNilValue -> if (underlying(nilMap.type) is MapGoType) return else throw RuntimeGoError("delete requires a map")
+            else -> throw RuntimeGoError("delete requires a map")
+        }
         map.values.remove(mapKey(args.getOrNull(1)))
     }
 
@@ -909,7 +980,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         TokenKind.XOR -> number(value, "^").inv()
         TokenKind.AND -> throw RuntimeGoError("pointers are not implemented")
         TokenKind.MUL -> throw RuntimeGoError("pointer dereference is not implemented")
-        TokenKind.ARROW -> (value as? GoChannel)?.receive() ?: throw RuntimeGoError("receive from non-channel")
+        TokenKind.ARROW -> when (value) {
+            is GoChannel -> value.receive()
+            is GoNilValue -> if (underlying(value.type) is ChannelGoType) awaitCancellation() else throw RuntimeGoError("receive from non-channel")
+            else -> throw RuntimeGoError("receive from non-channel")
+        }
         else -> value
     }
 
@@ -974,6 +1049,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             GoStruct(fields, (type as? NamedGoType)?.name, fieldTypes)
         }
+        is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
         is PointerGoType -> GoPointer.nil(actual.element)
         else -> null
     }
@@ -1048,6 +1124,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun goEqual(left: Any?, right: Any?): Boolean {
         if (left is GoPointer && right == null) return left.isNil
         if (right is GoPointer && left == null) return right.isNil
+        if (left is GoNilValue && right == null || right is GoNilValue && left == null) return true
+        if (left is GoNilValue && right is GoNilValue) return left.type == right.type
         if (left is GoInterfaceValue || right is GoInterfaceValue) {
             if (left == null || right == null) return left == null && right == null
             val leftType = (left as? GoInterfaceValue)?.dynamicType ?: runtimeType(left)
@@ -1073,6 +1151,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun runtimeComparable(value: Any?): Boolean = when (value) {
         is GoSlice, is GoMap, is FunctionValue -> false
+        is GoNilValue -> when (underlying(value.type)) {
+            is SliceGoType, is MapGoType, is FunctionGoType -> false
+            else -> true
+        }
         is GoArray -> value.values.all(::runtimeComparable)
         is GoStruct -> value.fields.values.all(::runtimeComparable)
         is GoInterfaceValue -> runtimeComparable(value.value)
@@ -1095,6 +1177,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun truth(value: Any?) = value as? Boolean ?: typeError("condition", value)
     private fun stringify(value: Any?): String = when (value) {
         null -> "<nil>"
+        is GoNilValue -> "<nil>"
         is GoInterfaceValue -> stringify(value.value)
         is GoPointer -> if (value.isNil) "<nil>" else "&${stringify(value.get())}"
         is FunctionValue -> "<function ${value.function.name}>"
@@ -1191,6 +1274,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private data class MapLookupResult(val value: Any?, val ok: Boolean)
     private data class GoAssertionResult(val value: Any?, val ok: Boolean, val dynamicType: GoTypeSyntax)
     private data class GoInterfaceValue(val dynamicType: GoTypeSyntax, val value: Any?)
+    private data class GoNilValue(val type: GoTypeSyntax)
     private data class SelectSelection(val caseIndex: Int, val received: GoReceiveResult?)
     private sealed interface SelectOperation { val caseIndex: Int }
     private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation
