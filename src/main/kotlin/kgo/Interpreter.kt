@@ -347,13 +347,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun targets(label: String?, labels: Set<String>) = label == null || label in labels
 
     private suspend fun assign(statement: AssignmentStatement, env: Environment) {
-        if (statement.operator != TokenKind.DEFINE) {
+        if (statement.operator == TokenKind.DEFINE) {
             val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
             assignValues(statement.targets, statement.operator, values, env, statement.values)
-            return
+        } else {
+            val locations = statement.targets.map { resolveTarget(it, env) }
+            val previous = if (statement.operator == TokenKind.ASSIGN) emptyList() else locations.map { it.get() }
+            val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
+            assignToLocations(locations, statement.operator, assignedValues(locations, values, statement.values, env), previous)
         }
-        val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
-        assignValues(statement.targets, statement.operator, values, env, statement.values)
     }
 
     private suspend fun assignValues(
@@ -378,12 +380,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         if (targets.size != values.size) throw RuntimeGoError("assignment count mismatch")
         val locations = targets.map { resolveTarget(it, env) }
-        val assignedValues = values.mapIndexed { index, value ->
-            if (locations[index].type?.let { underlying(it) is InterfaceGoType } == true)
-                defaultRuneValue(value, sourceExpressions?.getOrNull(index), env) else value
-        }
-        val previous = if (operator == TokenKind.ASSIGN) emptyList() else locations.map { it.get() }
-        assignToLocations(locations, operator, assignedValues, previous)
+        assignToLocations(locations, operator, assignedValues(locations, values, sourceExpressions, env),
+            if (operator == TokenKind.ASSIGN) emptyList() else locations.map { it.get() })
+    }
+
+    private fun assignedValues(
+        locations: List<RuntimeTarget>,
+        values: List<Any?>,
+        sourceExpressions: List<Expression>?,
+        env: Environment
+    ): List<Any?> = values.mapIndexed { index, value ->
+        if (locations[index].type?.let { underlying(it) is InterfaceGoType } == true)
+            defaultRuneValue(value, sourceExpressions?.getOrNull(index), env) else value
     }
 
     private fun assignToLocations(
