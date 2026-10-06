@@ -2528,7 +2528,21 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         if (left is GoPointer && right == null) return left.isNil
         if (right is GoPointer && left == null) return right.isNil
         if (left is GoNilValue && right == null || right is GoNilValue && left == null) return true
-        if (left is GoNilValue && right is GoNilValue) return left.type == right.type
+        if (left is GoNilValue && right is GoNilValue) {
+            if (sameRuntimeType(left.type, right.type)) return true
+            val leftType = underlying(left.type)
+            val rightType = underlying(right.type)
+            if (leftType is PointerGoType && rightType is PointerGoType)
+                return sameRuntimeType(leftType.element, rightType.element)
+            if (leftType is ChannelGoType && rightType is ChannelGoType) {
+                val sameElement = sameRuntimeType(leftType.element, rightType.element)
+                val compatibleDirection = leftType.direction == rightType.direction ||
+                    leftType.direction == ChannelDirection.SEND_RECEIVE ||
+                    rightType.direction == ChannelDirection.SEND_RECEIVE
+                return sameElement && compatibleDirection
+            }
+            return false
+        }
         if (left is GoInterfaceValue || right is GoInterfaceValue) {
             if (left == null || right == null) return left == null && right == null
             val leftType = (left as? GoInterfaceValue)?.dynamicType ?: runtimeType(left)
