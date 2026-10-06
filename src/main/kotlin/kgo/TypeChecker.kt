@@ -63,8 +63,8 @@ class TypeChecker {
                 val values = expressionTypes(declaration.values, declaration.names.size, globals)
                 if (declaration.type != null) {
                     validateType(declaration.type)
-                    values.forEach { requireAssignable(it, declaration.type, "initializer") }
-                }
+                    requireAssignableValues(values, declaration.values, declaration.type, "initializer")
+                } else requireDefaultIntegerValues(values, declaration.values, "initializer")
                 declaration.names.forEachIndexed { i, name ->
                     if (name != "_") globals.define(name, declaration.type ?: defaultType(values.getOrNull(i) ?: intType))
                 }
@@ -73,7 +73,7 @@ class TypeChecker {
                 val scope = globals.child()
                 scope.define("iota", intType)
                 val values = expressionTypes(declaration.values, declaration.names.size, scope)
-                declaration.type?.let { t -> values.forEach { requireAssignable(it, t, "constant initializer") } }
+                declaration.type?.let { t -> requireAssignableValues(values, declaration.values, t, "constant initializer") }
                 declaration.names.forEachIndexed { i, name ->
                     if (name != "_") globals.define(name, declaration.type ?: values.getOrNull(i) ?: intType)
                 }
@@ -214,7 +214,8 @@ class TypeChecker {
                     is VariableDeclaration -> {
                         declaration.type?.let(::validateType)
                         val values = expressionTypes(declaration.values, declaration.names.size, scope)
-                        if (declaration.type != null) values.forEach { requireAssignable(it, declaration.type, "initializer") }
+                        if (declaration.type != null) requireAssignableValues(values, declaration.values, declaration.type, "initializer")
+                        else requireDefaultIntegerValues(values, declaration.values, "initializer")
                         declaration.names.forEachIndexed { i, name ->
                             if (name != "_") {
                                 if (scope.containsLocal(name)) error("$name redeclared in this block")
@@ -225,7 +226,7 @@ class TypeChecker {
                     is ConstantDeclaration -> {
                         val constants = scope.child().also { it.define("iota", untypedInt) }
                         val values = expressionTypes(declaration.values, declaration.names.size, constants)
-                        if (declaration.type != null) values.forEach { requireAssignable(it, declaration.type, "constant initializer") }
+                        if (declaration.type != null) requireAssignableValues(values, declaration.values, declaration.type, "constant initializer")
                         declaration.names.forEachIndexed { i, name -> if (name != "_") scope.define(name, declaration.type ?: values.getOrNull(i) ?: untypedInt) }
                     }
                     is TypeDeclaration -> typeDeclarations[declaration.name] = declaration.type
@@ -236,7 +237,8 @@ class TypeChecker {
             is VariableStatement -> {
                 statement.type?.let(::validateType)
                 val values = expressionTypes(statement.values, statement.names.size, scope)
-                if (statement.type != null) values.forEach { requireAssignable(it, statement.type, "initializer") }
+                if (statement.type != null) requireAssignableValues(values, statement.values, statement.type, "initializer")
+                else requireDefaultIntegerValues(values, statement.values, "initializer")
                 statement.names.forEachIndexed { i, name ->
                     if (name != "_") {
                         if (scope.containsLocal(name)) error("$name redeclared in this block")
@@ -247,7 +249,9 @@ class TypeChecker {
             is ReturnStatement -> {
                 val values = expressionTypes(statement.values, resultTypes.size, scope)
                 if (values.size != resultTypes.size) error("return has ${values.size} values, want ${resultTypes.size}")
-                values.zip(resultTypes).forEach { (from, to) -> requireAssignable(from, to, "return") }
+                values.zip(resultTypes).forEachIndexed { i, (from, to) ->
+                    requireAssignable(from, to, "return", statement.values.getOrNull(i))
+                }
             }
             is ExpressionStatement -> {
                 val expression = statement.expression
@@ -320,8 +324,13 @@ class TypeChecker {
             var added = 0
             names.forEachIndexed { i, name ->
                 if (name == "_") return@forEachIndexed
-                if (scope.containsLocal(name)) requireAssignable(valueTypes[i], scope.get(name), "assignment")
-                else { scope.define(name, defaultType(valueTypes[i])); added++ }
+                if (scope.containsLocal(name)) requireAssignable(valueTypes[i], scope.get(name), "assignment", statement.values.getOrNull(i))
+                else {
+                    val targetType = defaultType(valueTypes[i])
+                    statement.values.getOrNull(i)?.let { requireIntegerConstantRepresentable(it, targetType) }
+                    scope.define(name, targetType)
+                    added++
+                }
             }
             if (added == 0) error("short declaration must introduce a new variable")
             return
@@ -329,10 +338,12 @@ class TypeChecker {
         val leftTypes = statement.targets.map { expressionType(it, scope) }
         val rightTypes = expressionTypes(statement.values, leftTypes.size, scope)
         if (leftTypes.size != rightTypes.size) error("assignment count mismatch")
-        leftTypes.zip(rightTypes).forEach { (left, right) -> requireAssignable(right, left, "assignment") }
+        leftTypes.zip(rightTypes).forEachIndexed { i, (left, right) ->
+            requireAssignable(right, left, "assignment", statement.values.getOrNull(i))
+        }
         if (statement.operator != TokenKind.ASSIGN && statement.operator !in setOf(TokenKind.DEFINE)) {
             if (leftTypes.size != 1 || rightTypes.size != 1) error("compound assignment requires one operand")
-            checkBinaryType(leftTypes.single(), compoundOperator(statement.operator), rightTypes.single())
+            checkBinaryType(leftTypes.single(), compoundOperator(statement.operator), rightTypes.single(), statement.targets.single(), statement.values.single())
         }
     }
 
@@ -368,7 +379,7 @@ class TypeChecker {
     private fun checkSend(statement: SendStatement, scope: Scope) {
         val channel = underlying(expressionType(statement.channel, scope)) as? ChannelGoType ?: error("send requires a channel")
         if (channel.direction == ChannelDirection.RECEIVE_ONLY) error("cannot send on receive-only channel")
-        requireAssignable(expressionType(statement.value, scope), channel.element, "channel send")
+        requireAssignable(expressionType(statement.value, scope), channel.element, "channel send", statement.value)
     }
 
     private fun checkSelect(statement: SelectStatement, scope: Scope) {
@@ -417,6 +428,7 @@ class TypeChecker {
                 val caseType = expressionType(case, caseScope)
                 if (tagType != null) {
                     if (!assignable(caseType, tagType) && !assignable(tagType, caseType)) error("case type does not match switch expression")
+                    requireIntegerConstantRepresentable(case, tagType)
                 } else requireBoolean(caseType, "expressionless switch case")
             }
             inLabelBlock(clause) { clause.statements.forEach { checkStatement(it, caseScope) } }
@@ -557,7 +569,9 @@ class TypeChecker {
                 else -> error("invalid unary operator")
             }
         }
-        is BinaryExpression -> checkBinaryType(expressionType(expression.left, scope), expression.operator, expressionType(expression.right, scope))
+        is BinaryExpression -> checkBinaryType(
+            expressionType(expression.left, scope), expression.operator, expressionType(expression.right, scope), expression.left, expression.right
+        )
         is CallExpression -> {
             val results = callResults(expression, scope)
             if (results.size != 1) error("multiple-value call used in single-value context")
@@ -602,7 +616,7 @@ class TypeChecker {
                 else -> error("cannot index through this pointer")
             }
             is SliceGoType -> { requireInteger(index, "slice index"); receiver.element }
-            is MapGoType -> { requireAssignable(index, receiver.key, "map index"); receiver.value }
+            is MapGoType -> { requireAssignable(index, receiver.key, "map index", expression.index); receiver.value }
             is NamedGoType -> if (receiver.name == "string") { requireInteger(index, "string index"); byteType } else error("cannot index ${receiver.name}")
             else -> error("cannot index this value")
         }
@@ -635,13 +649,13 @@ class TypeChecker {
                 val element = if (type is SliceGoType) type.element else (type as ArrayGoType).element
                 literal.elements.forEachIndexed { index, item ->
                     item.key?.let { requireInteger(expressionType(it, scope), "composite index") }
-                    requireAssignable(expressionType(item.value, scope), element, "composite element")
+                    requireAssignable(expressionType(item.value, scope), element, "composite element", item.value)
                 }
             }
             is MapGoType -> literal.elements.forEach { item ->
                 val key = item.key ?: error("map literal element requires key")
-                requireAssignable(expressionType(key, scope), type.key, "map key")
-                requireAssignable(expressionType(item.value, scope), type.value, "map value")
+                requireAssignable(expressionType(key, scope), type.key, "map key", key)
+                requireAssignable(expressionType(item.value, scope), type.value, "map value", item.value)
             }
             is StructGoType -> {
                 val fields = type.fields.flatMap { it.names.map { name -> name to it.type } }.toMap()
@@ -650,7 +664,7 @@ class TypeChecker {
                         val key = (item.key as? NameExpression)?.name ?: error("struct field key must be an identifier")
                         fields[key] ?: error("unknown field $key")
                     } else fields.values.elementAtOrNull(i) ?: error("too many struct literal values")
-                    requireAssignable(expressionType(item.value, scope), fieldType, "struct field")
+                    requireAssignable(expressionType(item.value, scope), fieldType, "struct field", item.value)
                 }
             }
             else -> error("invalid composite literal type")
@@ -663,6 +677,7 @@ class TypeChecker {
             if (call.arguments.size != 1) error("conversion requires one argument")
             val from = expressionType(call.arguments.single(), scope)
             if (!convertible(from, target.type)) error("cannot convert $from to ${target.type}")
+            requireIntegerConstantRepresentable(call.arguments.single(), target.type)
             return listOf(target.type)
         }
         if (target is SelectorExpression && target.receiver is NameExpression && target.receiver.name in packagePaths) {
@@ -681,6 +696,7 @@ class TypeChecker {
                 val from = expressionType(call.arguments.single(), scope)
                 val to = NamedGoType(target.name)
                 if (!convertible(from, to)) error("cannot convert $from to $to")
+                requireIntegerConstantRepresentable(call.arguments.single(), to)
                 return listOf(to)
             }
             val builtin = builtinCall(target.name, call.arguments, scope, call.expandLastArgument)
@@ -702,7 +718,7 @@ class TypeChecker {
                 parameter.variadic -> (parameter.type as? SliceGoType)?.element ?: parameter.type
                 else -> parameter.type
             }
-            requireAssignable(expressionType(arg, scope), expected, "argument")
+            requireAssignable(expressionType(arg, scope), expected, "argument", arg)
         }
         return functionType.results
     }
@@ -739,9 +755,9 @@ class TypeChecker {
                 if (expandLastArgument && types.size != 2) error("append with ... requires one slice argument")
                 val slice = underlying(types[0]) as? SliceGoType ?: error("append requires slice")
                 if (expandLastArgument) {
-                    types.drop(1).dropLast(1).forEach { requireAssignable(it, slice.element, "append") }
+                    types.drop(1).dropLast(1).forEachIndexed { i, type -> requireAssignable(type, slice.element, "append", args.getOrNull(i + 1)) }
                     requireAssignable(types.last(), types[0], "append slice")
-                } else types.drop(1).forEach { requireAssignable(it, slice.element, "append") }
+                } else types.drop(1).forEachIndexed { i, type -> requireAssignable(type, slice.element, "append", args.getOrNull(i + 1)) }
                 listOf(types[0])
             }
             "copy" -> { requireCount(name, args, 2); listOf(intType) }
@@ -774,7 +790,22 @@ class TypeChecker {
         }
     }
 
-    private fun checkBinaryType(left: GoTypeSyntax, operator: TokenKind, right: GoTypeSyntax): GoTypeSyntax {
+    private fun checkBinaryType(
+        left: GoTypeSyntax,
+        operator: TokenKind,
+        right: GoTypeSyntax,
+        leftExpression: Expression? = null,
+        rightExpression: Expression? = null
+    ): GoTypeSyntax {
+        if (operator != TokenKind.SHL && operator != TokenKind.SHR) {
+            if (isUntyped(left) && !isUntyped(right)) leftExpression?.let { requireIntegerConstantRepresentable(it, right) }
+            if (isUntyped(right) && !isUntyped(left)) rightExpression?.let { requireIntegerConstantRepresentable(it, left) }
+        }
+        if (operator == TokenKind.SHL || operator == TokenKind.SHR) {
+            rightExpression?.let { expression ->
+                if (constantInteger(expression)?.signum()?.let { it < 0 } == true) error("negative shift count")
+            }
+        }
         val l = underlying(left); val r = underlying(right)
         if (operator in setOf(TokenKind.LAND, TokenKind.LOR)) {
             requireBoolean(left, "logical operator"); requireBoolean(right, "logical operator"); return boolType
@@ -815,8 +846,39 @@ class TypeChecker {
         else -> left
     }
 
-    private fun requireAssignable(from: GoTypeSyntax, to: GoTypeSyntax, context: String) {
+    private fun requireAssignableValues(values: List<GoTypeSyntax>, expressions: List<Expression>, to: GoTypeSyntax, context: String) {
+        if (values.size == expressions.size) {
+            values.zip(expressions).forEach { (from, expression) -> requireAssignable(from, to, context, expression) }
+        } else values.forEach { requireAssignable(it, to, context) }
+    }
+
+    private fun requireDefaultIntegerValues(values: List<GoTypeSyntax>, expressions: List<Expression>, context: String) {
+        if (values.size != expressions.size) return
+        values.zip(expressions).forEach { (from, expression) ->
+            if (isUntyped(from)) requireIntegerConstantRepresentable(expression, defaultType(from))
+        }
+    }
+
+    private fun requireAssignable(from: GoTypeSyntax, to: GoTypeSyntax, context: String, expression: Expression? = null) {
         if (!assignable(from, to)) error("cannot use $from as $to in $context")
+        expression?.let { requireIntegerConstantRepresentable(it, to) }
+    }
+
+    private fun requireIntegerConstantRepresentable(expression: Expression, target: GoTypeSyntax) {
+        if (!isInteger(target)) return
+        val value = constantInteger(expression) ?: return
+        val name = (underlying(target) as? NamedGoType)?.name ?: return
+        val bits = when (name) {
+            "int8", "uint8", "byte" -> 8
+            "int16", "uint16" -> 16
+            "int32", "uint32", "rune" -> 32
+            else -> 64
+        }
+        val unsigned = name in setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+        val minimum = if (unsigned) BigInteger.ZERO else BigInteger.ONE.shiftLeft(bits - 1).negate()
+        val maximum = if (unsigned) BigInteger.ONE.shiftLeft(bits).subtract(BigInteger.ONE)
+            else BigInteger.ONE.shiftLeft(bits - 1).subtract(BigInteger.ONE)
+        if (value < minimum || value > maximum) error("constant $value overflows $target")
     }
 
     private fun assignable(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
