@@ -1771,7 +1771,7 @@ class TypeChecker {
                 listOf(intType)
             }
             "append" -> {
-                if (types.size < 2) error("append requires a slice and values")
+                if (types.isEmpty()) error("append requires a slice")
                 if (expandLastArgument && types.size != 2) error("append with ... requires one slice argument")
                 val slice = underlying(types[0]) as? SliceGoType ?: error("append requires slice")
                 if (expandLastArgument) {
