@@ -35,6 +35,20 @@ class TypeChecker {
         if (packageName == "_") error("package name cannot be _")
         if (files.any { it.packageName != packageName }) error("source files declare different package names")
         val declarations = files.flatMap { file -> file.declarations.map { file to it } }
+        val packageIdentifiers = linkedSetOf<String>()
+        declarations.forEach { (_, declaration) ->
+            val names = when (declaration) {
+                is VariableDeclaration -> declaration.names
+                is ConstantDeclaration -> declaration.names
+                is TypeDeclaration -> listOf(declaration.name)
+                is FunctionDeclaration -> if (declaration.receiver == null && declaration.name != "init")
+                    listOf(declaration.name) else emptyList()
+                else -> emptyList()
+            }
+            names.filter { it != "_" }.forEach { name ->
+                if (!packageIdentifiers.add(name)) error("$name redeclared in package block")
+            }
+        }
         declarations.mapNotNull { (file, declaration) ->
             (declaration as? TypeDeclaration)?.let { file to it }
         }.forEach { (_, declaration) ->
