@@ -829,6 +829,7 @@ class TypeChecker {
                         val names = communication.targets.map { (it as? NameExpression)?.name ?: error("receive declaration requires identifiers") }
                         if (names.size !in 1..2) error("invalid receive assignment")
                         requireUniqueNames(names, "receive declaration")
+                        if (names.none { it != "_" }) error("receive declaration must introduce a variable")
                         names.forEachIndexed { i, name ->
                             if (name != "_") caseScope.define(name, if (i == 0) defaultType(channel.element) else boolType)
                         }
