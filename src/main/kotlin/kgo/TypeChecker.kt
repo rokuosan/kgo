@@ -16,8 +16,11 @@ class TypeChecker {
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val methods = linkedMapOf<String, FunctionDeclaration>()
     private val packagePaths = linkedMapOf<String, String>()
+    private var dotImportPaths = mutableSetOf<String>()
     private var usedPackageAliases = mutableSetOf<String>()
+    private var usedDotImportPaths = mutableSetOf<String>()
     private val usedPackageAliasesByFile = IdentityHashMap<GoFile, MutableSet<String>>()
+    private val usedDotImportsByFile = IdentityHashMap<GoFile, MutableSet<String>>()
     private val nextLocalTypeIdentity = AtomicInteger()
     private val terminatingPanicCalls = Collections.newSetFromMap(IdentityHashMap<CallExpression, Boolean>())
     private val globals = Scope()
@@ -32,6 +35,7 @@ class TypeChecker {
 
     fun checkFiles(files: List<GoFile>) {
         usedPackageAliasesByFile.clear()
+        usedDotImportsByFile.clear()
         if (files.isEmpty()) error("package has no source files")
         val packageName = files.first().packageName
         if (packageName == "_") error("package name cannot be _")
@@ -154,7 +158,13 @@ class TypeChecker {
         }
         files.forEach { file ->
             val usedAliases = usedPackageAliasesByFile[file].orEmpty()
+            val usedDotImports = usedDotImportsByFile[file].orEmpty()
             file.declarations.filterIsInstance<ImportDeclaration>().flatMap { it.imports }.forEach { spec ->
+                val path = runCatching { decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8) }.getOrNull()
+                if (spec.alias == ".") {
+                    if (path != null && path !in usedDotImports) error("dot-imported package $path is not used")
+                    return@forEach
+                }
                 val alias = when (spec.alias) {
                     null -> runCatching { decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8).substringAfterLast('/') }.getOrNull()
                     else -> spec.alias
@@ -169,10 +179,14 @@ class TypeChecker {
 
     private fun <T> withFileImports(file: GoFile, action: () -> T): T {
         val previous = packagePaths.toMap()
+        val previousDotImports = dotImportPaths
         val previousUsedAliases = usedPackageAliases
+        val previousUsedDotImports = usedDotImportPaths
         usedPackageAliases = mutableSetOf()
+        usedDotImportPaths = mutableSetOf()
         return try {
             packagePaths.clear()
+            dotImportPaths = mutableSetOf()
             val importedNames = mutableSetOf<String>()
             val imports = file.declarations.filterIsInstance<ImportDeclaration>().flatMap { it.imports }
             val importedPaths = mutableSetOf<String>()
@@ -186,7 +200,12 @@ class TypeChecker {
                 if (!importedPaths.add(canonicalGoStringLiteral(spec.path)))
                     error("package $path imported more than once in this file")
                 val alias = when (spec.alias) {
-                    ".", "_" -> null
+                    "." -> {
+                        dotImportPaths += path
+                        if (packageName(path) == "fmt") importedNames += listOf("Print", "Println", "Fprint", "Fprintln")
+                        null
+                    }
+                    "_" -> null
                     null -> path.substringAfterLast('/')
                     else -> spec.alias
                 } ?: return@forEach
@@ -197,16 +216,30 @@ class TypeChecker {
             if (collision != null) error("package import name $collision conflicts with a package declaration")
             val result = action()
             usedPackageAliasesByFile.getOrPut(file) { mutableSetOf() }.addAll(usedPackageAliases)
+            usedDotImportsByFile.getOrPut(file) { mutableSetOf() }.addAll(usedDotImportPaths)
             result
         } finally {
             packagePaths.clear()
             packagePaths.putAll(previous)
+            dotImportPaths = previousDotImports
             usedPackageAliases = previousUsedAliases
+            usedDotImportPaths = previousUsedDotImports
         }
     }
 
     private fun importedPackagePath(alias: String): String? = packagePaths[alias]?.also {
         usedPackageAliases += alias
+    }
+
+    private fun dotImportedFmtFunctionType(name: String): FunctionGoType? {
+        val any = InterfaceGoType(emptyList())
+        val variadic = ParameterSyntax(null, SliceGoType(any), variadic = true)
+        val writer = ParameterSyntax(null, any)
+        return when (name) {
+            "Print", "Println" -> FunctionGoType(listOf(variadic), listOf(intType, NamedGoType("error")))
+            "Fprint", "Fprintln" -> FunctionGoType(listOf(writer, variadic), listOf(intType, NamedGoType("error")))
+            else -> null
+        }
     }
 
     private fun checkMain() {
@@ -1197,7 +1230,9 @@ class TypeChecker {
                 ?: if (typeDeclarations.containsKey(expression.name)) NamedGoType(expression.name)
                 else if (isBuiltinType(expression.name)) NamedGoType(expression.name)
                 else if (functions.containsKey(expression.name)) functionType(functions.getValue(expression.name))
-                else error("undefined: ${expression.name}")
+                else dotImportedFmtFunctionType(expression.name)?.also {
+                    usedDotImportPaths += dotImportPaths.first { packageName(it) == "fmt" }
+                } ?: error("undefined: ${expression.name}")
         }
         is LiteralExpression -> when (expression.token.kind) {
             TokenKind.INT -> untypedInt
@@ -1343,7 +1378,8 @@ class TypeChecker {
         if (expression.field == "_") error("cannot refer to blank struct field")
         if (expression.receiver is NameExpression && expression.receiver.name in packagePaths &&
             scope.getOrNull(expression.receiver.name) == null) {
-            return if (packageName(importedPackagePath(expression.receiver.name)!!) == "fmt") FunctionGoType(emptyList(), emptyList()) else error("unknown imported package")
+            val path = importedPackagePath(expression.receiver.name)!!
+            return if (packageName(path) == "fmt") dotImportedFmtFunctionType(expression.field) ?: FunctionGoType(emptyList(), emptyList()) else error("unknown imported package")
         }
         methodExpressionReceiver(expression.receiver, scope)?.let { receiverType ->
             val method = methodSet(receiverType)[expression.field] ?: error("undefined method ${expression.field} on $receiverType")

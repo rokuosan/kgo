@@ -82,6 +82,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
     private val nextLocalTypeIdentity = AtomicInteger()
     private val fmtAliases = mutableSetOf("fmt")
+    private var fmtDotImported = false
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) {
@@ -93,7 +94,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 file.declarations.filterIsInstance<ImportDeclaration>().flatMap { it.imports }.forEach { spec ->
                     val importPath = decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8)
                     val alias = when (spec.alias) {
-                        ".", "_" -> null
+                        "." -> {
+                            if (importPath.substringAfterLast('/') == "fmt") fmtDotImported = true
+                            null
+                        }
+                        "_" -> null
                         null -> importPath.substringAfterLast('/')
                         else -> spec.alias
                     }
@@ -1088,13 +1093,17 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             if (binding != null) binding.value
             else typeDefinitions[expression.name]?.let { TypeValue(NamedGoType(expression.name)) }
                 ?: functions[expression.name]?.let { FunctionValue(it, globals) }
-                ?: when (expression.name) {
+                ?: when {
+                    fmtDotImported && expression.name in setOf("Print", "Println", "Fprint", "Fprintln") ->
+                        BuiltinValue(expression.name, dotImportedFmtFunctionType(expression.name))
+                    else -> when (expression.name) {
                     "true" -> true
                     "false" -> false
                     "nil" -> null
                     "make", "new", "close", "len", "cap", "append", "copy", "delete", "print", "println", "panic", "recover", "complex", "real", "imag" -> BuiltinValue(expression.name)
                     in builtinTypes -> TypeValue(NamedGoType(expression.name))
                     else -> throw RuntimeGoError("undefined: ${expression.name}")
+                    }
                 }
         }
         is LiteralExpression -> literal(expression.token)
@@ -1502,12 +1511,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 "copy" -> return copy(args)
                 "delete" -> { delete(args); return null }
                 "Print", "Fprint" -> {
-                    output(effectiveArgs.drop(if (target.name == "Fprint") 1 else 0).joinToString("") { stringify(it) })
-                    return null
+                    val rendered = effectiveArgs.drop(if (target.name == "Fprint") 1 else 0).joinToString("") { stringify(it) }
+                    output(rendered)
+                    return GoMultiValue(listOf(GoInteger(rendered.toByteArray(Charsets.UTF_8).size.toLong(), NamedGoType("int")), null))
                 }
                 "Println", "Fprintln" -> {
-                    output(effectiveArgs.drop(if (target.name == "Fprintln") 1 else 0).joinToString(" ") { stringify(it) } + "\n")
-                    return null
+                    val rendered = effectiveArgs.drop(if (target.name == "Fprintln") 1 else 0).joinToString(" ") { stringify(it) } + "\n"
+                    output(rendered)
+                    return GoMultiValue(listOf(GoInteger(rendered.toByteArray(Charsets.UTF_8).size.toLong(), NamedGoType("int")), null))
                 }
             }
             is TypeValue -> return convert(target.type, args.singleOrNull() ?: throw RuntimeGoError("conversion requires one argument"))
@@ -1689,12 +1700,24 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is FunctionValue -> value.type ?: FunctionGoType(value.function.parameterTypes.mapIndexed { i, type ->
             ParameterSyntax(value.function.parameters.getOrNull(i), type, value.function.variadic && i == value.function.parameterTypes.lastIndex)
         }, value.function.resultTypes)
+        is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> NamedGoType("int")
         is Double -> NamedGoType("float64")
         is GoString -> value.type
         is Boolean -> NamedGoType("bool")
         else -> null
+    }
+
+    private fun dotImportedFmtFunctionType(name: String): FunctionGoType {
+        val any = InterfaceGoType(emptyList())
+        val variadic = ParameterSyntax(null, SliceGoType(any), variadic = true)
+        val writer = ParameterSyntax(null, any)
+        return when (name) {
+            "Print", "Println" -> FunctionGoType(listOf(variadic), listOf(NamedGoType("int"), NamedGoType("error")))
+            "Fprint", "Fprintln" -> FunctionGoType(listOf(writer, variadic), listOf(NamedGoType("int"), NamedGoType("error")))
+            else -> throw RuntimeGoError("undefined fmt function $name")
+        }
     }
 
     private fun assertType(value: Any?, target: GoTypeSyntax): GoAssertionResult {
@@ -1966,6 +1989,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is FunctionGoType -> when (value) {
             is FunctionValue -> value.copy(type = type)
             is MethodExpressionValue -> value.copy(type = type)
+            is BuiltinValue -> value.copy(type = type)
             null, is GoNilValue -> GoNilValue(type)
             else -> throw RuntimeGoError("cannot convert value to $type")
         }
@@ -2609,7 +2633,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun runtimeComparable(value: Any?): Boolean = when (value) {
-        is GoSlice, is GoMap, is FunctionValue -> false
+        is GoSlice, is GoMap, is FunctionValue, is BuiltinValue -> false
         is GoNilValue -> when (underlying(value.type)) {
             is SliceGoType, is MapGoType, is FunctionGoType -> false
             else -> true
@@ -2942,7 +2966,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private data class Lookup(val value: Any?)
     private data class FunctionValue(val function: FunctionDeclaration, val closure: Environment, val type: GoTypeSyntax? = null)
-    private data class BuiltinValue(val name: String)
+    private data class BuiltinValue(val name: String, val type: GoTypeSyntax? = null)
     private data class TypeValue(val type: GoTypeSyntax)
     private data class MethodValue(val function: FunctionDeclaration, val receiver: Any?)
     private data class MethodExpressionValue(val receiverType: GoTypeSyntax, val name: String, val type: GoTypeSyntax)
