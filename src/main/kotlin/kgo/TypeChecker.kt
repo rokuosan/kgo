@@ -911,6 +911,7 @@ class TypeChecker {
                 return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
             }
         }
+        constantInteger(expression, scope)?.let { value -> return "$typeKey:number:$value/1" }
         constantRational(expression, scope)?.let { value ->
             return "$typeKey:number:${value.numerator}/${value.denominator}"
         }
@@ -931,6 +932,7 @@ class TypeChecker {
                 return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
             }
         }
+        constantInteger(expression, scope)?.let { value -> return "$typeKey:number:$value/1" }
         constantRational(expression, scope)?.let { value ->
             return "$typeKey:number:${value.numerator}/${value.denominator}"
         }
@@ -943,7 +945,7 @@ class TypeChecker {
         is LiteralExpression -> if (expression.token.kind == TokenKind.IMAG) {
             runCatching { GoRational.decimal(expression.token.lexeme.removeSuffix("i")) }.getOrNull()
                 ?.let { ConstantComplexValue(GoRational.ZERO, it) }
-        } else constantRational(expression, scope)?.let { ConstantComplexValue(it, GoRational.ZERO) }
+        } else constantRealValue(expression, scope)?.let { ConstantComplexValue(it, GoRational.ZERO) }
         is ParenthesizedExpression -> constantComplex(expression.expression, scope)
         is UnaryExpression -> constantComplex(expression.operand, scope)?.let { value ->
             when (expression.operator) {
@@ -955,7 +957,9 @@ class TypeChecker {
         is BinaryExpression -> {
             val left = constantComplex(expression.left, scope)
             val right = constantComplex(expression.right, scope)
-            if (left == null || right == null) null else when (expression.operator) {
+            if (left == null || right == null) constantInteger(expression, scope)?.let {
+                ConstantComplexValue(GoRational.of(it), GoRational.ZERO)
+            } else when (expression.operator) {
                 TokenKind.ADD -> ConstantComplexValue(left.real + right.real, left.imaginary + right.imaginary)
                 TokenKind.SUB -> ConstantComplexValue(left.real - right.real, left.imaginary - right.imaginary)
                 TokenKind.MUL -> ConstantComplexValue(
@@ -982,8 +986,8 @@ class TypeChecker {
             }
             when {
                 expression.function == NameExpression("complex") && expression.arguments.size == 2 -> {
-                    val real = constantRational(expression.arguments[0], scope)
-                    val imaginary = constantRational(expression.arguments[1], scope)
+                    val real = constantRealValue(expression.arguments[0], scope)
+                    val imaginary = constantRealValue(expression.arguments[1], scope)
                     if (real == null || imaginary == null) null else ConstantComplexValue(real, imaginary)
                 }
                 expression.function == NameExpression("real") && expression.arguments.size == 1 ->
@@ -997,6 +1001,9 @@ class TypeChecker {
         }
         else -> null
     }
+
+    private fun constantRealValue(expression: Expression, scope: Scope): GoRational? =
+        constantRational(expression, scope) ?: constantInteger(expression, scope)?.let(GoRational::of)
 
     private fun constantBoolean(expression: Expression, scope: Scope = globals): Boolean? = when (expression) {
         is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.constantBoolean(expression.name) else when (expression.name) {
