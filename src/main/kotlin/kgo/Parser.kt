@@ -377,6 +377,12 @@ class Parser(private val tokens: List<Token>) {
                 val type = parseType()
                 if (allowCompositeLiteral && at(TokenKind.LBRACE)) parseCompositeLiteral(type) else TypeExpression(type)
             }
+            TokenKind.FUNC -> {
+                take()
+                val parameters = parseParameters()
+                val results = parseResults()
+                FunctionLiteralExpression(parameters, results, parseBlock())
+            }
             TokenKind.LPAREN -> { take(); val inner = expressionWithComposite { expression() }; expect(TokenKind.RPAREN); ParenthesizedExpression(inner) }
             else -> fail("expected expression")
         }

@@ -72,6 +72,11 @@ data class SliceExpression(val receiver: Expression, val low: Expression?, val h
 data class ParenthesizedExpression(val expression: Expression) : Expression
 data class TypeExpression(val type: GoTypeSyntax) : Expression
 data class CompositeLiteral(val type: GoTypeSyntax, val elements: List<CompositeElement>) : Expression
+data class FunctionLiteralExpression(
+    val parameters: List<ParameterSyntax>,
+    val results: List<GoTypeSyntax>,
+    val body: BlockStatement
+) : Expression
 data class CompositeElement(val key: Expression?, val value: Expression)
 
 sealed interface GoTypeSyntax

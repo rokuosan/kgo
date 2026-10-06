@@ -326,6 +326,22 @@ class TypeChecker {
             else -> error("invalid literal")
         }
         is ParenthesizedExpression -> expressionType(expression.expression, scope)
+        is FunctionLiteralExpression -> {
+            val literalScope = scope.child()
+            expression.parameters.forEach { parameter ->
+                validateType(parameter.type)
+                val name = parameter.name
+                if (name != null && name != "_") {
+                    if (literalScope.containsLocal(name)) error("$name redeclared in function signature")
+                    literalScope.define(name, parameter.type)
+                }
+            }
+            expression.results.forEach(::validateType)
+            val previousResults = resultTypes
+            resultTypes = expression.results
+            try { checkBlock(expression.body, literalScope) } finally { resultTypes = previousResults }
+            FunctionGoType(expression.parameters, expression.results)
+        }
         is UnaryExpression -> {
             val operand = expressionType(expression.operand, scope)
             when (expression.operator) {

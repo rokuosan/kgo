@@ -60,11 +60,16 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
     }
 
-    private suspend fun invoke(function: FunctionDeclaration, arguments: List<Any?>, receiver: Any? = null): List<Any?> {
+    private suspend fun invoke(
+        function: FunctionDeclaration,
+        arguments: List<Any?>,
+        receiver: Any? = null,
+        parent: Environment = globals
+    ): List<Any?> {
         if (function.parameters.size != arguments.size) {
             throw RuntimeGoError("${function.name} expects ${function.parameters.size} arguments, got ${arguments.size}")
         }
-        val env = Environment(globals)
+        val env = Environment(parent)
         function.receiver?.let { env.define(it.name ?: "", receiver) }
         function.parameters.zip(arguments).forEach { (name, value) -> name?.let { env.define(it, value) } }
         return try {
@@ -404,7 +409,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             "make", "new", "close", "len", "cap", "append", "copy", "delete", "print", "println", "panic" -> BuiltinValue(expression.name)
             in builtinTypes -> TypeValue(NamedGoType(expression.name))
             in typeDefinitions -> TypeValue(NamedGoType(expression.name))
-            else -> env.lookup(expression.name)?.value ?: if (env.contains(expression.name)) null else if (functions.containsKey(expression.name)) FunctionValue(expression.name) else throw RuntimeGoError("undefined: ${expression.name}")
+            else -> env.lookup(expression.name)?.value ?: if (env.contains(expression.name)) null else functions[expression.name]
+                ?.let { FunctionValue(it, globals) } ?: throw RuntimeGoError("undefined: ${expression.name}")
         }
         is LiteralExpression -> literal(expression.token)
         is ParenthesizedExpression -> evaluate(expression.expression, env)
@@ -446,6 +452,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             expression.high?.let { evaluate(it, env) }, expression.max?.let { evaluate(it, env) })
         is TypeExpression -> TypeValue(expression.type)
         is CompositeLiteral -> composite(expression, env)
+        is FunctionLiteralExpression -> {
+            val declaration = FunctionDeclaration(
+                "<function literal>", expression.parameters.map { it.name }, expression.body,
+                expression.parameters.map { it.type }, expression.results
+            )
+            FunctionValue(declaration, env)
+        }
     }
 
     private suspend fun addressOf(expression: Expression, env: Environment): GoPointer = when (expression) {
@@ -481,7 +494,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun call(target: Any?, args: List<Any?>): Any? {
         when (target) {
             is FunctionValue -> {
-                val values = invoke(functions[target.name] ?: throw RuntimeGoError("undefined function ${target.name}"), args)
+                val values = invoke(target.function, args, parent = target.closure)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
             is MethodValue -> {
@@ -806,7 +819,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun stringify(value: Any?): String = when (value) {
         null -> "<nil>"
         is GoPointer -> "&${stringify(value.get())}"
-        is FunctionValue -> "<function ${value.name}>"
+        is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoArray -> value.values.joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoMap -> value.values.entries.joinToString(prefix = "map[", postfix = "]") { "${stringify(it.key)}:${stringify(it.value)}" }
@@ -884,7 +897,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private data class Lookup(val value: Any?)
-    private data class FunctionValue(val name: String)
+    private data class FunctionValue(val function: FunctionDeclaration, val closure: Environment)
     private data class BuiltinValue(val name: String)
     private data class TypeValue(val type: GoTypeSyntax)
     private data class MethodValue(val function: FunctionDeclaration, val receiver: Any?)
