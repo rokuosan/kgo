@@ -1964,12 +1964,15 @@ class TypeChecker {
                 }
                 type.methods.forEach { method ->
                     if (!names.add(method.name)) error("duplicate interface method ${method.name}")
-                    method.parameters.forEach { validateType(it.type, active) }
-                    method.results.forEach { validateType(it, active) }
+                    method.parameters.forEach { validateType(it.type, active, true) }
+                    method.results.forEach { validateType(it, active, true) }
                 }
                 interfaceMethods(type)
             }
-            is FunctionGoType -> { type.parameters.forEach { validateType(it.type, active) }; type.results.forEach { validateType(it, active) } }
+            is FunctionGoType -> {
+                type.parameters.forEach { validateType(it.type, active, true) }
+                type.results.forEach { validateType(it, active, true) }
+            }
         }
     }
 
