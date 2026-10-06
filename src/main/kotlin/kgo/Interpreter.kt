@@ -1419,10 +1419,26 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         val a = number(left, op.name); val b = number(right, op.name)
         return when (op) {
             TokenKind.ADD -> a + b; TokenKind.SUB -> a - b; TokenKind.MUL -> a * b
-            TokenKind.QUO -> if (b == 0L) throw RuntimeGoError("integer divide by zero") else a / b
-            TokenKind.REM -> if (b == 0L) throw RuntimeGoError("integer divide by zero") else a % b
+            TokenKind.QUO -> when {
+                b == 0L -> throw RuntimeGoError("integer divide by zero")
+                a == Long.MIN_VALUE && b == -1L -> Long.MIN_VALUE
+                else -> a / b
+            }
+            TokenKind.REM -> when {
+                b == 0L -> throw RuntimeGoError("integer divide by zero")
+                a == Long.MIN_VALUE && b == -1L -> 0L
+                else -> a % b
+            }
             TokenKind.AND -> a and b; TokenKind.OR -> a or b; TokenKind.XOR -> a xor b
-            TokenKind.AND_NOT -> a and b.inv(); TokenKind.SHL -> a shl b.toInt(); TokenKind.SHR -> a shr b.toInt()
+            TokenKind.AND_NOT -> a and b.inv()
+            TokenKind.SHL -> {
+                if (b < 0) throw RuntimeGoError("negative shift count")
+                if (b >= Long.SIZE_BITS) 0L else a shl b.toInt()
+            }
+            TokenKind.SHR -> {
+                if (b < 0) throw RuntimeGoError("negative shift count")
+                if (b >= Long.SIZE_BITS) if (a < 0) -1L else 0L else a shr b.toInt()
+            }
             TokenKind.LSS -> a < b; TokenKind.LEQ -> a <= b; TokenKind.GTR -> a > b; TokenKind.GEQ -> a >= b
             else -> throw RuntimeGoError("invalid operator $op")
         }
