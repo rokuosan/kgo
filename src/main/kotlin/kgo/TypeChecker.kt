@@ -42,8 +42,8 @@ class TypeChecker {
         file.declarations.filterIsInstance<ConstantDeclaration>().forEach { declaration ->
             declaration.names.filter { it != "_" }.forEach { name -> globals.define(name, declaration.type ?: untypedInt) }
         }
-        functions.forEach { (name, function) -> globals.define(name, FunctionGoType(function.parameterTypes.mapIndexed { i, t -> ParameterSyntax(function.parameters.getOrNull(i), t) }, function.resultTypes)) }
-        methods.forEach { (key, function) -> globals.define(key, FunctionGoType(function.parameterTypes.mapIndexed { i, t -> ParameterSyntax(function.parameters.getOrNull(i), t) }, function.resultTypes)) }
+        functions.forEach { (name, function) -> globals.define(name, functionType(function)) }
+        methods.forEach { (key, function) -> globals.define(key, functionType(function)) }
 
         for (declaration in file.declarations) when (declaration) {
             is VariableDeclaration -> {
@@ -459,24 +459,34 @@ class TypeChecker {
                 if (!convertible(from, to)) error("cannot convert $from to $to")
                 return listOf(to)
             }
-            val builtin = builtinCall(target.name, call.arguments, scope)
+            val builtin = builtinCall(target.name, call.arguments, scope, call.expandLastArgument)
             if (builtin != null) return builtin
         }
         val functionType = underlying(expressionType(target, scope)) as? FunctionGoType ?: error("called value is not a function")
         val variadic = functionType.parameters.lastOrNull()?.variadic == true
-        if ((!variadic && call.arguments.size != functionType.parameters.size) || (variadic && call.arguments.size < functionType.parameters.size - 1))
+        val fixedCount = if (variadic) functionType.parameters.size - 1 else functionType.parameters.size
+        if (call.expandLastArgument && !variadic) error("cannot use ... with non-variadic function")
+        if (call.expandLastArgument && call.arguments.size != functionType.parameters.size)
+            error("variadic call with ... requires one slice argument")
+        if ((!variadic && call.arguments.size != fixedCount) || (variadic && !call.expandLastArgument && call.arguments.size < fixedCount))
             error("wrong number of arguments: got ${call.arguments.size}")
         call.arguments.forEachIndexed { i, arg ->
             val parameter = functionType.parameters.getOrNull(i) ?: functionType.parameters.lastOrNull()
                 ?: error("function has no parameters")
-            val expected = if (parameter.variadic) (parameter.type as? SliceGoType)?.element ?: parameter.type else parameter.type
+            val expected = when {
+                call.expandLastArgument && i == call.arguments.lastIndex -> parameter.type
+                parameter.variadic -> (parameter.type as? SliceGoType)?.element ?: parameter.type
+                else -> parameter.type
+            }
             requireAssignable(expressionType(arg, scope), expected, "argument")
         }
         return functionType.results
     }
 
-    private fun builtinCall(name: String, args: List<Expression>, scope: Scope): List<GoTypeSyntax>? {
+    private fun builtinCall(name: String, args: List<Expression>, scope: Scope, expandLastArgument: Boolean = false): List<GoTypeSyntax>? {
         val types = args.map { expressionType(it, scope) }
+        if (expandLastArgument && name in setOf("print", "println") && args.size != 1)
+            error("... requires a single final argument")
         return when (name) {
             "print", "println" -> emptyList()
             "panic" -> { requireCount(name, args, 1); emptyList() }
@@ -502,8 +512,12 @@ class TypeChecker {
             }
             "append" -> {
                 if (types.size < 2) error("append requires a slice and values")
+                if (expandLastArgument && types.size != 2) error("append with ... requires one slice argument")
                 val slice = underlying(types[0]) as? SliceGoType ?: error("append requires slice")
-                types.drop(1).forEach { requireAssignable(it, slice.element, "append") }
+                if (expandLastArgument) {
+                    types.drop(1).dropLast(1).forEach { requireAssignable(it, slice.element, "append") }
+                    requireAssignable(types.last(), types[0], "append slice")
+                } else types.drop(1).forEach { requireAssignable(it, slice.element, "append") }
                 listOf(types[0])
             }
             "copy" -> { requireCount(name, args, 2); listOf(intType) }
@@ -600,7 +614,9 @@ class TypeChecker {
     }
 
     private fun packageName(path: String): String = path.removeSurrounding("\"").substringAfterLast('/')
-    private fun functionType(function: FunctionDeclaration) = FunctionGoType(function.parameterTypes.mapIndexed { i, t -> ParameterSyntax(function.parameters.getOrNull(i), t) }, function.resultTypes)
+    private fun functionType(function: FunctionDeclaration) = FunctionGoType(function.parameterTypes.mapIndexed { i, t ->
+        ParameterSyntax(function.parameters.getOrNull(i), t, function.variadic && i == function.parameterTypes.lastIndex)
+    }, function.resultTypes)
     private fun namedType(type: GoTypeSyntax): String? = when (type) {
         is NamedGoType -> type.name
         is PointerGoType -> namedType(type.element)

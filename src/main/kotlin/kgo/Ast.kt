@@ -9,7 +9,8 @@ data class FunctionDeclaration(
     val body: BlockStatement,
     val parameterTypes: List<GoTypeSyntax> = emptyList(),
     val resultTypes: List<GoTypeSyntax> = emptyList(),
-    val receiver: ParameterSyntax? = null
+    val receiver: ParameterSyntax? = null,
+    val variadic: Boolean = false
 ) : Declaration
 data class VariableDeclaration(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Declaration
 data class ConstantDeclaration(
@@ -65,7 +66,7 @@ data class NameExpression(val name: String) : Expression
 data class LiteralExpression(val token: Token) : Expression
 data class UnaryExpression(val operator: TokenKind, val operand: Expression) : Expression
 data class BinaryExpression(val left: Expression, val operator: TokenKind, val right: Expression) : Expression
-data class CallExpression(val function: Expression, val arguments: List<Expression>) : Expression
+data class CallExpression(val function: Expression, val arguments: List<Expression>, val expandLastArgument: Boolean = false) : Expression
 data class SelectorExpression(val receiver: Expression, val field: String) : Expression
 data class IndexExpression(val receiver: Expression, val index: Expression) : Expression
 data class SliceExpression(val receiver: Expression, val low: Expression?, val high: Expression?, val max: Expression? = null) : Expression
@@ -75,7 +76,8 @@ data class CompositeLiteral(val type: GoTypeSyntax, val elements: List<Composite
 data class FunctionLiteralExpression(
     val parameters: List<ParameterSyntax>,
     val results: List<GoTypeSyntax>,
-    val body: BlockStatement
+    val body: BlockStatement,
+    val variadic: Boolean = false
 ) : Expression
 data class CompositeElement(val key: Expression?, val value: Expression)
 

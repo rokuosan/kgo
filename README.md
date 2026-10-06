@@ -9,6 +9,8 @@ Composite literals, structs, arrays, slices, maps, indexing, slicing, and their
 basic built-ins (`make`, `append`, `copy`, `delete`, `len`, and `cap`) are also
 implemented in the runtime subset. Named struct methods support value and pointer
 receivers for the implemented runtime types.
+Function literals capture their surrounding variables, and variadic functions
+accept both individual arguments and slice expansion with `...`.
 Goroutines use `kotlinx.coroutines`; channel operations suspend through Kotlin
 channels. The `fmt` calls are a small runtime shim, not the Go standard library.
 Before execution, a static checker validates function signatures, declared

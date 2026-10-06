@@ -64,14 +64,23 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         function: FunctionDeclaration,
         arguments: List<Any?>,
         receiver: Any? = null,
-        parent: Environment = globals
+        parent: Environment = globals,
+        expandedVariadic: Boolean = false
     ): List<Any?> {
-        if (function.parameters.size != arguments.size) {
-            throw RuntimeGoError("${function.name} expects ${function.parameters.size} arguments, got ${arguments.size}")
+        val fixedCount = if (function.variadic) function.parameters.size - 1 else function.parameters.size
+        if ((!function.variadic && arguments.size != fixedCount) ||
+            (function.variadic && (arguments.size < fixedCount || (expandedVariadic && arguments.size != function.parameters.size)))) {
+            throw RuntimeGoError("${function.name} has incompatible argument count: ${arguments.size}")
+        }
+        val boundArguments = if (!function.variadic || expandedVariadic) arguments else {
+            val sliceType = function.parameterTypes.lastOrNull() as? SliceGoType
+                ?: throw RuntimeGoError("invalid variadic function signature")
+            val extras = arguments.drop(fixedCount)
+            arguments.take(fixedCount) + GoSlice(sliceType.element, extras.toMutableList(), 0, extras.size, extras.size)
         }
         val env = Environment(parent)
         function.receiver?.let { env.define(it.name ?: "", receiver) }
-        function.parameters.zip(arguments).forEach { (name, value) -> name?.let { env.define(it, value) } }
+        function.parameters.zip(boundArguments).forEach { (name, value) -> name?.let { env.define(it, value) } }
         return try {
             executeBlock(function.body, env)
             emptyList()
@@ -135,13 +144,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val call = statement.call as? CallExpression ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = call.arguments.map { evaluate(it, env) }
-                goroutines.launch { call(target, arguments) }
+                goroutines.launch { call(target, arguments, call.expandLastArgument) }
             }
             is DeferStatement -> {
                 val call = statement.call as? CallExpression ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = call.arguments.map { evaluate(it, env) }
-                env.defer { call(target, arguments) }
+                env.defer { call(target, arguments, call.expandLastArgument) }
             }
             is BranchStatement -> when (statement.kind) {
                 TokenKind.BREAK -> throw BreakSignal()
@@ -455,7 +464,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is FunctionLiteralExpression -> {
             val declaration = FunctionDeclaration(
                 "<function literal>", expression.parameters.map { it.name }, expression.body,
-                expression.parameters.map { it.type }, expression.results
+                expression.parameters.map { it.type }, expression.results, null, expression.variadic
             )
             FunctionValue(declaration, env)
         }
@@ -488,22 +497,30 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun call(call: CallExpression, env: Environment): Any? {
         val target = evaluate(call.function, env)
         val args = call.arguments.map { evaluate(it, env) }
-        return call(target, args)
+        return call(target, args, call.expandLastArgument)
     }
 
-    private suspend fun call(target: Any?, args: List<Any?>): Any? {
+    private suspend fun call(target: Any?, args: List<Any?>, expandLastArgument: Boolean = false): Any? {
+        val effectiveArgs = if (expandLastArgument) {
+            val last = args.lastOrNull()
+            args.dropLast(1) + when (last) {
+                is GoSlice -> last.toList()
+                null -> emptyList()
+                else -> throw RuntimeGoError("... argument must be a slice")
+            }
+        } else args
         when (target) {
             is FunctionValue -> {
-                val values = invoke(target.function, args, parent = target.closure)
+                val values = invoke(target.function, args, parent = target.closure, expandedVariadic = expandLastArgument)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
             is MethodValue -> {
-                val values = invoke(target.function, args, target.receiver)
+                val values = invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
             is BuiltinValue -> when (target.name) {
                 "print", "println" -> {
-                    output(args.joinToString(if (target.name == "println") " " else "") { stringify(it) } + if (target.name == "println") "\n" else "")
+                    output(effectiveArgs.joinToString(if (target.name == "println") " " else "") { stringify(it) } + if (target.name == "println") "\n" else "")
                     return null
                 }
                 "panic" -> throw RuntimeGoError(args.firstOrNull()?.toString() ?: "panic")
@@ -527,15 +544,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     is GoArray -> value.values.size.toLong()
                     else -> throw RuntimeGoError("cap is not defined for this value")
                 }
-                "append" -> return append(args)
+                "append" -> return append(effectiveArgs)
                 "copy" -> return copy(args)
                 "delete" -> { delete(args); return null }
                 "Print", "Fprint" -> {
-                    output(args.drop(if (target.name == "Fprint") 1 else 0).joinToString("") { stringify(it) })
+                    output(effectiveArgs.drop(if (target.name == "Fprint") 1 else 0).joinToString("") { stringify(it) })
                     return null
                 }
                 "Println", "Fprintln" -> {
-                    output(args.drop(if (target.name == "Fprintln") 1 else 0).joinToString(" ") { stringify(it) } + "\n")
+                    output(effectiveArgs.drop(if (target.name == "Fprintln") 1 else 0).joinToString(" ") { stringify(it) } + "\n")
                     return null
                 }
             }

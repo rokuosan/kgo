@@ -58,7 +58,8 @@ class Parser(private val tokens: List<Token>) {
         val results = parseResults()
         val body = parseBlock()
         optionalSemicolon()
-        return FunctionDeclaration(name, parameters.map { it.name }, body, parameters.map { it.type }, results, receiver)
+        return FunctionDeclaration(name, parameters.map { it.name }, body, parameters.map { it.type }, results, receiver,
+            parameters.lastOrNull()?.variadic == true)
     }
 
     private fun parseParameters(): List<ParameterSyntax> {
@@ -87,6 +88,7 @@ class Parser(private val tokens: List<Token>) {
             if (!match(TokenKind.COMMA)) break
         }
         expect(TokenKind.RPAREN)
+        if (parameters.dropLast(1).any { it.variadic }) fail("variadic parameter must be last")
         return parameters
     }
 
@@ -381,7 +383,7 @@ class Parser(private val tokens: List<Token>) {
                 take()
                 val parameters = parseParameters()
                 val results = parseResults()
-                FunctionLiteralExpression(parameters, results, parseBlock())
+                FunctionLiteralExpression(parameters, results, parseBlock(), parameters.lastOrNull()?.variadic == true)
             }
             TokenKind.LPAREN -> { take(); val inner = expressionWithComposite { expression() }; expect(TokenKind.RPAREN); ParenthesizedExpression(inner) }
             else -> fail("expected expression")
@@ -403,8 +405,9 @@ class Parser(private val tokens: List<Token>) {
                 }
                 match(TokenKind.LPAREN) -> {
                     val args = if (at(TokenKind.RPAREN)) emptyList() else expressionWithComposite { expressionList() }
+                    val expand = match(TokenKind.ELLIPSIS)
                     expect(TokenKind.RPAREN)
-                    CallExpression(expr, args)
+                    CallExpression(expr, args, expand)
                 }
                 else -> return expr
             }
