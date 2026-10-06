@@ -1,6 +1,9 @@
 package kgo
 
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 
 fun main(args: Array<String>) {
     val mode = args.firstOrNull()?.takeIf { it.startsWith("--") } ?: "--run"
@@ -21,12 +24,12 @@ fun main(args: Array<String>) {
         } else listOf(source)
         if (sourceFiles.isEmpty()) throw GoTypeError("no Go source files in $path")
         if (mode == "--tokens") {
-            Lexer(source.readText()).scan().forEach { token ->
+            Lexer(readGoSource(source)).scan().forEach { token ->
                 if (token.kind != TokenKind.EOF) println("${token.position.line}:${token.position.column}\t${token.kind}\t${token.lexeme}")
             }
             return
         }
-        val files = sourceFiles.map { file -> Parser(Lexer(file.readText()).scan()).parseFile() }
+        val files = sourceFiles.map { file -> Parser(Lexer(readGoSource(file)).scan()).parseFile() }
         val packageName = files.first().packageName
         if (files.any { it.packageName != packageName }) {
             throw GoTypeError("all source files in a package directory must declare package $packageName")
@@ -50,4 +53,14 @@ fun main(args: Array<String>) {
         System.err.println(e.message)
         kotlin.system.exitProcess(1)
     }
+}
+
+private fun readGoSource(file: File): String = try {
+    StandardCharsets.UTF_8.newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .decode(ByteBuffer.wrap(file.readBytes()))
+        .toString()
+} catch (_: java.nio.charset.CharacterCodingException) {
+    throw GoTypeError("source file is not valid UTF-8: ${file.path}")
 }
