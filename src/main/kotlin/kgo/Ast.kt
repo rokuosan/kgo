@@ -40,6 +40,9 @@ data class SelectStatement(val cases: List<SelectCase>) : Statement
 data class SelectCase(val communication: Statement?, val statements: List<Statement>)
 data class SwitchStatement(val init: Statement?, val tag: Expression?, val clauses: List<SwitchClause>) : Statement
 data class SwitchClause(val expressions: List<Expression>?, val statements: List<Statement>)
+data class TypeSwitchStatement(val init: Statement?, val guard: TypeSwitchGuard, val clauses: List<TypeSwitchClause>) : Statement
+data class TypeSwitchGuard(val name: String?, val expression: Expression)
+data class TypeSwitchClause(val types: List<GoTypeSyntax>?, val statements: List<Statement>)
 data class AssignmentStatement(
     val targets: List<Expression>,
     val operator: TokenKind,
@@ -72,6 +75,7 @@ data class SelectorExpression(val receiver: Expression, val field: String) : Exp
 data class IndexExpression(val receiver: Expression, val index: Expression) : Expression
 data class SliceExpression(val receiver: Expression, val low: Expression?, val high: Expression?, val max: Expression? = null) : Expression
 data class TypeAssertionExpression(val receiver: Expression, val type: GoTypeSyntax) : Expression
+data class TypeSwitchGuardExpression(val receiver: Expression) : Expression
 data class ParenthesizedExpression(val expression: Expression) : Expression
 data class TypeExpression(val type: GoTypeSyntax) : Expression
 data class CompositeLiteral(val type: GoTypeSyntax, val elements: List<CompositeElement>) : Expression

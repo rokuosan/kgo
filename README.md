@@ -32,6 +32,8 @@ Empty and basic non-empty interface values use method-set checks for declared
 methods on named types, with value and pointer receiver dispatch. Embedded
 struct-field method promotion and some interface assignment cases are still
 incomplete.
+Interface type assertions and type switches are supported for the runtime
+types currently represented.
 Full package resolution and standard-library/runtime support are also missing.
 Go features added after Go 1.0, such as generics and later literal syntax, are
 out of scope. The project builds and runs on JDK 27 with Gradle

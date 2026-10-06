@@ -169,6 +169,10 @@ class TypeChecker {
                     statement.init?.let { visit(it, path, ownerBlock, statementIndex) }
                     statement.clauses.forEach { clause -> clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) } }
                 }
+                is TypeSwitchStatement -> {
+                    statement.init?.let { visit(it, path, ownerBlock, statementIndex) }
+                    statement.clauses.forEach { clause -> clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) } }
+                }
                 is SelectStatement -> statement.cases.forEach { clause ->
                     clause.communication?.let { visit(it, path + clause, ownerBlock, statementIndex) }
                     clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) }
@@ -285,7 +289,8 @@ class TypeChecker {
                     val target = functionLabels[label]?.statement ?: error("undefined label $label")
                     val destination = unwrapLabels(target)
                     usedLabels += label
-                    if (statement.kind == TokenKind.BREAK && destination !is ForStatement && destination !is SwitchStatement && destination !is SelectStatement)
+                    if (statement.kind == TokenKind.BREAK && destination !is ForStatement && destination !is SwitchStatement &&
+                        destination !is TypeSwitchStatement && destination !is SelectStatement)
                         error("invalid break label $label")
                     if (statement.kind == TokenKind.CONTINUE && destination !is ForStatement) error("invalid continue label $label")
                 }
@@ -294,6 +299,7 @@ class TypeChecker {
             }
             is SelectStatement -> checkSelect(statement, scope)
             is SwitchStatement -> checkSwitch(statement, scope)
+            is TypeSwitchStatement -> checkTypeSwitch(statement, scope)
         }
     }
 
@@ -398,6 +404,40 @@ class TypeChecker {
                     if (!assignable(caseType, tagType) && !assignable(tagType, caseType)) error("case type does not match switch expression")
                 } else requireBoolean(caseType, "expressionless switch case")
             }
+            inLabelBlock(clause) { clause.statements.forEach { checkStatement(it, caseScope) } }
+        }
+    }
+
+    private fun checkTypeSwitch(statement: TypeSwitchStatement, scope: Scope) {
+        val switchScope = scope.child()
+        statement.init?.let { checkStatement(it, switchScope) }
+        val interfaceType = expressionType(statement.guard.expression, switchScope)
+        if (underlying(interfaceType) !is InterfaceGoType) error("type switch requires an interface operand")
+        var sawDefault = false
+        var sawNil = false
+        val seenTypes = mutableSetOf<GoTypeSyntax>()
+        statement.clauses.forEach { clause ->
+            if (clause.types == null) {
+                if (sawDefault) error("multiple default cases in type switch")
+                sawDefault = true
+            } else clause.types.forEach typeLoop@ { type ->
+                if (type == NamedGoType("nil")) {
+                    if (sawNil) error("duplicate nil type switch case")
+                    sawNil = true
+                    return@typeLoop
+                }
+                validateType(type)
+                if (underlying(type) !is InterfaceGoType)
+                    requireAssignable(type, interfaceType, "type switch case")
+                if (!seenTypes.add(type)) error("duplicate type switch case $type")
+            }
+            if (clause.statements.lastOrNull() is BranchStatement &&
+                (clause.statements.last() as BranchStatement).kind == TokenKind.FALLTHROUGH)
+                error("fallthrough is not permitted in a type switch")
+            val caseScope = switchScope.child()
+            val singleType = clause.types?.singleOrNull()?.takeUnless { it == NamedGoType("nil") }
+            if (statement.guard.name != null && statement.guard.name != "_")
+                caseScope.define(statement.guard.name, singleType ?: interfaceType)
             inLabelBlock(clause) { clause.statements.forEach { checkStatement(it, caseScope) } }
         }
     }
@@ -524,6 +564,7 @@ class TypeChecker {
             validateType(expression.type)
             expression.type
         }
+        is TypeSwitchGuardExpression -> error("type switch guard is only valid in a switch statement")
         is TypeExpression -> expression.type
         is CompositeLiteral -> {
             checkComposite(expression, scope)

@@ -237,18 +237,25 @@ class Parser(private val tokens: List<Token>) {
         }
     }
 
-    private fun parseSwitch(): SwitchStatement {
+    private fun parseSwitch(): Statement {
         var init: Statement? = null
         var tag: Expression? = null
+        var typeGuard: TypeSwitchGuard? = null
         if (!at(TokenKind.LBRACE)) {
             val first = expressionHeader { parseSimpleStatement() }
             if (match(TokenKind.SEMICOLON)) {
                 init = first
-                if (!at(TokenKind.LBRACE)) tag = expressionHeader { expression() }
+                if (!at(TokenKind.LBRACE)) {
+                    val second = expressionHeader { parseSimpleStatement() }
+                    typeGuard = parseTypeSwitchGuard(second)
+                    if (typeGuard == null) tag = asExpression(second)
+                }
             } else {
-                tag = asExpression(first)
+                typeGuard = parseTypeSwitchGuard(first)
+                if (typeGuard == null) tag = asExpression(first)
             }
         }
+        if (typeGuard != null) return parseTypeSwitch(init, typeGuard)
         expect(TokenKind.LBRACE)
         val clauses = mutableListOf<SwitchClause>()
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
@@ -270,6 +277,47 @@ class Parser(private val tokens: List<Token>) {
         }
         expect(TokenKind.RBRACE)
         return SwitchStatement(init, tag, clauses)
+    }
+
+    private fun parseTypeSwitchGuard(statement: Statement): TypeSwitchGuard? = when (statement) {
+        is ExpressionStatement -> (statement.expression as? TypeSwitchGuardExpression)?.let { TypeSwitchGuard(null, it.receiver) }
+        is AssignmentStatement -> {
+            if (statement.operator != TokenKind.DEFINE || statement.targets.size != 1 || statement.values.size != 1) null
+            else {
+                val name = (statement.targets.single() as? NameExpression)?.name ?: fail("type switch guard must declare an identifier")
+                val guard = statement.values.single() as? TypeSwitchGuardExpression
+                if (guard == null) null else TypeSwitchGuard(name, guard.receiver)
+            }
+        }
+        else -> null
+    }
+
+    private fun parseTypeSwitch(init: Statement?, guard: TypeSwitchGuard): TypeSwitchStatement {
+        expect(TokenKind.LBRACE)
+        val clauses = mutableListOf<TypeSwitchClause>()
+        while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+            if (match(TokenKind.SEMICOLON)) continue
+            val types = when {
+                match(TokenKind.CASE) -> {
+                    val cases = mutableListOf(parseType())
+                    while (match(TokenKind.COMMA)) cases += parseType()
+                    cases
+                }
+                match(TokenKind.DEFAULT) -> null
+                else -> fail("expected case or default in type switch")
+            }
+            expect(TokenKind.COLON)
+            val statements = mutableListOf<Statement>()
+            while (!at(TokenKind.CASE) && !at(TokenKind.DEFAULT) && !at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
+                if (match(TokenKind.SEMICOLON)) continue
+                statements += parseStatement()
+                if (!match(TokenKind.SEMICOLON) && !at(TokenKind.CASE) && !at(TokenKind.DEFAULT) && !at(TokenKind.RBRACE))
+                    fail("expected semicolon in type switch clause")
+            }
+            clauses += TypeSwitchClause(types, statements)
+        }
+        expect(TokenKind.RBRACE)
+        return TypeSwitchStatement(init, guard, clauses)
     }
 
     private fun parseSelect(): SelectStatement {
@@ -412,9 +460,14 @@ class Parser(private val tokens: List<Token>) {
         while (true) {
             expr = when {
                 match(TokenKind.PERIOD) -> if (match(TokenKind.LPAREN)) {
-                    val assertedType = parseType()
-                    expect(TokenKind.RPAREN)
-                    TypeAssertionExpression(expr, assertedType)
+                    if (match(TokenKind.TYPE)) {
+                        expect(TokenKind.RPAREN)
+                        TypeSwitchGuardExpression(expr)
+                    } else {
+                        val assertedType = parseType()
+                        expect(TokenKind.RPAREN)
+                        TypeAssertionExpression(expr, assertedType)
+                    }
                 } else SelectorExpression(expr, expect(TokenKind.IDENT).lexeme)
                 match(TokenKind.LBRACK) -> {
                     val low = if (at(TokenKind.COLON) || at(TokenKind.RBRACK)) null else expression()

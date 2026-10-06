@@ -174,6 +174,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             is SelectStatement -> executeSelect(statement, env, labels)
             is SwitchStatement -> executeSwitch(statement, env, labels)
+            is TypeSwitchStatement -> executeTypeSwitch(statement, env, labels)
         }
     }
 
@@ -330,6 +331,48 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 return
             }
         }
+    }
+
+    private suspend fun executeTypeSwitch(statement: TypeSwitchStatement, env: Environment, labels: Set<String>) {
+        val scope = env.child()
+        statement.init?.let { execute(it, scope) }
+        val value = evaluate(statement.guard.expression, scope)
+        val dynamicType = (value as? GoInterfaceValue)?.dynamicType
+        val selected = statement.clauses.indexOfFirst { clause ->
+            clause.types?.any { type ->
+                if (type == NamedGoType("nil")) value == null
+                else dynamicType != null && matchesDynamicType(dynamicType, type)
+            } == true
+        }.let { if (it >= 0) it else statement.clauses.indexOfFirst { clause -> clause.types == null } }
+        if (selected < 0) return
+        val clause = statement.clauses[selected]
+        val singleType = clause.types?.singleOrNull()?.takeUnless { it == NamedGoType("nil") }
+        val caseValue = when {
+            singleType == null -> value
+            underlying(singleType) is InterfaceGoType -> value
+            else -> (value as? GoInterfaceValue)?.value
+        }
+        val caseScope = scope.child()
+        if (statement.guard.name != null && statement.guard.name != "_")
+            caseScope.define(statement.guard.name, caseValue, singleType ?: interfaceOperandType(statement.guard.expression, scope))
+        try {
+            clause.statements.forEach { execute(it, caseScope) }
+        } catch (signal: BreakSignal) {
+            if (!targets(signal.label, labels)) throw signal
+        } catch (_: FallthroughSignal) {
+            throw RuntimeGoError("fallthrough in type switch")
+        }
+    }
+
+    private fun matchesDynamicType(dynamicType: GoTypeSyntax, target: GoTypeSyntax): Boolean {
+        val interfaceType = underlying(target) as? InterfaceGoType
+        return if (interfaceType != null) implementsInterface(dynamicType, interfaceType) else dynamicType == target
+    }
+
+    private fun interfaceOperandType(expression: Expression, env: Environment): GoTypeSyntax = when (expression) {
+        is NameExpression -> env.typeOf(expression.name) ?: InterfaceGoType(emptyList())
+        is ParenthesizedExpression -> interfaceOperandType(expression.expression, env)
+        else -> InterfaceGoType(emptyList())
     }
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
@@ -499,6 +542,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             if (!assertion.ok) throw RuntimeGoError("type assertion failed: ${assertion.dynamicType} is not ${expression.type}")
             assertion.value
         }
+        is TypeSwitchGuardExpression -> throw RuntimeGoError("type switch guard used outside a type switch")
         is TypeExpression -> TypeValue(expression.type)
         is CompositeLiteral -> composite(expression, env)
         is FunctionLiteralExpression -> {
@@ -1023,6 +1067,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
         fun getOrNull(name: String): Any? = lookup(name)?.value
         fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
+        fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
         fun pointer(name: String): GoPointer {
             val owner = owner(name) ?: throw RuntimeGoError("undefined: $name")
             return owner.addresses.getOrPut(name) {
