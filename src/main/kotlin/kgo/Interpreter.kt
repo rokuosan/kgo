@@ -661,7 +661,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
         val onlyIndexIsUsed = range.targets.size <= 1 || range.targets.getOrNull(1).isBlankIdentifier()
-        if (onlyIndexIsUsed) {
+        if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
                 rangeIndexed(arrayLength, range, body, env, labels) { index -> listOf(index.toLong()) }
