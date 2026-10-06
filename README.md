@@ -35,7 +35,8 @@ switch/select statements as permitted by their branch kind. `goto` supports
 same-block and outward jumps, and rejects jumps into blocks or over variable
 declarations.
 Goroutines use `kotlinx.coroutines`; channel operations suspend through Kotlin
-channels. The `fmt` calls are a small runtime shim, not the Go standard library.
+channels. The `fmt` calls are a small runtime shim, not the Go standard library;
+its `Print`, `Println`, `Fprint`, and `Fprintln` functions can also be dot-imported.
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
 an incomplete subset of the Go 1.0 type system.
