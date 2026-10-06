@@ -784,7 +784,9 @@ class TypeChecker {
         val types = listOfNotNull(keyAndValue.first, keyAndValue.second).take(range.targets.size)
         if (types.size != range.targets.size) error("too many range variables")
         if (range.operator == TokenKind.DEFINE) {
-            requireUniqueNames(range.targets.map { (it as? NameExpression)?.name ?: error("range declaration requires identifiers") }, "range declaration")
+            val names = range.targets.map { (it as? NameExpression)?.name ?: error("range declaration requires identifiers") }
+            requireUniqueNames(names, "range declaration")
+            if (names.none { it != "_" }) error("range declaration must introduce a variable")
             range.targets.forEachIndexed { i, target ->
                 val name = (target as? NameExpression)?.name ?: error("range declaration requires identifiers")
                 if (name != "_") scope.define(name, defaultType(types[i]))
