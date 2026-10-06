@@ -79,7 +79,8 @@ class TypeChecker {
             }
             else -> Unit
         }
-        declarations.mapNotNull { (_, declaration) -> declaration as? VariableDeclaration }.forEach { declaration ->
+        val globalVariables = declarations.mapNotNull { (_, declaration) -> declaration as? VariableDeclaration }
+        globalVariables.forEach { declaration ->
             declaration.names.filter { it != "_" }.forEach { name -> globals.define(name, declaration.type ?: intType) }
         }
         declarations.mapNotNull { (_, declaration) -> declaration as? ConstantDeclaration }.forEach { declaration ->
@@ -93,18 +94,6 @@ class TypeChecker {
 
         for ((sourceFile, declaration) in declarations) withFileImports(sourceFile) {
             when (declaration) {
-                is VariableDeclaration -> {
-                    val values = expressionTypes(declaration.values, declaration.names.size, globals)
-                    if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
-                        error("initializer count mismatch")
-                    if (declaration.type != null) {
-                        validateType(declaration.type)
-                        requireAssignableValues(values, declaration.values, declaration.type, "initializer", globals)
-                    } else requireDefaultIntegerValues(values, declaration.values, "initializer", globals)
-                    declaration.names.forEachIndexed { i, name ->
-                        if (name != "_") globals.define(name, declaration.type ?: defaultType(values.getOrNull(i) ?: intType))
-                    }
-                }
                 is ConstantDeclaration -> {
                     val scope = globals.child()
                     scope.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
@@ -130,6 +119,25 @@ class TypeChecker {
                     }
                 }
                 else -> Unit
+            }
+        }
+        val variableFiles = IdentityHashMap<VariableDeclaration, GoFile>()
+        declarations.forEach { (file, declaration) ->
+            (declaration as? VariableDeclaration)?.let { variableFiles[it] = file }
+        }
+        for (declaration in globalVariableInitializationOrder(globalVariables)) {
+            val sourceFile = variableFiles.getValue(declaration)
+            withFileImports(sourceFile) {
+                val values = expressionTypes(declaration.values, declaration.names.size, globals)
+                if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
+                    error("initializer count mismatch")
+                if (declaration.type != null) {
+                    validateType(declaration.type)
+                    requireAssignableValues(values, declaration.values, declaration.type, "initializer", globals)
+                } else requireDefaultIntegerValues(values, declaration.values, "initializer", globals)
+                declaration.names.forEachIndexed { i, name ->
+                    if (name != "_") globals.define(name, declaration.type ?: defaultType(values.getOrNull(i) ?: intType))
+                }
             }
         }
         for ((sourceFile, declaration) in declarations) {
@@ -200,6 +208,48 @@ class TypeChecker {
     private fun checkMain() {
         val main = functions["main"] ?: error("main function not found")
         if (main.parameters.isNotEmpty() || main.resultTypes.isNotEmpty()) error("main must have no parameters or results")
+    }
+
+    private fun globalVariableInitializationOrder(variables: List<VariableDeclaration>): List<VariableDeclaration> {
+        val ownerByName = variables.flatMapIndexed { index, declaration ->
+            declaration.names.filter { it != "_" }.map { it to index }
+        }.toMap()
+        val dependencies = variables.map { declaration -> declaration.values
+            .flatMap(::referencedNames)
+            .mapNotNull(ownerByName::get)
+            .toSet()
+        }
+        val state = IntArray(variables.size)
+        val result = mutableListOf<VariableDeclaration>()
+        fun visit(index: Int) {
+            when (state[index]) {
+                2 -> return
+                1 -> error("initialization cycle involving ${variables[index].names.joinToString()}")
+            }
+            state[index] = 1
+            dependencies[index].forEach(::visit)
+            state[index] = 2
+            result += variables[index]
+        }
+        variables.indices.forEach(::visit)
+        return result
+    }
+
+    private fun referencedNames(expression: Expression): Set<String> = when (expression) {
+        is NameExpression -> setOf(expression.name)
+        is LiteralExpression, is TypeExpression -> emptySet()
+        is UnaryExpression -> referencedNames(expression.operand)
+        is BinaryExpression -> referencedNames(expression.left) + referencedNames(expression.right)
+        is CallExpression -> referencedNames(expression.function) + expression.arguments.flatMap(::referencedNames)
+        is SelectorExpression -> referencedNames(expression.receiver)
+        is IndexExpression -> referencedNames(expression.receiver) + referencedNames(expression.index)
+        is SliceExpression -> referencedNames(expression.receiver) + listOfNotNull(expression.low, expression.high).flatMap(::referencedNames)
+        is TypeAssertionExpression -> referencedNames(expression.receiver)
+        is TypeSwitchGuardExpression -> referencedNames(expression.receiver)
+        is ParenthesizedExpression -> referencedNames(expression.expression)
+        is CompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
+        is ElidedCompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
+        is FunctionLiteralExpression -> emptySet()
     }
 
     private fun checkFunction(function: FunctionDeclaration) {
