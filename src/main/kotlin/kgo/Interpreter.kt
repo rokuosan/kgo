@@ -77,6 +77,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private val methods = mutableMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val globals = Environment()
+    private val elementPointers = IdentityHashMap<MutableList<Any?>, MutableMap<Int, GoPointer>>()
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
     private val nextLocalTypeIdentity = AtomicInteger()
@@ -2901,6 +2902,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else -> assigned
     }
 
+    private fun elementPointer(values: MutableList<Any?>, index: Int, elementType: GoTypeSyntax): GoPointer =
+        synchronized(elementPointers) {
+            elementPointers.getOrPut(values) { mutableMapOf() }.getOrPut(index) {
+                GoPointer.reference({ values[index] }, { values[index] = copyForType(it, elementType) }, elementType)
+            }
+        }
+
     private data class Lookup(val value: Any?)
     private data class FunctionValue(val function: FunctionDeclaration, val closure: Environment, val type: GoTypeSyntax? = null)
     private data class BuiltinValue(val name: String)
@@ -2938,10 +2946,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val namedType: String? = null,
         val type: GoTypeSyntax? = null
     ) {
-        private val addresses = mutableMapOf<Int, GoPointer>()
         fun pointerAt(index: Int): GoPointer {
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
-            return addresses.getOrPut(index) { GoPointer.reference({ values[index] }, { values[index] = copyForType(it, elementType) }, elementType) }
+            return elementPointer(values, index, elementType)
         }
         override fun equals(other: Any?) = other is GoArray && namedType == other.namedType && values.size == other.values.size &&
             values.indices.all { goEqual(values[it], other.values[it]) }
@@ -2956,7 +2963,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val namedType: String? = null,
         val type: GoTypeSyntax? = null
     ) {
-        private val addresses = mutableMapOf<Int, GoPointer>()
         fun get(index: Int): Any? {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             return backing[start + index]
@@ -2968,7 +2974,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         fun pointerAt(index: Int): GoPointer {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             val absolute = start + index
-            return addresses.getOrPut(index) { GoPointer.reference({ backing[absolute] }, { backing[absolute] = copyForType(it, elementType) }, elementType) }
+            return elementPointer(backing, absolute, elementType)
         }
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
