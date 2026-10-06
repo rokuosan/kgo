@@ -67,7 +67,7 @@ class TypeChecker {
                 globals.define(name, declaration.type ?: untypedInt, isConstant = true)
             }
         }
-        functions.forEach { (name, function) -> globals.define(name, functionType(function)) }
+        functions.forEach { (name, function) -> globals.define(name, functionType(function), isFunction = true) }
         methods.forEach { (key, function) -> globals.define(key, functionType(function)) }
         files.forEach { withFileImports(it) {} }
 
@@ -1034,8 +1034,7 @@ class TypeChecker {
     }
 
     private fun isAddressable(expression: Expression, scope: Scope): Boolean = when (expression) {
-        is NameExpression -> scope.getOrNull(expression.name) != null && !scope.isConstant(expression.name) &&
-            expression.name !in functions && expression.name !in methods
+        is NameExpression -> scope.isVariable(expression.name)
         is ParenthesizedExpression -> isAddressable(expression.expression, scope)
         is UnaryExpression -> expression.operator == TokenKind.MUL &&
             underlying(expressionType(expression.operand, scope)) is PointerGoType
@@ -2169,6 +2168,7 @@ class TypeChecker {
         private val rationalConstants = linkedMapOf<String, GoRational>()
         private val stringIdentities = linkedMapOf<String, String>()
         private val booleanConstants = linkedMapOf<String, Boolean>()
+        private val functionNames = linkedSetOf<String>()
         fun define(
             name: String,
             type: GoTypeSyntax,
@@ -2177,9 +2177,11 @@ class TypeChecker {
             isConstant: Boolean = false,
             rationalConstant: GoRational? = null,
             stringIdentity: String? = null,
-            booleanConstant: Boolean? = null
+            booleanConstant: Boolean? = null,
+            isFunction: Boolean = false
         ) {
             values[name] = type
+            if (isFunction) functionNames += name else functionNames -= name
             if (integerConstant == null) integerConstants.remove(name) else integerConstants[name] = integerConstant
             if (stringLength == null) stringLengths.remove(name) else stringLengths[name] = stringLength
             if (rationalConstant == null) rationalConstants.remove(name) else rationalConstants[name] = rationalConstant
@@ -2192,6 +2194,8 @@ class TypeChecker {
         fun containsLocal(name: String) = name in values || name in typeNames
         fun get(name: String): GoTypeSyntax = getOrNull(name) ?: throw GoTypeError("undefined: $name")
         fun getOrNull(name: String): GoTypeSyntax? = values[name] ?: parent?.getOrNull(name)
+        fun isVariable(name: String): Boolean = if (name in values)
+            name !in constantNames && name !in functionNames else parent?.isVariable(name) == true
         fun constantInteger(name: String): BigInteger? = if (name in values) integerConstants[name] else parent?.constantInteger(name)
         fun constantRational(name: String): GoRational? = if (name in values) rationalConstants[name]
             ?: integerConstants[name]?.let { GoRational.of(it) } else parent?.constantRational(name)
