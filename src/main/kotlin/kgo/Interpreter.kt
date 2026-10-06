@@ -145,10 +145,6 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is ReturnStatement -> throw ReturnSignal(statement.values.map { copyValue(evaluate(it, env)) })
             is ExpressionStatement -> evaluate(statement.expression, env)
             is AssignmentStatement -> assign(statement, env)
-            is IncrementStatement -> {
-                val old = number(readTarget(statement.target, env), "increment")
-                writeTarget(statement.target, old + statement.delta, env)
-            }
             is IfStatement -> {
                 val scope = env.child()
                 statement.init?.let { execute(it, scope) }
@@ -168,6 +164,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                         statement.post?.let { execute(it, scope) }
                     }
                 }
+            }
+            is IncrementStatement -> {
+                val target = resolveTarget(statement.target, env)
+                val old = number(target.get(), "increment")
+                target.set(old + statement.delta)
             }
             is SendStatement -> {
                 when (val channel = evaluate(statement.channel, env)) {
@@ -216,59 +217,86 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             return
         }
         if (targets.size != values.size) throw RuntimeGoError("assignment count mismatch")
-        targets.zip(values).forEach { (target, value) ->
-            if (target is NameExpression && target.name == "_") return@forEach
-            val result = if (operator == TokenKind.ASSIGN) value else {
-                val left = readTarget(target, env)
-                binary(left, compoundOperator(operator), value)
-            }
-            writeTarget(target, result, env)
+        val locations = targets.map { resolveTarget(it, env) }
+        val previous = if (operator == TokenKind.ASSIGN) emptyList() else locations.map { it.get() }
+        locations.indices.forEach { i ->
+            val value = if (operator == TokenKind.ASSIGN) values[i] else binary(previous[i], compoundOperator(operator), values[i])
+            locations[i].set(value)
         }
     }
 
-    private suspend fun readTarget(target: Expression, env: Environment): Any? = when (target) {
-        is NameExpression -> env.get(target.name)
-        is IndexExpression -> index(evaluate(target.receiver, env), evaluate(target.index, env))
-        is SelectorExpression -> evaluate(target, env)
-        is UnaryExpression -> if (target.operator == TokenKind.MUL) evaluate(target, env)
-            else throw RuntimeGoError("invalid assignment target")
-        else -> throw RuntimeGoError("invalid assignment target")
-    }
-
-    private suspend fun writeTarget(target: Expression, value: Any?, env: Environment) {
-        when (target) {
-            is NameExpression -> env.set(target.name, value)
-            is IndexExpression -> {
-                val receiver = evaluate(target.receiver, env)
-                val key = evaluate(target.index, env)
-                when (receiver) {
-                    is GoSlice -> receiver.set(number(key, "index").toInt(), copyForType(value, receiver.elementType))
-                    is GoArray -> setArrayElement(receiver, key, value)
-                    is GoPointer -> {
-                        val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index assignment requires pointer to array")
-                        setArrayElement(array, key, value)
-                    }
-                    is GoMap -> receiver.values[mapKey(key)] = copyForType(value, receiver.valueType)
-                    is GoNilValue -> {
-                        if (underlying(receiver.type) is MapGoType) throw RuntimeGoError("assignment to entry in nil map")
-                        else throw RuntimeGoError("cannot assign through index")
-                    }
-                    else -> throw RuntimeGoError("cannot assign through index")
+    private suspend fun resolveTarget(target: Expression, env: Environment): RuntimeTarget = when (target) {
+        is ParenthesizedExpression -> resolveTarget(target.expression, env)
+        is NameExpression -> if (target.name == "_") RuntimeTarget({ null }, {})
+            else RuntimeTarget({ env.get(target.name) }, { env.set(target.name, it) })
+        is IndexExpression -> {
+            val receiver = evaluate(target.receiver, env)
+            val key = evaluate(target.index, env)
+            when (receiver) {
+                is GoSlice -> {
+                    val index = number(key, "index").toInt()
+                    RuntimeTarget({ receiver.get(index) }, { receiver.set(index, it) })
                 }
+                is GoArray -> {
+                    val index = number(key, "index").toInt()
+                    RuntimeTarget({ arrayElement(receiver, index.toLong()) }, { setArrayElement(receiver, index.toLong(), it) })
+                }
+                is GoPointer -> {
+                    val index = number(key, "index").toInt()
+                    RuntimeTarget({
+                        val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
+                        arrayElement(array, index.toLong())
+                    }, {
+                        val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index assignment requires pointer to array")
+                        setArrayElement(array, index.toLong(), it)
+                    })
+                }
+                is GoMap -> {
+                    val mapKey = mapKey(key)
+                    RuntimeTarget(
+                        { if (receiver.values.containsKey(mapKey)) receiver.values[mapKey] else receiver.elementZero },
+                        { receiver.values[mapKey] = copyForType(it, receiver.valueType) }
+                    )
+                }
+                is GoNilValue -> {
+                    val mapType = underlying(receiver.type) as? MapGoType
+                        ?: throw RuntimeGoError("cannot assign through index")
+                    mapKey(key)
+                    RuntimeTarget({ zeroValue(mapType.value) }, { throw RuntimeGoError("assignment to entry in nil map") })
+                }
+                else -> throw RuntimeGoError("cannot assign through index")
             }
-            is SelectorExpression -> {
-                val receiver = evaluate(target.receiver, env)
-                val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
-                if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
-                struct.fields[target.field] = struct.fieldTypes[target.field]?.let { copyForType(value, it) } ?: copyValue(value)
-            }
-            is UnaryExpression -> {
-                if (target.operator != TokenKind.MUL) throw RuntimeGoError("invalid assignment target")
-                val pointer = evaluate(target.operand, env) as? GoPointer ?: throw RuntimeGoError("dereference of non-pointer")
-                pointer.set(copyForType(value, pointer.pointeeType ?: runtimeType(value) ?: NamedGoType("<unknown>")))
-            }
-            else -> throw RuntimeGoError("invalid assignment target")
         }
+        is SelectorExpression -> {
+            val receiver = evaluate(target.receiver, env)
+            if (receiver is GoPointer) RuntimeTarget(
+                {
+                    val struct = receiver.get() as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
+                    if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
+                    struct.fields[target.field]
+                },
+                { value ->
+                    val struct = receiver.get() as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
+                    if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
+                    struct.fields[target.field] = struct.fieldTypes[target.field]?.let { copyForType(value, it) } ?: copyValue(value)
+                }
+            ) else {
+                val struct = receiver as? GoStruct ?: throw RuntimeGoError("selector assignment requires a struct")
+                if (!struct.fields.containsKey(target.field)) throw RuntimeGoError("unknown struct field: ${target.field}")
+                RuntimeTarget(
+                    { struct.fields[target.field] },
+                    { value -> struct.fields[target.field] = struct.fieldTypes[target.field]?.let { copyForType(value, it) } ?: copyValue(value) }
+                )
+            }
+        }
+        is UnaryExpression -> {
+            if (target.operator != TokenKind.MUL) throw RuntimeGoError("invalid assignment target")
+            val pointer = evaluate(target.operand, env) as? GoPointer ?: throw RuntimeGoError("dereference of non-pointer")
+            RuntimeTarget({ pointer.get() }, { value ->
+                pointer.set(copyForType(value, pointer.pointeeType ?: runtimeType(pointer.get()) ?: NamedGoType("<unknown>")))
+            })
+        }
+        else -> throw RuntimeGoError("invalid assignment target")
     }
 
     private suspend fun executeSelect(statement: SelectStatement, env: Environment, labels: Set<String>) {
@@ -1616,6 +1644,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private data class GoNilValue(val type: GoTypeSyntax)
     private data class GoComplex(val real: Double, val imaginary: Double, val type: GoTypeSyntax)
     private data class GoFloat(val value: Double, val type: GoTypeSyntax)
+    private data class RuntimeTarget(val get: () -> Any?, val set: (Any?) -> Unit)
     private class PanicState(var activePanic: PanicSignal? = null, var recoverAllowed: Boolean = false)
     private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
         var recovered: Boolean = false
