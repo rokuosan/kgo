@@ -18,7 +18,10 @@ fun main(args: Array<String>) {
             else -> {
                 val file = Parser(tokens).parseFile()
                 if (mode == "--parse") println("package ${file.packageName}: ${file.declarations.size} declaration(s)")
-                else Interpreter().run(file)
+                else {
+                    TypeChecker().check(file)
+                    Interpreter().run(file)
+                }
             }
         }
     } catch (e: ScanError) {
@@ -28,6 +31,9 @@ fun main(args: Array<String>) {
         System.err.println(e.message)
         kotlin.system.exitProcess(1)
     } catch (e: RuntimeGoError) {
+        System.err.println(e.message)
+        kotlin.system.exitProcess(1)
+    } catch (e: GoTypeError) {
         System.err.println(e.message)
         kotlin.system.exitProcess(1)
     }

@@ -5,7 +5,7 @@ data class GoFile(val packageName: String, val declarations: List<Declaration>)
 sealed interface Declaration
 data class FunctionDeclaration(
     val name: String,
-    val parameters: List<String>,
+    val parameters: List<String?>,
     val body: BlockStatement,
     val parameterTypes: List<GoTypeSyntax> = emptyList(),
     val resultTypes: List<GoTypeSyntax> = emptyList(),
@@ -19,9 +19,13 @@ data class ConstantDeclaration(
     val iotaIndex: Int = 0
 ) : Declaration
 data class TypeDeclaration(val name: String, val type: GoTypeSyntax) : Declaration
-data class ImportDeclaration(val paths: List<String>) : Declaration
+data class ImportSpecSyntax(val alias: String?, val path: String)
+data class ImportDeclaration(val imports: List<ImportSpecSyntax>) : Declaration {
+    val paths: List<String> get() = imports.map { it.path }
+}
 
 sealed interface Statement
+data class DeclarationStatement(val declarations: List<Declaration>) : Statement
 data class BlockStatement(val statements: List<Statement>) : Statement
 data class VariableStatement(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Statement
 data class ReturnStatement(val values: List<Expression>) : Statement

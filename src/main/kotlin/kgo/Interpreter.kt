@@ -21,13 +21,22 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val globals = Environment()
     private val typeDefinitions = mutableMapOf<String, GoTypeSyntax>()
+    private val fmtAliases = mutableSetOf("fmt")
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) {
         runBlocking {
             goroutines = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             try {
-                file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
+                file.declarations.filterIsInstance<ImportDeclaration>().flatMap { it.imports }.forEach { spec ->
+                    val alias = when (spec.alias) {
+                        ".", "_" -> null
+                        null -> spec.path.removeSurrounding("\"").substringAfterLast('/')
+                        else -> spec.alias
+                    }
+                    if (alias != null && spec.path.removeSurrounding("\"").substringAfterLast('/') == "fmt") fmtAliases += alias
+                }
+        file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
                     if (function.receiver != null) methods[methodKey(function.receiver.type, function.name)] = function
                     else if (function.name == "init") initFunctions += function
                     else functions[function.name] = function
@@ -57,7 +66,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         val env = Environment(globals)
         function.receiver?.let { env.define(it.name ?: "", receiver) }
-        function.parameters.zip(arguments).forEach { (name, value) -> env.define(name, value) }
+        function.parameters.zip(arguments).forEach { (name, value) -> name?.let { env.define(it, value) } }
         return try {
             executeBlock(function.body, env)
             emptyList()
@@ -76,6 +85,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun execute(statement: Statement, env: Environment) {
         when (statement) {
             EmptyStatement -> Unit
+            is DeclarationStatement -> statement.declarations.forEach { declaration ->
+                when (declaration) {
+                    is VariableDeclaration -> initialize(declaration.names, declaration.values, env, declaration.type)
+                    is ConstantDeclaration -> initializeConstantIn(declaration, env)
+                    is TypeDeclaration -> typeDefinitions[declaration.name] = declaration.type
+                    else -> throw RuntimeGoError("unsupported local declaration")
+                }
+            }
             is BlockStatement -> executeBlock(statement, env)
             is VariableStatement -> initialize(statement.names, statement.values, env, statement.type)
             is ReturnStatement -> throw ReturnSignal(statement.values.map { evaluate(it, env) })
@@ -348,11 +365,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private suspend fun initializeConstant(declaration: ConstantDeclaration) {
-        val scope = globals.child()
+        initializeConstantIn(declaration, globals)
+    }
+
+    private suspend fun initializeConstantIn(declaration: ConstantDeclaration, target: Environment) {
+        val scope = target.child()
         scope.define("iota", declaration.iotaIndex.toLong())
         val values = expandValues(declaration.values.map { evaluate(it, scope) }, declaration.names.size)
         if (values.size != declaration.names.size) throw RuntimeGoError("constant initializer count mismatch")
-        declaration.names.zip(values).forEach { (name, value) -> globals.define(name, value) }
+        declaration.names.zip(values).forEach { (name, value) -> target.define(name, value) }
     }
 
     private suspend fun evaluateRhs(expressions: List<Expression>, arity: Int, env: Environment): List<Any?> {
@@ -392,7 +413,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             else binary(left, expression.operator, evaluate(expression.right, env))
         }
         is SelectorExpression -> {
-            if (expression.receiver is NameExpression && expression.receiver.name == "fmt") BuiltinValue(expression.field)
+            if (expression.receiver is NameExpression && expression.receiver.name in fmtAliases) BuiltinValue(expression.field)
             else {
                 val receiver = evaluate(expression.receiver, env)
                 val struct = dereference(receiver) as? GoStruct ?: throw RuntimeGoError("selector is not defined for this value")
