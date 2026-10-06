@@ -243,7 +243,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val key = evaluate(target.index, env)
                 when (receiver) {
                     is GoSlice -> receiver.set(number(key, "index").toInt(), copyForType(value, receiver.elementType))
-                    is GoArray -> receiver.values[number(key, "index").toInt()] = copyForType(value, receiver.elementType)
+                    is GoArray -> setArrayElement(receiver, key, value)
+                    is GoPointer -> {
+                        val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index assignment requires pointer to array")
+                        setArrayElement(array, key, value)
+                    }
                     is GoMap -> receiver.values[mapKey(key)] = copyForType(value, receiver.valueType)
                     is GoNilValue -> {
                         if (underlying(receiver.type) is MapGoType) throw RuntimeGoError("assignment to entry in nil map")
@@ -758,6 +762,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             when (receiver) {
                 is GoSlice -> receiver.pointerAt(key)
                 is GoArray -> receiver.pointerAt(key)
+                is GoPointer -> (receiver.get() as? GoArray)?.pointerAt(key)
+                    ?: throw RuntimeGoError("address-of index requires pointer to array")
                 else -> throw RuntimeGoError("address-of index requires an array or slice element")
             }
         }
@@ -1049,7 +1055,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun index(receiver: Any?, rawIndex: Any?): Any? {
         return when (receiver) {
             is GoSlice -> receiver.get(number(rawIndex, "index").toInt())
-            is GoArray -> receiver.values.getOrNull(number(rawIndex, "index").toInt()) ?: throw RuntimeGoError("array index out of range")
+            is GoArray -> arrayElement(receiver, rawIndex)
+            is GoPointer -> {
+                val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
+                arrayElement(array, rawIndex)
+            }
             is GoMap -> mapKey(rawIndex).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
             is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { zeroValue(it.value) }
                 ?: throw RuntimeGoError("cannot index this value")
@@ -1067,6 +1077,24 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
     }
 
+    private fun arrayElement(array: GoArray, rawIndex: Any?): Any? {
+        val index = number(rawIndex, "index").toInt()
+        if (index !in array.values.indices) throw RuntimeGoError("array index out of range")
+        return array.values[index]
+    }
+
+    private fun setArrayElement(array: GoArray, rawIndex: Any?, value: Any?) {
+        val index = number(rawIndex, "index").toInt()
+        if (index !in array.values.indices) throw RuntimeGoError("array index out of range")
+        array.values[index] = copyForType(value, array.elementType)
+    }
+
+    private fun sliceArray(array: GoArray, low: Int, high: Int, max: Int): GoSlice {
+        if (low < 0 || high < low || max < high || max > array.values.size)
+            throw RuntimeGoError("slice bounds out of range")
+        return GoSlice(array.elementType, array.values, low, high - low, max - low)
+    }
+
     private fun slice(receiver: Any?, lowValue: Any?, highValue: Any?, maxValue: Any?): Any? {
         val low = lowValue?.let { number(it, "slice index").toInt() } ?: 0
         return when (receiver) {
@@ -1078,7 +1106,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             is GoArray -> {
                 val high = highValue?.let { number(it, "slice index").toInt() } ?: receiver.values.size
                 val max = maxValue?.let { number(it, "slice index").toInt() } ?: receiver.values.size
-                GoSlice(receiver.elementType, receiver.values, low, high - low, max - low)
+                sliceArray(receiver, low, high, max)
+            }
+            is GoPointer -> {
+                val array = receiver.get() as? GoArray ?: throw RuntimeGoError("slice requires pointer to array")
+                val high = highValue?.let { number(it, "slice index").toInt() } ?: array.values.size
+                val max = maxValue?.let { number(it, "slice index").toInt() } ?: array.values.size
+                sliceArray(array, low, high, max)
             }
             is String -> {
                 val bytes = receiver.toByteArray(Charsets.UTF_8)

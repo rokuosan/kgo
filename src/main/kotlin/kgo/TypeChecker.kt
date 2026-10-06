@@ -561,6 +561,10 @@ class TypeChecker {
             when (receiver) {
                 is SliceGoType -> receiver
                 is ArrayGoType -> SliceGoType(receiver.element)
+                is PointerGoType -> when (val pointed = underlying(receiver.element)) {
+                    is ArrayGoType -> SliceGoType(pointed.element)
+                    else -> error("cannot slice through this pointer")
+                }
                 is NamedGoType -> if (receiver.name == "string") receiver else error("cannot slice ${receiver.name}")
                 else -> error("cannot slice this value")
             }
@@ -584,6 +588,10 @@ class TypeChecker {
         val index = expressionType(expression.index, scope)
         return when (receiver) {
             is ArrayGoType -> { requireInteger(index, "array index"); receiver.element }
+            is PointerGoType -> when (val pointed = underlying(receiver.element)) {
+                is ArrayGoType -> { requireInteger(index, "array index"); pointed.element }
+                else -> error("cannot index through this pointer")
+            }
             is SliceGoType -> { requireInteger(index, "slice index"); receiver.element }
             is MapGoType -> { requireAssignable(index, receiver.key, "map index"); receiver.value }
             is NamedGoType -> if (receiver.name == "string") { requireInteger(index, "string index"); byteType } else error("cannot index ${receiver.name}")

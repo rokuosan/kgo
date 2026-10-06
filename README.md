@@ -14,7 +14,8 @@ Package constants and variables initialize in dependency order, including
 dependencies reached through package functions.
 Composite literals, structs, arrays, slices, maps, indexing, slicing, and their
 basic built-ins (`make`, `append`, `copy`, `delete`, `len`, and `cap`) are also
-implemented in the runtime subset. Named struct methods support value and pointer
+implemented in the runtime subset. Pointers to arrays support indexing,
+slicing, and ranging. Named struct methods support value and pointer
 receivers for the implemented runtime types.
 Array and struct comparisons use Go value equality, including when they are used
 as map keys. Arrays and structs copy at value-transfer points; slices, maps,
