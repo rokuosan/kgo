@@ -491,8 +491,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is ParenthesizedExpression -> evaluate(expression.expression, env)
         is UnaryExpression -> when (expression.operator) {
             TokenKind.AND -> addressOf(expression.operand, env)
-            TokenKind.MUL -> (evaluate(expression.operand, env) as? GoPointer)?.get()
-                ?: throw RuntimeGoError("dereference of non-pointer or nil")
+            TokenKind.MUL -> {
+                val pointer = evaluate(expression.operand, env) as? GoPointer
+                    ?: throw RuntimeGoError("dereference of non-pointer")
+                pointer.get()
+            }
             else -> unary(expression.operator, evaluate(expression.operand, env))
         }
         is BinaryExpression -> {
@@ -505,7 +508,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             if (expression.receiver is NameExpression && expression.receiver.name in fmtAliases) BuiltinValue(expression.field)
             else {
                 val receiver = evaluate(expression.receiver, env)
-                if (receiver is GoInterfaceValue) {
+                if (receiver is GoPointer && receiver.isNil) {
+                    val baseType = receiver.pointeeType ?: throw RuntimeGoError("nil pointer has no static type")
+                    val method = methods["${methodKey(baseType, expression.field)}"]
+                        ?: throw RuntimeGoError("unknown field or method: ${expression.field}")
+                    if (method.receiver?.type !is PointerGoType)
+                        throw RuntimeGoError("invalid memory address or nil pointer dereference")
+                    MethodValue(method, receiver)
+                } else if (receiver is GoInterfaceValue) {
                     val method = methods["${methodKey(receiver.dynamicType, expression.field)}"]
                         ?: throw RuntimeGoError("unknown interface method: ${expression.field}")
                     val pointerReceiver = method.receiver?.type is PointerGoType
@@ -835,6 +845,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun convert(type: GoTypeSyntax, value: Any?): Any? = when (val target = underlying(type)) {
+        is PointerGoType -> if (value == null) GoPointer.nil(target.element) else value
         is NamedGoType -> when (target.name) {
             "string" -> when (value) { is String -> value; is Long -> String(Character.toChars(value.toInt())); else -> throw RuntimeGoError("cannot convert to string") }
             "bool" -> value as? Boolean ?: throw RuntimeGoError("cannot convert to bool")
@@ -963,6 +974,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             GoStruct(fields, (type as? NamedGoType)?.name, fieldTypes)
         }
+        is PointerGoType -> GoPointer.nil(actual.element)
         else -> null
     }
 
@@ -1034,6 +1046,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     }
 
     private fun goEqual(left: Any?, right: Any?): Boolean {
+        if (left is GoPointer && right == null) return left.isNil
+        if (right is GoPointer && left == null) return right.isNil
         if (left is GoInterfaceValue || right is GoInterfaceValue) {
             if (left == null || right == null) return left == null && right == null
             val leftType = (left as? GoInterfaceValue)?.dynamicType ?: runtimeType(left)
@@ -1082,7 +1096,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun stringify(value: Any?): String = when (value) {
         null -> "<nil>"
         is GoInterfaceValue -> stringify(value.value)
-        is GoPointer -> "&${stringify(value.get())}"
+        is GoPointer -> if (value.isNil) "<nil>" else "&${stringify(value.get())}"
         is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoArray -> value.values.joinToString(prefix = "[", postfix = "]") { stringify(it) }
@@ -1241,16 +1255,24 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             fields.keys.all { goEqual(fields[it], other.fields[it]) }
         override fun hashCode() = 31 * (namedType?.hashCode() ?: 0) + fields.hashCode()
     }
-    private class GoPointer(private val location: GoLocation, val pointeeType: GoTypeSyntax? = null) {
-        fun get(): Any? = location.get()
-        fun set(value: Any?) = location.set(value)
-        override fun equals(other: Any?) = other is GoPointer && location === other.location
-        override fun hashCode() = System.identityHashCode(location)
+    private class GoPointer(private val location: GoLocation?, val pointeeType: GoTypeSyntax? = null) {
+        val isNil: Boolean get() = location == null
+        fun get(): Any? = location?.get() ?: if (isNil) throw RuntimeGoError("invalid memory address or nil pointer dereference") else null
+        fun set(value: Any?) {
+            val target = location ?: throw RuntimeGoError("invalid memory address or nil pointer dereference")
+            target.set(value)
+        }
+        override fun equals(other: Any?) = other is GoPointer && when {
+            isNil || other.isNil -> isNil && other.isNil
+            else -> location === other.location
+        }
+        override fun hashCode() = if (isNil) 0 else System.identityHashCode(location)
 
         companion object {
             fun reference(get: () -> Any?, set: (Any?) -> Unit, pointeeType: GoTypeSyntax? = null) =
                 GoPointer(GoLocation(get, set), pointeeType)
             fun cell(value: Any?, pointeeType: GoTypeSyntax? = null) = GoCell(value).let { cell -> reference({ cell.value }, { cell.value = it }, pointeeType) }
+            fun nil(pointeeType: GoTypeSyntax) = GoPointer(null, pointeeType)
         }
     }
     private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)

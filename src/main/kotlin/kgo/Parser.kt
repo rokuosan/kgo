@@ -444,7 +444,7 @@ class Parser(private val tokens: List<Token>) {
                 else NameExpression(name)
             }
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING -> LiteralExpression(take())
-            TokenKind.CHAN, TokenKind.ARROW, TokenKind.MUL, TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT -> {
+            TokenKind.CHAN, TokenKind.ARROW, TokenKind.MUL, TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT, TokenKind.INTERFACE -> {
                 val type = parseType()
                 if (allowCompositeLiteral && at(TokenKind.LBRACE)) parseCompositeLiteral(type) else TypeExpression(type)
             }
