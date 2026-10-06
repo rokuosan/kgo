@@ -904,7 +904,11 @@ class TypeChecker {
         switchType: GoTypeSyntax?,
         scope: Scope
     ): String? {
-        val identityType = if (isUntyped(caseType)) switchType ?: defaultType(caseType) else caseType
+        val identityType = when {
+            !isUntyped(caseType) -> caseType
+            switchType != null && underlying(switchType) is InterfaceGoType -> defaultType(caseType)
+            else -> switchType ?: defaultType(caseType)
+        }
         val typeKey = identityType.toString()
         if (isComplex(identityType)) {
             constantComplex(expression, scope)?.let { value ->
