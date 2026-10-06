@@ -822,6 +822,7 @@ class TypeChecker {
                         error("select receive assignment must use = or :=")
                     val receive = communication.values.singleOrNull()?.unparenthesized() as? UnaryExpression
                         ?: error("select case must receive from a channel")
+                    if (receive.operator != TokenKind.ARROW) error("select case must receive from a channel")
                     val channel = underlying(expressionType(receive.operand, caseScope)) as? ChannelGoType ?: error("receive requires a channel")
                     if (channel.direction == ChannelDirection.SEND_ONLY) error("cannot receive from send-only channel")
                     if (communication.operator == TokenKind.DEFINE) {
