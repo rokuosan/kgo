@@ -1393,6 +1393,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val last = args.lastOrNull()
             args.dropLast(1).map(::copyValue) + when (last) {
                 is GoSlice -> last.toList().map(::copyValue)
+                is GoNilValue -> if (underlying(last.type) is SliceGoType) emptyList() else
+                    throw RuntimeGoError("... argument must be a slice")
                 null -> emptyList()
                 else -> throw RuntimeGoError("... argument must be a slice")
             }
