@@ -806,14 +806,20 @@ class TypeChecker {
     }
 
     private fun checkSelect(statement: SelectStatement, scope: Scope) {
+        var sawDefault = false
         statement.cases.forEach { clause ->
             if (clause.statements.any(::containsFallthrough)) error("fallthrough is not permitted in a select")
             val caseScope = scope.child()
             when (val communication = clause.communication) {
-                null -> Unit
+                null -> {
+                    if (sawDefault) error("multiple default cases in select")
+                    sawDefault = true
+                }
                 is SendStatement -> checkSend(communication, caseScope)
                 is ExpressionStatement -> checkReceive(communication.expression, caseScope)
                 is AssignmentStatement -> {
+                    if (communication.operator !in setOf(TokenKind.ASSIGN, TokenKind.DEFINE))
+                        error("select receive assignment must use = or :=")
                     val receive = communication.values.singleOrNull()?.unparenthesized() as? UnaryExpression
                         ?: error("select case must receive from a channel")
                     val channel = underlying(expressionType(receive.operand, caseScope)) as? ChannelGoType ?: error("receive requires a channel")
