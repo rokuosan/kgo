@@ -1328,7 +1328,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is NameExpression -> {
             val binding = env.binding(target.name)
             when {
-                binding?.value is TypeValue -> (binding.value as TypeValue).type
+                binding?.value is TypeValue -> binding.value.type
                 binding == null && target.name in builtinTypes -> NamedGoType(target.name)
                 else -> null
             }
@@ -1914,11 +1914,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         is SliceGoType -> {
             if (value is GoString && isByteOrRuneType(target.element)) {
-                val converted = if (isByteType(target.element))
-                    value.bytes.map { (it.toInt() and 0xff).toLong() }
-                else decodeUtf8Runes(value.bytes).map(Int::toLong)
-                val backing = converted.mapTo(mutableListOf()) { copyForType(it, target.element) }
-                GoSlice(target.element, backing, 0, backing.size, backing.size, (type as? NamedGoType)?.name, type)
+                if (value.bytes.isEmpty()) GoNilValue(type)
+                else {
+                    val converted = if (isByteType(target.element))
+                        value.bytes.map { (it.toInt() and 0xff).toLong() }
+                    else decodeUtf8Runes(value.bytes).map(Int::toLong)
+                    val backing = converted.mapTo(mutableListOf()) { copyForType(it, target.element) }
+                    GoSlice(target.element, backing, 0, backing.size, backing.size, (type as? NamedGoType)?.name, type)
+                }
             } else if (value is GoSlice) value.retype(target.element, (type as? NamedGoType)?.name, type)
             else if (value == null || value is GoNilValue && underlying(value.type) is SliceGoType) GoNilValue(type)
             else throw RuntimeGoError("cannot convert value to $type")
