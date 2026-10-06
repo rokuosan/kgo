@@ -67,6 +67,11 @@ data class RangeClause(val targets: List<Expression>, val operator: TokenKind?, 
 data object EmptyStatement : Statement
 
 sealed interface Expression
+fun Expression.unparenthesized(): Expression = when (this) {
+    is ParenthesizedExpression -> expression.unparenthesized()
+    else -> this
+}
+
 data class NameExpression(val name: String) : Expression
 data class LiteralExpression(val token: Token) : Expression
 data class UnaryExpression(val operator: TokenKind, val operand: Expression) : Expression

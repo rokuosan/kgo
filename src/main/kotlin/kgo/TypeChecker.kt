@@ -282,7 +282,7 @@ class TypeChecker {
     private fun isTerminatingStatement(statement: Statement, labels: Set<String> = emptySet()): Boolean = when (statement) {
         is ReturnStatement -> true
         is BranchStatement -> statement.kind == TokenKind.GOTO
-        is ExpressionStatement -> (statement.expression as? CallExpression)?.let(terminatingPanicCalls::contains) == true
+        is ExpressionStatement -> (statement.expression.unparenthesized() as? CallExpression)?.let(terminatingPanicCalls::contains) == true
         is BlockStatement -> endsWithTerminatingStatement(statement, labels)
         is LabeledStatement -> isTerminatingStatement(statement.statement, labels + statement.label)
         is IfStatement -> statement.elseBranch != null &&
@@ -491,9 +491,17 @@ class TypeChecker {
                 }
             }
             is ExpressionStatement -> {
-                val expression = statement.expression
-                if (expression !is CallExpression) error("expression statement must be a function call")
-                callResults(expression, scope)
+                when (val expression = statement.expression.unparenthesized()) {
+                    is CallExpression -> {
+                        if (isTypeConversion(expression.function, scope)) error("conversion cannot be used as a statement")
+                        callResults(expression, scope)
+                    }
+                    is UnaryExpression -> {
+                        if (expression.operator != TokenKind.ARROW) error("expression statement must be a function call or receive")
+                        checkReceive(expression, scope)
+                    }
+                    else -> error("expression statement must be a function call or receive")
+                }
             }
             is AssignmentStatement -> checkAssignment(statement, scope)
             is IncrementStatement -> {
@@ -648,7 +656,8 @@ class TypeChecker {
                 is SendStatement -> checkSend(communication, caseScope)
                 is ExpressionStatement -> checkReceive(communication.expression, caseScope)
                 is AssignmentStatement -> {
-                    val receive = communication.values.singleOrNull() as? UnaryExpression ?: error("select case must receive from a channel")
+                    val receive = communication.values.singleOrNull()?.unparenthesized() as? UnaryExpression
+                        ?: error("select case must receive from a channel")
                     val channel = underlying(expressionType(receive.operand, caseScope)) as? ChannelGoType ?: error("receive requires a channel")
                     if (channel.direction == ChannelDirection.SEND_ONLY) error("cannot receive from send-only channel")
                     if (communication.operator == TokenKind.DEFINE) {
@@ -675,7 +684,7 @@ class TypeChecker {
     }
 
     private fun checkReceive(expression: Expression, scope: Scope) {
-        val receive = expression as? UnaryExpression ?: error("select receive case must use <-")
+        val receive = expression.unparenthesized() as? UnaryExpression ?: error("select receive case must use <-")
         if (receive.operator != TokenKind.ARROW) error("select receive case must use <-")
         val channel = underlying(expressionType(receive.operand, scope)) as? ChannelGoType ?: error("receive requires a channel")
         if (channel.direction == ChannelDirection.SEND_ONLY) error("cannot receive from send-only channel")
@@ -1363,19 +1372,20 @@ class TypeChecker {
                 else -> error("undefined fmt function ${target.field}")
             }
         }
-        if (target is NameExpression && scope.getOrNull(target.name) == null) {
-            val localType = scope.typeBinding(target.name)?.let(::NamedGoType)
-            if (localType != null || isBuiltinType(target.name) || typeDeclarations.containsKey(target.name)) {
+        val typeNameTarget = target.unparenthesized() as? NameExpression
+        if (typeNameTarget != null && scope.getOrNull(typeNameTarget.name) == null) {
+            val localType = scope.typeBinding(typeNameTarget.name)?.let(::NamedGoType)
+            if (localType != null || isBuiltinType(typeNameTarget.name) || typeDeclarations.containsKey(typeNameTarget.name)) {
                 if (call.arguments.size != 1) error("conversion requires one argument")
                 val from = expressionType(call.arguments.single(), scope)
-                val to = localType ?: NamedGoType(target.name)
+                val to = localType ?: NamedGoType(typeNameTarget.name)
                 if (!convertible(from, to)) error("cannot convert $from to $to")
                 requireIntegerConstantRepresentable(call.arguments.single(), to, scope)
                 return listOf(to)
             }
-            val builtin = builtinCall(target.name, call.arguments, scope, call.expandLastArgument)
+            val builtin = builtinCall(typeNameTarget.name, call.arguments, scope, call.expandLastArgument)
             if (builtin != null) {
-                if (target.name == "panic") terminatingPanicCalls += call
+                if (typeNameTarget.name == "panic") terminatingPanicCalls += call
                 return builtin
             }
         }
@@ -2235,8 +2245,16 @@ class TypeChecker {
     private fun requireBoolean(type: GoTypeSyntax, context: String) { if (!isBoolean(type)) error("$context must be boolean") }
     private fun requireInteger(type: GoTypeSyntax, context: String) { if (!isInteger(type)) error("$context must be integer") }
     private fun requireCall(expression: Expression, scope: Scope, context: String) {
-        if (expression !is CallExpression) error("$context requires function call")
-        callResults(expression, scope)
+        val call = expression.unparenthesized() as? CallExpression ?: error("$context requires function call")
+        if (isTypeConversion(call.function, scope)) error("$context requires function or method call")
+        callResults(call, scope)
+    }
+
+    private fun isTypeConversion(expression: Expression, scope: Scope): Boolean = when (val target = expression.unparenthesized()) {
+        is TypeExpression -> true
+        is NameExpression -> scope.getOrNull(target.name) == null &&
+            (scope.typeBinding(target.name) != null || isBuiltinType(target.name) || target.name in typeDeclarations)
+        else -> false
     }
     private fun requireCount(name: String, args: List<Expression>, count: Int) { if (args.size != count) error("$name expects $count arguments") }
     private fun compoundOperator(operator: TokenKind) = when (operator) {

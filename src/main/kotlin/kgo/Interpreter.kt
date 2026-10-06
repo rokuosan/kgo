@@ -320,13 +320,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 }
             }
             is GoStatement -> {
-                val call = statement.call as? CallExpression ?: throw RuntimeGoError("go statement requires a function call")
+                val call = statement.call.unparenthesized() as? CallExpression
+                    ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
                 goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState(), environment = env) }
             }
             is DeferStatement -> {
-                val call = statement.call as? CallExpression ?: throw RuntimeGoError("defer statement requires a function call")
+                val call = statement.call.unparenthesized() as? CallExpression
+                    ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = call.arguments.map { copyValue(evaluate(it, env)) }
                 env.defer { call(target, arguments, call.expandLastArgument, env.panicState, deferredCall = true, environment = env) }
@@ -476,13 +478,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     SelectSend(caseIndex, channel, copyForType(sendValue, channel.elementType))
                 }
                 is ExpressionStatement -> {
-                    val receive = communication.expression as? UnaryExpression
+                    val receive = communication.expression.unparenthesized() as? UnaryExpression
                     if (receive?.operator != TokenKind.ARROW) throw RuntimeGoError("invalid select receive clause")
                     val channel = selectChannelOrNull(evaluate(receive.operand, env)) ?: return@mapIndexedNotNull null
                     SelectReceive(caseIndex, channel, null)
                 }
                 is AssignmentStatement -> {
-                    val receive = communication.values.singleOrNull() as? UnaryExpression
+                    val receive = communication.values.singleOrNull()?.unparenthesized() as? UnaryExpression
                     if (receive?.operator != TokenKind.ARROW) throw RuntimeGoError("select assignment must receive from a channel")
                     val channel = selectChannelOrNull(evaluate(receive.operand, env)) ?: return@mapIndexedNotNull null
                     SelectReceive(caseIndex, channel, communication)
