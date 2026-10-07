@@ -34,11 +34,11 @@ internal object GoUnsafePackage {
         is NamedGoType -> when (actual.name) {
             "bool", "#predeclared-uint8", "int8", "uint8" -> Layout(1, 1)
             "int16", "uint16" -> Layout(2, 2)
-            "int32", "uint32", "float32" -> Layout(4, 4)
-            "#predeclared-int", "int64", "uint64", "int", "uint", "uintptr", "float64" -> Layout(8, 8)
-            "complex64" -> Layout(8, 4)
-            "complex128" -> Layout(16, 8)
-            "string" -> Layout(16, 8)
+            "int32", "uint32", "float32", "#predeclared-float32" -> Layout(4, 4)
+            "#predeclared-int", "int64", "uint64", "int", "uint", "uintptr", "float64", "#predeclared-float64" -> Layout(8, 8)
+            "complex64", "#predeclared-complex64" -> Layout(8, 4)
+            "complex128", "#predeclared-complex128" -> Layout(16, 8)
+            "string", "#predeclared-string" -> Layout(16, 8)
             else -> throw IllegalArgumentException("unknown Go type layout: $actual")
         }
         is PointerGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> Layout(8, 8)

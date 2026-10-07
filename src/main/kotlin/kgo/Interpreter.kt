@@ -1005,6 +1005,9 @@ class Interpreter(
         NamedGoType("bool") -> if (!typeDefinitions.containsKey("bool")) predeclaredBoolRuntimeType else type
         NamedGoType("float32") -> if (!typeDefinitions.containsKey("float32")) predeclaredFloat32RuntimeType else type
         NamedGoType("float64") -> if (!typeDefinitions.containsKey("float64")) predeclaredFloat64RuntimeType else type
+        NamedGoType("string") -> if (!typeDefinitions.containsKey("string")) predeclaredStringRuntimeType else type
+        NamedGoType("complex64") -> if (!typeDefinitions.containsKey("complex64")) predeclaredComplex64RuntimeType else type
+        NamedGoType("complex128") -> if (!typeDefinitions.containsKey("complex128")) predeclaredComplex128RuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
         is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
@@ -1861,12 +1864,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val sourceType = staticExpressionType(expression, env)
             ?: throw RuntimeGoError("cannot determine unsafe intrinsic argument type")
         val type = when (sourceType) {
-            NamedGoType("#untyped-bool") -> NamedGoType("bool")
-            NamedGoType("#untyped-int") -> NamedGoType("int")
+            NamedGoType("#untyped-bool") -> predeclaredBoolRuntimeType
+            NamedGoType("#untyped-int") -> predeclaredIntRuntimeType
             NamedGoType("#untyped-rune") -> predeclaredIntRuntimeType
-            NamedGoType("#untyped-float") -> NamedGoType("float64")
-            NamedGoType("#untyped-complex") -> NamedGoType("complex128")
-            NamedGoType("#untyped-string") -> NamedGoType("string")
+            NamedGoType("#untyped-float") -> predeclaredFloat64RuntimeType
+            NamedGoType("#untyped-complex") -> predeclaredComplex128RuntimeType
+            NamedGoType("#untyped-string") -> predeclaredStringRuntimeType
             else -> sourceType
         }
         val arrayLength: (Expression) -> BigInteger = { integerLiteral(it, env) }
@@ -2123,10 +2126,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     if (args.all { it is BigInteger || it is GoRational })
                         return GoExactComplex(exactRational(args[0]), exactRational(args[1]))
                     val type = if (args.filterIsInstance<GoFloat>().any { underlying(it.type) == NamedGoType("float32") })
-                        NamedGoType("complex64") else NamedGoType("complex128")
+                        predeclaredComplex64RuntimeType else predeclaredComplex128RuntimeType
                     val real = real(args[0])
                     val imaginary = real(args[1])
-                    return if (type == NamedGoType("complex64"))
+                    return if (underlying(type) == NamedGoType("complex64"))
                         GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), type)
                     else GoComplex(real, imaginary, type)
                 }
@@ -2427,6 +2430,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             "#predeclared-bool" -> NamedGoType("bool")
             "#predeclared-float32" -> NamedGoType("float32")
             "#predeclared-float64" -> NamedGoType("float64")
+            "#predeclared-string" -> NamedGoType("string")
+            "#predeclared-complex64" -> NamedGoType("complex64")
+            "#predeclared-complex128" -> NamedGoType("complex128")
             else -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
@@ -2579,7 +2585,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             else -> value.type
         }
         is GoRational -> NamedGoType("float64")
-        is GoExactComplex -> NamedGoType("complex128")
+        is GoExactComplex -> predeclaredComplex128RuntimeType
         is BigInteger -> NamedGoType("int")
         is GoMap -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: MapGoType(value.keyType, value.valueType)
         is FunctionValue -> value.type ?: value.owner.checkedFunctionType(value.function)
@@ -2757,7 +2763,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             "Float32frombits" -> {
                 count(1)
-                GoFloat(java.lang.Float.intBitsToFloat(number(args[0], "math.Float32frombits").toInt()).toDouble(), NamedGoType("float32"))
+                GoFloat(java.lang.Float.intBitsToFloat(number(args[0], "math.Float32frombits").toInt()).toDouble(), predeclaredFloat32RuntimeType)
             }
             "Float64bits" -> { count(1); GoInteger(java.lang.Double.doubleToRawLongBits(x()), NamedGoType("uint64")) }
             "Float64frombits" -> {
@@ -3037,7 +3043,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             GoStruct(fields, namedTypeName(type), fieldTypes, embeddedFields, type, namedTypePackage(type))
         }
-        else if ((value is BigInteger || value is GoRational || value is GoExactComplex) && actual is InterfaceGoType) defaultConstantValue(value)
+        else if ((value is BigInteger || value is GoRational || value is GoExactComplex || value is Boolean ||
+                value is GoString && value.type == NamedGoType("string")) && actual is InterfaceGoType)
+            defaultConstantValue(value)
         else if (actual is NamedGoType && (actual.name in integerTypeNames || actual.name in setOf("complex64", "complex128", "float32", "float64"))) convert(type, value)
         else copyValue(value)
         return boxInterface(copied, type)
@@ -3859,7 +3867,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         if (left is GoComplex || right is GoComplex) {
             val a = complexValue(left)
             val b = complexValue(right)
-            val resultType = (left as? GoComplex)?.type ?: (right as? GoComplex)?.type ?: NamedGoType("complex128")
+            val resultType = (left as? GoComplex)?.type ?: (right as? GoComplex)?.type ?: predeclaredComplex128RuntimeType
             fun result(real: Double, imaginary: Double): GoComplex = if (underlying(resultType) == NamedGoType("complex64"))
                 GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), resultType)
             else GoComplex(real, imaginary, resultType)
@@ -4125,7 +4133,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else -> typeError(op, value)
     }
     private fun defaultIntegerValue(value: Any?): Any = if (value is BigInteger) {
-        try { GoInteger(value.longValueExact(), NamedGoType("int")) } catch (_: ArithmeticException) {
+        try { GoInteger(value.longValueExact(), predeclaredIntRuntimeType) } catch (_: ArithmeticException) {
             throw RuntimeGoError("constant overflows default int")
         }
     } else value ?: throw RuntimeGoError("invalid integer value")
@@ -4133,8 +4141,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         value == null -> null
         value is BigInteger && expression != null && env != null && isRuneConstantExpression(expression, env) ->
             GoInteger(value.longValueExact(), predeclaredIntRuntimeType)
-        value is GoRational -> value.toDouble()
-        value is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), NamedGoType("complex128"))
+        value is BigInteger -> defaultIntegerValue(value)
+        value is GoRational -> GoFloat(value.toDouble(), predeclaredFloat64RuntimeType)
+        value is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), predeclaredComplex128RuntimeType)
+        value is Boolean -> GoBoolean(value, predeclaredBoolRuntimeType)
+        value is GoString && value.type == NamedGoType("string") ->
+            GoString(value.bytes.copyOf(), predeclaredStringRuntimeType)
         else -> defaultIntegerValue(value)
     }
 
@@ -4178,13 +4190,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun complexValue(value: Any?): GoComplex = when (value) {
         is GoComplex -> value
-        is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), NamedGoType("complex128"))
-        is GoRational -> GoComplex(value.toDouble(), 0.0, NamedGoType("complex128"))
-        is GoInteger -> GoComplex(integerAsDouble(value), 0.0, NamedGoType("complex128"))
-        is GoFloat -> GoComplex(value.value, 0.0, NamedGoType("complex128"))
-        is BigInteger -> GoComplex(value.toDouble(), 0.0, NamedGoType("complex128"))
-        is Long -> GoComplex(value.toDouble(), 0.0, NamedGoType("complex128"))
-        is Double -> GoComplex(value, 0.0, NamedGoType("complex128"))
+        is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), predeclaredComplex128RuntimeType)
+        is GoRational -> GoComplex(value.toDouble(), 0.0, predeclaredComplex128RuntimeType)
+        is GoInteger -> GoComplex(integerAsDouble(value), 0.0, predeclaredComplex128RuntimeType)
+        is GoFloat -> GoComplex(value.value, 0.0, predeclaredComplex128RuntimeType)
+        is BigInteger -> GoComplex(value.toDouble(), 0.0, predeclaredComplex128RuntimeType)
+        is Long -> GoComplex(value.toDouble(), 0.0, predeclaredComplex128RuntimeType)
+        is Double -> GoComplex(value, 0.0, predeclaredComplex128RuntimeType)
         else -> typeError("complex arithmetic", value)
     }
     private fun imaginaryPart(text: String): GoRational = runCatching { GoRational.decimal(text) }
@@ -4780,6 +4792,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         private val predeclaredUInt8RuntimeType = NamedGoType("#predeclared-uint8")
         private val predeclaredFloat32RuntimeType = NamedGoType("#predeclared-float32")
         private val predeclaredFloat64RuntimeType = NamedGoType("#predeclared-float64")
+        private val predeclaredStringRuntimeType = NamedGoType("#predeclared-string")
+        private val predeclaredComplex64RuntimeType = NamedGoType("#predeclared-complex64")
+        private val predeclaredComplex128RuntimeType = NamedGoType("#predeclared-complex128")
         private val integerTypeNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")

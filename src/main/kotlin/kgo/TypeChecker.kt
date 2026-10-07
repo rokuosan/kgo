@@ -2300,8 +2300,8 @@ class TypeChecker(
                 val typed = listOf(first, second).firstOrNull { !isUntyped(it) }
                 listOf(when {
                     typed == null -> untypedComplex
-                    underlying(typed) in setOf(NamedGoType("float32"), predeclaredFloat32Type) -> NamedGoType("complex64")
-                    else -> NamedGoType("complex128")
+                    underlying(typed) in setOf(NamedGoType("float32"), predeclaredFloat32Type) -> predeclaredComplex64Type
+                    else -> predeclaredComplex128Type
                 })
             }
             "real", "imag" -> {
@@ -2309,8 +2309,8 @@ class TypeChecker(
                 val type = types.single()
                 if (type == untypedComplex) listOf(untypedFloat)
                 else when (underlying(type)) {
-                    NamedGoType("complex64") -> listOf(predeclaredFloat32Type)
-                    NamedGoType("complex128") -> listOf(predeclaredFloat64Type)
+                    NamedGoType("complex64"), predeclaredComplex64Type -> listOf(predeclaredFloat32Type)
+                    NamedGoType("complex128"), predeclaredComplex128Type -> listOf(predeclaredFloat64Type)
                     else -> error("$name requires a complex argument")
                 }
             }
@@ -3212,7 +3212,8 @@ class TypeChecker(
         is NamedGoType -> when (type.name) {
             "#predeclared-error" -> errorInterfaceType
             "#predeclared-bool" -> boolType
-            "#predeclared-float32", "#predeclared-float64" -> type
+            "#predeclared-float32", "#predeclared-float64", "#predeclared-string",
+            "#predeclared-complex64", "#predeclared-complex128" -> type
             "#predeclared-int", "#predeclared-uint8" -> type
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
@@ -3271,7 +3272,8 @@ class TypeChecker(
         "int32", "uint32" -> 32
         else -> 64
     }
-    private fun isString(type: GoTypeSyntax) = underlying(type) == stringType || type == untypedString
+    private fun isString(type: GoTypeSyntax) = underlying(type) == stringType ||
+        underlying(type) == predeclaredStringType || type == untypedString
     private fun isBoolean(type: GoTypeSyntax) = underlying(type) == boolType || type == untypedBool
     private fun isNilable(type: GoTypeSyntax) = when (underlying(type)) { is PointerGoType, is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType, is InterfaceGoType -> true; else -> false }
     private fun isComparable(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
@@ -3281,12 +3283,12 @@ class TypeChecker(
         else -> true
     }
     private fun defaultType(type: GoTypeSyntax) = when (type) {
-        untypedInt -> intType
+        untypedInt -> predeclaredIntType
         untypedRune -> predeclaredIntType
-        untypedFloat -> NamedGoType("float64")
-        untypedComplex -> NamedGoType("complex128")
-        untypedString -> stringType
-        untypedBool -> boolType
+        untypedFloat -> predeclaredFloat64Type
+        untypedComplex -> predeclaredComplex128Type
+        untypedString -> predeclaredStringType
+        untypedBool -> predeclaredBoolType
         else -> type
     }
 
@@ -3299,6 +3301,9 @@ class TypeChecker(
         boolType -> if ("bool" !in typeDeclarations) predeclaredBoolType else type
         NamedGoType("float32") -> if ("float32" !in typeDeclarations) predeclaredFloat32Type else type
         NamedGoType("float64") -> if ("float64" !in typeDeclarations) predeclaredFloat64Type else type
+        stringType -> if ("string" !in typeDeclarations) predeclaredStringType else type
+        NamedGoType("complex64") -> if ("complex64" !in typeDeclarations) predeclaredComplex64Type else type
+        NamedGoType("complex128") -> if ("complex128" !in typeDeclarations) predeclaredComplex128Type else type
         else -> type
     }
     private fun requireBoolean(type: GoTypeSyntax, context: String) { if (!isBoolean(type)) error("$context must be boolean") }
@@ -3429,6 +3434,9 @@ class TypeChecker(
         private val predeclaredBoolType = NamedGoType("#predeclared-bool")
         private val predeclaredFloat32Type = NamedGoType("#predeclared-float32")
         private val predeclaredFloat64Type = NamedGoType("#predeclared-float64")
+        private val predeclaredStringType = NamedGoType("#predeclared-string")
+        private val predeclaredComplex64Type = NamedGoType("#predeclared-complex64")
+        private val predeclaredComplex128Type = NamedGoType("#predeclared-complex128")
         private val byteType = NamedGoType("byte")
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")
@@ -3436,7 +3444,7 @@ class TypeChecker(
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(stringType))))
         private val integerNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val floatNames = setOf("#predeclared-float32", "#predeclared-float64", "float32", "float64")
-        private val complexNames = setOf("complex64", "complex128")
+        private val complexNames = setOf("#predeclared-complex64", "#predeclared-complex128", "complex64", "complex128")
         private val builtinTypes = integerNames + floatNames + complexNames + setOf("bool", "string")
     }
 }
