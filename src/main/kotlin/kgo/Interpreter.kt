@@ -977,7 +977,7 @@ class Interpreter(
                     yield()
                     val (cp, width) = decodeUtf8Rune(value.bytes, byteIndex)
                     if (range.targets.isNotEmpty()) {
-                        val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), NamedGoType("rune"))).take(range.targets.size)
+                        val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), NamedGoType("int32"))).take(range.targets.size)
                         assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env,
                             declaredTypes = declarationTypes)
                     }
@@ -1035,7 +1035,7 @@ class Interpreter(
             is SliceGoType -> NamedGoType("int") to source.element
             is MapGoType -> source.key to source.value
             is ChannelGoType -> null to source.element
-            NamedGoType("string") -> NamedGoType("int") to NamedGoType("rune")
+            NamedGoType("string") -> NamedGoType("int") to NamedGoType("int32")
             else -> null
         } ?: return emptyList()
         return listOfNotNull(pair.first, pair.second).take(range.targets.size)
@@ -2099,7 +2099,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private suspend fun writeFmtOutput(writer: Any?, bytes: ByteArray, environment: Environment?): Any {
         val scope = environment ?: globals
         val method = selectStructMember(writer, "Write", NameExpression("<fmt writer>"), scope)
-        val byteType = NamedGoType("byte")
+        val byteType = NamedGoType("uint8")
         val slice = GoSlice(
             byteType,
             bytes.mapTo(mutableListOf()) { GoInteger((it.toInt() and 0xff).toLong(), byteType) },
@@ -2849,7 +2849,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is GoString -> {
                 val i = collectionIndex(rawIndex, "index")
                 if (i !in receiver.bytes.indices) throw RuntimeGoError("string index out of range")
-                GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), NamedGoType("byte"))
+                GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), NamedGoType("uint8"))
             }
             else -> throw RuntimeGoError("cannot index this value")
         }
@@ -3796,7 +3796,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     } else value ?: throw RuntimeGoError("invalid integer value")
     private fun defaultConstantValue(value: Any?, expression: Expression? = null, env: Environment? = null): Any = when {
         value is BigInteger && expression != null && env != null && isRuneConstantExpression(expression, env) ->
-            GoInteger(value.longValueExact(), NamedGoType("rune"))
+            GoInteger(value.longValueExact(), NamedGoType("int32"))
         value is GoRational -> value.toDouble()
         value is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), NamedGoType("complex128"))
         else -> defaultIntegerValue(value)
@@ -3804,10 +3804,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun defaultRuneValue(value: Any?, expression: Expression?, env: Environment): Any? =
         if (value is BigInteger && expression != null && isRuneConstantExpression(expression, env))
-            GoInteger(value.longValueExact(), NamedGoType("rune")) else value
+            GoInteger(value.longValueExact(), NamedGoType("int32")) else value
 
     private fun asRuneValue(value: Any?): Any? = if (value is BigInteger)
-        GoInteger(value.longValueExact(), NamedGoType("rune")) else value
+        GoInteger(value.longValueExact(), NamedGoType("int32")) else value
 
     private fun isRuneConstantExpression(expression: Expression, env: Environment): Boolean =
         integerConstantKind(expression, env) == 2

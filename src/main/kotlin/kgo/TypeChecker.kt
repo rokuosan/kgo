@@ -922,7 +922,7 @@ class TypeChecker(
                 if (source.direction == ChannelDirection.SEND_ONLY) error("cannot range over send-only channel")
                 null to source.element
             }
-            is NamedGoType -> if (source.name == "string") intType to runeType else error("cannot range over ${source.name}")
+            is NamedGoType -> if (source.name == "string") intType to NamedGoType("int32") else error("cannot range over ${source.name}")
             else -> error("cannot range over this type")
         }
         if (source is ChannelGoType && range.targets.size > 1) error("range over channel permits one iteration variable")
@@ -1493,7 +1493,7 @@ class TypeChecker(
             }
             is SliceGoType -> { requireInteger(index, "slice index"); receiver.element }
             is MapGoType -> { requireAssignable(index, receiver.key, "map index", expression.index, scope); receiver.value }
-            is NamedGoType -> if (receiver.name == "string") { requireInteger(index, "string index"); byteType } else error("cannot index ${receiver.name}")
+            is NamedGoType -> if (receiver.name == "string") { requireInteger(index, "string index"); NamedGoType("uint8") } else error("cannot index ${receiver.name}")
             else -> error("cannot index this value")
         }
     }
@@ -2909,7 +2909,7 @@ class TypeChecker(
     }
     private fun defaultType(type: GoTypeSyntax) = when (type) {
         untypedInt -> intType
-        untypedRune -> runeType
+        untypedRune -> NamedGoType("int32")
         untypedFloat -> NamedGoType("float64")
         untypedComplex -> NamedGoType("complex128")
         untypedString -> stringType
