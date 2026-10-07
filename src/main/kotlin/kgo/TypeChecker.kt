@@ -1997,7 +1997,11 @@ class TypeChecker(
     }
 
     private fun builtinCall(name: String, args: List<Expression>, scope: Scope, expandLastArgument: Boolean = false): List<GoTypeSyntax>? {
-        val types = callArgumentTypes(args, expandLastArgument, scope)
+        val types = if (name == "make" || name == "new") {
+            args.firstOrNull()?.let { typeArgument ->
+                listOf(builtinTypeArgument(typeArgument, scope)) + args.drop(1).map { expressionType(it, scope) }
+            } ?: emptyList()
+        } else callArgumentTypes(args, expandLastArgument, scope)
         if (expandLastArgument && name in setOf("print", "println") && args.size != 1)
             error("... requires a single final argument")
         return when (name) {
@@ -2007,15 +2011,7 @@ class TypeChecker(
             "make" -> {
                 if (expandLastArgument) error("make does not accept ...")
                 if (types.isEmpty()) error("make requires a type argument")
-                val requestedType = when (val argument = args.first()) {
-                    is TypeExpression -> argument.type
-                    is NameExpression -> scope.typeBinding(argument.name)?.let(::NamedGoType)
-                        ?: if (isBuiltinType(argument.name) || typeDeclarations.containsKey(argument.name)) NamedGoType(argument.name)
-                        else error("make requires a type argument")
-                    else -> error("make requires a type argument")
-                }
-                val type = resolveLocalType(requestedType, scope)
-                validateType(type)
+                val type = types.first()
                 when (underlying(type)) {
                     is SliceGoType -> {
                         if (args.size !in 2..3) error("make slice requires length and optional capacity")
@@ -2045,7 +2041,11 @@ class TypeChecker(
                 }
                 listOf(type)
             }
-            "new" -> { requireCount(name, args, 1, types.size); listOf(PointerGoType(types[0])) }
+            "new" -> {
+                if (expandLastArgument) error("new does not accept ...")
+                requireCount(name, args, 1, types.size)
+                listOf(PointerGoType(types[0]))
+            }
             "close" -> {
                 requireCount(name, args, 1, types.size)
                 val channel = underlying(types[0]) as? ChannelGoType ?: error("close requires channel")
@@ -2989,6 +2989,25 @@ class TypeChecker(
         return constantInteger(expression, scope)?.also { value ->
             if (value.signum() < 0) error("make size must be non-negative")
         }
+    }
+
+    private fun builtinTypeArgument(expression: Expression, scope: Scope): GoTypeSyntax {
+        val requested = when (expression) {
+            is TypeExpression -> expression.type
+            is NameExpression -> {
+                if (scope.getOrNull(expression.name) != null) error("${expression.name} is not a type")
+                scope.typeBinding(expression.name)?.let(::NamedGoType)
+                    ?: if (isTypeName(expression.name, scope)) NamedGoType(expression.name)
+                    else error("make or new requires a type argument")
+            }
+            is SelectorExpression -> {
+                if ((expression.receiver as? NameExpression)?.name?.let(scope::getOrNull) != null)
+                    error("${expression.receiver} is not a package")
+                importedPackageType(expression) ?: error("make or new requires a type argument")
+            }
+            else -> error("make or new requires a type argument")
+        }
+        return resolveLocalType(requested, scope).also(::validateType)
     }
 
     private fun requireCount(name: String, args: List<Expression>, count: Int, actualCount: Int = args.size) {
