@@ -348,6 +348,7 @@ class Interpreter(
         deferredCall: Boolean = false
     ): List<Any?> {
         val signature = checkedFunctionType(function)
+        val priorActivePanic = panicState.activePanic
         val fixedCount = if (function.variadic) function.parameters.size - 1 else function.parameters.size
         if ((!function.variadic && arguments.size != fixedCount) ||
             (function.variadic && (arguments.size < fixedCount || (expandedVariadic && arguments.size != function.parameters.size)))) {
@@ -427,6 +428,8 @@ class Interpreter(
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } finally {
             if (!defersRun && currentCoroutineContext().isActive) env.runDefers()
+            if (panicState.activePanic == null && priorActivePanic != null && !priorActivePanic.recovered)
+                panicState.activePanic = priorActivePanic
             panicState.recoverAllowed = priorRecoverAllowed
         }
     }
@@ -4228,6 +4231,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
         suspend fun runDefers() {
+            val panicAtStart = panicState.activePanic
             val actions = deferredCalls.asReversed().toList()
             deferredCalls.clear()
             var panicFromDefer: PanicSignal? = null
@@ -4249,6 +4253,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 }
                 if (panicState.activePanic == null && panicFromDefer?.recovered == true) panicFromDefer = null
             }
+            if (panicState.activePanic == null && panicAtStart != null && !panicAtStart.recovered)
+                panicState.activePanic = panicAtStart
             panicFromDefer?.takeUnless { it.recovered }?.let { throw it }
         }
         fun set(name: String, value: Any?) {
