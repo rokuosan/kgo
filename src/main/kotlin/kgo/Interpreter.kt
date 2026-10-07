@@ -3879,7 +3879,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
             return elementPointer(values, index, elementType)
         }
-        override fun equals(other: Any?) = other is GoArray && namedType == other.namedType && values.size == other.values.size &&
+        override fun equals(other: Any?) = other is GoArray && namedType == other.namedType &&
+            (namedType == null || packagePath == other.packagePath) && values.size == other.values.size &&
             values.indices.all { goEqual(values[it], other.values[it]) }
         override fun hashCode() = values.hashCode()
     }
