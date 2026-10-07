@@ -1891,7 +1891,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         unsafeIntrinsicName(call.function, env)?.let { name ->
             val argument = call.arguments.singleOrNull() ?: throw RuntimeGoError("unsafe intrinsic requires one argument")
-            return GoInteger(unsafeIntrinsicValue(name, argument, env), NamedGoType("int"))
+            return GoInteger(unsafeIntrinsicValue(name, argument, env), NamedGoType("uintptr"))
         }
         val builtinName = (call.function as? NameExpression)?.name
         if (builtinName in setOf("len", "cap") && builtinName?.let {
@@ -3175,7 +3175,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             in integerTypeNames -> {
                 val converted = when (value) {
-                    is GoPointer -> if (target.name == "uintptr") unsafeAddress(value)
+                    is GoPointer -> if (underlying(type) == NamedGoType("uintptr")) unsafeAddress(value)
                         else throw RuntimeGoError("cannot convert pointer to $type")
                     is Long -> value
                     is GoInteger -> value.value

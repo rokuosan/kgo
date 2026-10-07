@@ -1989,7 +1989,7 @@ class TypeChecker(
             if (unsafeName == "Offsetof" && selectorPath(call.arguments.single()) == null)
                 error("unsafe.Offsetof requires a struct field selector")
             expressionType(call.arguments.single(), scope)
-            return listOf(NamedGoType("int"))
+            return listOf(NamedGoType("uintptr"))
         }
         if (target is SelectorExpression) {
             val importedType = importedPackageType(target, scope)
@@ -2424,8 +2424,8 @@ class TypeChecker(
             else -> false
         }
         val unsafePointerConversion = (isUnsafePointerType(from) &&
-            (underlying(to) is PointerGoType || isPredeclaredUintptr(to))) ||
-            (isUnsafePointerType(to) && (underlying(from) is PointerGoType || isPredeclaredUintptr(from)))
+            (underlying(to) is PointerGoType || isUintptrType(to))) ||
+            (isUnsafePointerType(to) && (underlying(from) is PointerGoType || isUintptrType(from)))
         return numericConversion ||
             unsafePointerConversion ||
             (isString(from) && (isString(to) || isByteOrRuneSlice(to))) ||
@@ -3061,7 +3061,7 @@ class TypeChecker(
     }
     private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType && !type.name.startsWith("#")
     private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
-    private fun isPredeclaredUintptr(type: GoTypeSyntax) = type == NamedGoType("uintptr") && "uintptr" !in typeDeclarations
+    private fun isUintptrType(type: GoTypeSyntax) = underlying(type) == NamedGoType("uintptr")
     private fun isUntyped(type: GoTypeSyntax) = type is NamedGoType && type.name.startsWith("#untyped-")
     private fun isBuiltinType(name: String) = name in builtinTypes || name == "error"
     private fun isNumeric(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {

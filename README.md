@@ -47,9 +47,9 @@ The `math` import exposes the Go 1.0 constants and function signatures. JVM math
 operations handle the elementary functions, while Apache Commons Math provides
 error and gamma functions; Bessel Y functions use an in-runtime approximation.
 The `unsafe` import implements Go 1.0's `Sizeof`, `Alignof`, and `Offsetof`
-intrinsics, `Maxalign`, and `Pointer` using a fixed 64-bit Go data layout on
-the JVM. Intrinsic arguments are type-checked but not evaluated, and their
-`int` results can be used as constants. Pointer and `uintptr` conversions use
+intrinsics and `Pointer` using a fixed 64-bit Go data layout on the JVM.
+Intrinsic arguments are type-checked but not evaluated, and their `uintptr`
+results can be used as constants. Pointer and `uintptr` conversions use
 interpreter-managed addresses.
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
