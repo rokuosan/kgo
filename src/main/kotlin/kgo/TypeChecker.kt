@@ -1000,7 +1000,7 @@ class TypeChecker(
         statement.clauses.forEachIndexed { clauseIndex, clause ->
             val lastStatementIndex = clause.statements.indexOfLast { it != EmptyStatement }
             clause.statements.forEachIndexed { statementIndex, child ->
-                val branch = child as? BranchStatement
+                val branch = unwrapLabels(child) as? BranchStatement
                 if (branch?.kind == TokenKind.FALLTHROUGH) {
                     if (clauseIndex == statement.clauses.lastIndex || statementIndex != lastStatementIndex)
                         error("fallthrough statement out of place")
