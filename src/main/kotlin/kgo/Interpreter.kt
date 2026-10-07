@@ -2562,6 +2562,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is BigInteger -> NamedGoType("int")
         is GoMap -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: MapGoType(value.keyType, value.valueType)
         is FunctionValue -> value.type ?: value.owner.checkedFunctionType(value.function)
+        is MethodValue -> value.owner.checkedFunctionType(value.function)
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> NamedGoType("int")
@@ -2994,6 +2995,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else if (value is GoChannel && actual is ChannelGoType)
             value.retype(actual.element, actual.direction, namedTypeName(type), type, namedTypePackage(type))
         else if (value is FunctionValue && actual is FunctionGoType) value.copy(type = type)
+        else if (value is MethodValue && actual is FunctionGoType) value
         else if (value is MethodExpressionValue && actual is FunctionGoType) value.copy(type = type)
         else if (value is GoStruct && actual is StructGoType) {
             val fields = linkedMapOf<String, Any?>()
@@ -3147,6 +3149,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         is FunctionGoType -> when (value) {
             is FunctionValue -> value.copy(type = type)
+            is MethodValue -> value
             is MethodExpressionValue -> value.copy(type = type)
             is BuiltinValue -> value.copy(type = type)
             null, is GoNilValue -> GoNilValue(type)
@@ -4041,7 +4044,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun runtimeComparable(value: Any?): Boolean = when (value) {
-        is GoSlice, is GoMap, is FunctionValue, is MethodExpressionValue, is BuiltinValue -> false
+        is GoSlice, is GoMap, is FunctionValue, is MethodValue, is MethodExpressionValue,
+        is RuntimeErrorMethodValue, is BuiltinValue -> false
         is GoNilValue -> when (underlying(value.type)) {
             is SliceGoType, is MapGoType, is FunctionGoType -> false
             else -> true
