@@ -480,7 +480,9 @@ class TypeChecker(
         is ParenthesizedExpression -> referencedNames(expression.expression)
         is CompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
         is ElidedCompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
-        is FunctionLiteralExpression -> emptySet()
+        is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
+            expression.parameters, expression.resultNames, expression.body
+        )
     }
 
     private fun addFunctionDependencies(references: MutableSet<String>) {
