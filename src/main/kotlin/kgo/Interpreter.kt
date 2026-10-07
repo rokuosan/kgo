@@ -637,22 +637,29 @@ class Interpreter(
                     }, (receiver.pointeeType?.let { underlying(it) as? ArrayGoType })?.element)
                 }
                 is GoMap -> {
-                    val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
-                        defaultRuneValue(key, target.index, env) else key
-                    val mapKey = mapKey(mapIndex, receiver.keyType)
                     RuntimeTarget(
-                        { mapValue(receiver, mapKey) },
-                        { receiver.values[mapKey] = copyForType(it, receiver.valueType) },
+                        {
+                            val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
+                                defaultRuneValue(key, target.index, env) else key
+                            mapValue(receiver, mapKey(mapIndex, receiver.keyType))
+                        },
+                        {
+                            val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
+                                defaultRuneValue(key, target.index, env) else key
+                            receiver.values[mapKey(mapIndex, receiver.keyType)] = copyForType(it, receiver.valueType)
+                        },
                         receiver.valueType
                     )
                 }
                 is GoNilValue -> {
                     val mapType = underlying(receiver.type) as? MapGoType
                         ?: throw RuntimeGoError("cannot assign through index")
-                    val mapIndex = if (underlying(mapType.key) is InterfaceGoType)
-                        defaultRuneValue(key, target.index, env) else key
-                    mapKey(mapIndex, mapType.key)
-                    RuntimeTarget({ zeroValue(mapType.value) }, { throw RuntimeGoError("assignment to entry in nil map") }, mapType.value)
+                    RuntimeTarget({ zeroValue(mapType.value) }, {
+                        val mapIndex = if (underlying(mapType.key) is InterfaceGoType)
+                            defaultRuneValue(key, target.index, env) else key
+                        mapKey(mapIndex, mapType.key)
+                        throw RuntimeGoError("assignment to entry in nil map")
+                    }, mapType.value)
                 }
                 else -> throw RuntimeGoError("cannot assign through index")
             }
@@ -663,15 +670,25 @@ class Interpreter(
                 if (path != null) importedRuntimePackages[path]?.exportedVariableTarget(target.field)?.let { return it }
             }
             val receiver = evaluate(target.receiver, env)
-            val field = pointerToStructField(receiver, target.field)
-            RuntimeTarget({ field.get() }, { value -> field.set(copyForType(value, field.pointeeType ?: runtimeType(field.get()) ?: NamedGoType("<unknown>"))) }, field.pointeeType)
+            val type = staticExpressionType(target, env)
+            RuntimeTarget(
+                { pointerToStructField(receiver, target.field).get() },
+                { value ->
+                    val field = pointerToStructField(receiver, target.field)
+                    field.set(copyForType(value, field.pointeeType ?: type ?: runtimeType(field.get()) ?: NamedGoType("<unknown>")))
+                },
+                type
+            )
         }
         is UnaryExpression -> {
             if (target.operator != TokenKind.MUL) throw RuntimeGoError("invalid assignment target")
-            val pointer = evaluate(target.operand, env) as? GoPointer ?: throw RuntimeGoError("dereference of non-pointer")
-            RuntimeTarget({ pointer.get() }, { value ->
-                pointer.set(copyForType(value, pointer.pointeeType ?: runtimeType(pointer.get()) ?: NamedGoType("<unknown>")))
-            }, pointer.pointeeType)
+            val pointerValue = evaluate(target.operand, env)
+            val type = staticExpressionType(target, env)
+            fun pointer() = pointerValue as? GoPointer ?: throw RuntimeGoError("dereference of non-pointer")
+            RuntimeTarget({ pointer().get() }, { value ->
+                val resolved = pointer()
+                resolved.set(copyForType(value, resolved.pointeeType ?: type ?: runtimeType(resolved.get()) ?: NamedGoType("<unknown>")))
+            }, type)
         }
         else -> throw RuntimeGoError("invalid assignment target")
     }
