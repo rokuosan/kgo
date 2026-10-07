@@ -2517,8 +2517,12 @@ class TypeChecker(
             left is MapGoType && right is MapGoType -> sameType(left.key, right.key) && sameType(left.value, right.value)
             left is ChannelGoType && right is ChannelGoType -> left.direction == right.direction && sameType(left.element, right.element)
             left is StructGoType && right is StructGoType -> {
-                val leftFields = left.fields.flatMap { field -> (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag) } }
-                val rightFields = right.fields.flatMap { field -> (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag) } }
+                val leftFields = left.fields.flatMap { field ->
+                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { Triple(it, field.type, field.tag) }
+                }
+                val rightFields = right.fields.flatMap { field ->
+                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { Triple(it, field.type, field.tag) }
+                }
                 leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (a, b) ->
                     a.first == b.first && a.third.orEmpty() == b.third.orEmpty() && sameType(a.second, b.second)
                 }

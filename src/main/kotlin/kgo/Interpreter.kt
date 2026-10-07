@@ -798,10 +798,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 a.direction == b.direction && sameRuntimeType(a.element, b.element)
             a is StructGoType && b is StructGoType -> {
                 val leftFields = a.fields.flatMap { field ->
-                    (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag.orEmpty()) }
+                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
+                        .map { Triple(it, field.type, field.tag.orEmpty()) }
                 }
                 val rightFields = b.fields.flatMap { field ->
-                    (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag.orEmpty()) }
+                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
+                        .map { Triple(it, field.type, field.tag.orEmpty()) }
                 }
                 leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (leftField, rightField) ->
                     leftField.first == rightField.first && leftField.third == rightField.third &&
