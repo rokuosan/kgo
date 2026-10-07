@@ -458,7 +458,7 @@ class Interpreter(
         fun predeclare(statement: Statement) {
             when (statement) {
                 is DeclarationStatement -> statement.declarations.filterIsInstance<TypeDeclaration>()
-                    .forEach { defineLocalType(it, env, resolveDefinition = false) }
+                    .forEach { defineLocalType(it, env) }
                 is LabeledStatement -> predeclare(statement.statement)
                 else -> Unit
             }
