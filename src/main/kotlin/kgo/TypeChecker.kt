@@ -1804,12 +1804,65 @@ class TypeChecker(
     }
 
     private fun methodExpressionDeclaration(type: GoTypeSyntax, name: String): FunctionDeclaration? {
-        val base = methodBaseName(type) ?: return null
-        val pointer = type is PointerGoType
-        return methods.values.singleOrNull { function ->
-            val receiverType = function.receiver?.type ?: return@singleOrNull false
-            function.name == name && methodBaseName(receiverType) == base && (pointer || receiverType !is PointerGoType)
+        if (type is PointerGoType && underlying(type.element) is InterfaceGoType) return null
+        val actual = underlying(type)
+        if (actual is InterfaceGoType) return null
+        val target = packageMethodKey(name)
+        data class SearchNode(val type: GoTypeSyntax, val pointer: Boolean, val ancestors: Set<String>)
+        var level = listOf(SearchNode(type, type is PointerGoType, emptySet()))
+        while (level.isNotEmpty()) {
+            val declarations = mutableListOf<FunctionDeclaration>()
+            var candidates = 0
+            val next = mutableListOf<SearchNode>()
+            level.forEach { node ->
+                val named = (node.type as? PointerGoType)?.element as? QualifiedGoType
+                    ?: node.type as? QualifiedGoType
+                if (named != null) {
+                    val imported = importedPackages[named.packageName]
+                    val foreignType = if (node.pointer) PointerGoType(NamedGoType(named.name)) else NamedGoType(named.name)
+                    imported?.methodSet(foreignType)?.forEach { (methodName, _) ->
+                        if (methodName == target) candidates++
+                    }
+                }
+                when (val nodeType = selectorBaseType(node.type)) {
+                    is InterfaceGoType -> if (target in interfaceMethods(nodeType)) candidates++
+                    is StructGoType -> {
+                        val baseName = methodBaseName(node.type)
+                        if (baseName != null) methods.values.forEach { method ->
+                            val receiverType = method.receiver?.type ?: return@forEach
+                            if (method.name != name || methodBaseName(receiverType) != baseName ||
+                                receiverType is PointerGoType && !node.pointer) return@forEach
+                            declarations += method
+                            candidates++
+                        }
+                        nodeType.fields.filter { it.names.isEmpty() }.forEach { field ->
+                            val embedded = field.type
+                            val key = embedded.toString()
+                            if (key !in node.ancestors) next += SearchNode(
+                                embedded,
+                                node.pointer || embedded is PointerGoType,
+                                node.ancestors + key
+                            )
+                        }
+                    }
+                    else -> {
+                        val baseName = methodBaseName(node.type)
+                        if (baseName != null) methods.values.forEach methodLoop@{ method ->
+                            val receiverType = method.receiver?.type ?: return@methodLoop
+                            if (method.name != name || methodBaseName(receiverType) != baseName ||
+                                receiverType is PointerGoType && !node.pointer) return@methodLoop
+                            declarations += method
+                            candidates++
+                        }
+                    }
+                }
+            }
+            if (candidates > 0) {
+                return if (candidates == 1) declarations.singleOrNull() else null
+            }
+            level = next
         }
+        return null
     }
 
     private fun recordMethodDependency(function: FunctionDeclaration) {
