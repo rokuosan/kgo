@@ -427,10 +427,13 @@ class Interpreter(
             env.runDefers()
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } finally {
-            if (!defersRun && currentCoroutineContext().isActive) env.runDefers()
-            if (panicState.activePanic == null && priorActivePanic != null && !priorActivePanic.recovered)
-                panicState.activePanic = priorActivePanic
-            panicState.recoverAllowed = priorRecoverAllowed
+            try {
+                if (!defersRun && currentCoroutineContext().isActive) env.runDefers()
+            } finally {
+                if (panicState.activePanic == null && priorActivePanic != null && !priorActivePanic.recovered)
+                    panicState.activePanic = priorActivePanic
+                panicState.recoverAllowed = priorRecoverAllowed
+            }
         }
     }
 
