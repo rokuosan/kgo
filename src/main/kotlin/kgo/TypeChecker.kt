@@ -2998,8 +2998,9 @@ class TypeChecker(
     private fun isBoolean(type: GoTypeSyntax) = underlying(type) == boolType || type == untypedBool
     private fun isNilable(type: GoTypeSyntax) = when (underlying(type)) { is PointerGoType, is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType, is InterfaceGoType -> true; else -> false }
     private fun isComparable(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
-        // Go 1.0 excludes arrays and structs from comparisons and map keys.
-        is SliceGoType, is MapGoType, is FunctionGoType, is ArrayGoType, is StructGoType -> false
+        is SliceGoType, is MapGoType, is FunctionGoType -> false
+        is ArrayGoType -> isComparable(t.element)
+        is StructGoType -> t.fields.all { isComparable(it.type) }
         else -> true
     }
     private fun defaultType(type: GoTypeSyntax) = when (type) {

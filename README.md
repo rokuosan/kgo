@@ -23,9 +23,9 @@ receiver dispatch. Method expressions on named types and pointers expose the
 receiver as their first function argument.
 Method calls are supported, while bound method values are rejected because
 they were added after Go 1.0.
-Arrays and structs copy at value-transfer points; slices, maps, channels, and
-pointers keep their reference semantics. Under Go 1.0, arrays and structs are
-not comparable and cannot be used as map keys.
+Array and struct comparisons use Go value equality, including when they are used
+as map keys. Arrays and structs copy at value-transfer points; slices, maps,
+channels, and pointers keep their reference semantics.
 Function literals capture their surrounding variables, and variadic functions
 accept both individual arguments and slice expansion with `...`.
 Named result parameters are local variables; empty `return` uses their current
