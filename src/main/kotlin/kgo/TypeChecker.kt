@@ -2017,8 +2017,6 @@ class TypeChecker(
                         if (!sameType(destination.element, source.element)) error("copy slice element types do not match")
                     destination is SliceGoType && isString(types[1]) ->
                         if (!isPredeclaredByteType(destination.element)) error("copy from string requires a byte slice")
-                    destination == nilType && (source is SliceGoType || isString(types[1])) -> Unit
-                    source == nilType && destination is SliceGoType -> Unit
                     else -> error("copy requires slices, or a byte slice and string")
                 }
                 listOf(intType)
