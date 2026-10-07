@@ -2111,7 +2111,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         return GoExactComplex(exactRational(args[0]), exactRational(args[1]))
                     val type = if (args.filterIsInstance<GoFloat>().any { underlying(it.type) == NamedGoType("float32") })
                         NamedGoType("complex64") else NamedGoType("complex128")
-                    return GoComplex(real(args[0]), real(args[1]), type)
+                    val real = real(args[0])
+                    val imaginary = real(args[1])
+                    return if (type == NamedGoType("complex64"))
+                        GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), type)
+                    else GoComplex(real, imaginary, type)
                 }
                 "real" -> return when (val value = args.singleOrNull()) {
                     is GoExactComplex -> value.real
