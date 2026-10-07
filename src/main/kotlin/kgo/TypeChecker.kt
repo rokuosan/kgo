@@ -335,7 +335,7 @@ class TypeChecker(
             val type = when (standardPackageName(path)) {
                 "fmt" -> GoFmtPackage.functionType(name)
                 "math" -> GoMathPackage.memberType(name)
-                "unsafe" -> GoUnsafePackage.functionType(name)
+                "unsafe" -> GoUnsafePackage.memberType(name)
                 else -> null
             } ?: importedPackages[path]?.let { imported ->
                 imported.exportedFunctionType(name, path) ?: imported.exportedConstant(name, path)?.type
@@ -353,15 +353,21 @@ class TypeChecker(
         dotImportPaths.firstNotNullOfOrNull { path -> importedConstant(path, name)?.let { path to it } }
 
     private fun dotImportedType(name: String): QualifiedGoType? = dotImportPaths.firstNotNullOfOrNull { path ->
-        importedPackages[path]?.takeIf { it.hasExportedType(name) }?.let {
+        if (standardPackageName(path) == "unsafe" && name in GoUnsafePackage.exportedTypes) {
+            usedDotImportPaths += path
+            QualifiedGoType(path, name)
+        } else importedPackages[path]?.takeIf { it.hasExportedType(name) }?.let {
             usedDotImportPaths += path
             QualifiedGoType(path, name)
         }
     }
 
-    private fun importedPackageType(expression: SelectorExpression): QualifiedGoType? {
+    private fun importedPackageType(expression: SelectorExpression, scope: Scope): QualifiedGoType? {
         val alias = (expression.receiver as? NameExpression)?.name ?: return null
+        if (scope.getOrNull(alias) != null || scope.typeBinding(alias) != null) return null
         val path = importedPackagePath(alias) ?: return null
+        if (standardPackageName(path) == "unsafe" && expression.field in GoUnsafePackage.exportedTypes)
+            return QualifiedGoType(path, expression.field)
         return importedPackages[path]?.takeIf { it.hasExportedType(expression.field) }
             ?.let { QualifiedGoType(path, expression.field) }
     }
@@ -1602,7 +1608,11 @@ class TypeChecker(
             return when (standardPackageName(path)) {
                 "fmt" -> GoFmtPackage.functionType(expression.field) ?: error("undefined fmt identifier ${expression.field}")
                 "math" -> GoMathPackage.memberType(expression.field) ?: error("undefined math identifier ${expression.field}")
-                "unsafe" -> GoUnsafePackage.functionType(expression.field) ?: error("undefined unsafe identifier ${expression.field}")
+                "unsafe" -> {
+                    if (expression.field in GoUnsafePackage.exportedTypes)
+                        error("type unsafe.${expression.field} is not an expression")
+                    GoUnsafePackage.memberType(expression.field) ?: error("undefined unsafe identifier ${expression.field}")
+                }
                 else -> importedPackages[path]?.let { imported ->
                     imported.exportedFunctionType(expression.field, path) ?: imported.exportedConstant(expression.field, path)?.type
                         ?: imported.exportedVariableType(expression.field, path)
@@ -1681,7 +1691,7 @@ class TypeChecker(
             resolveLocalType(scope.typeBinding(expression.name)?.let(::NamedGoType) ?: NamedGoType(expression.name), scope)
         }
         is ParenthesizedExpression -> methodExpressionReceiver(expression.expression, scope)
-        is SelectorExpression -> importedPackageType(expression)
+        is SelectorExpression -> importedPackageType(expression, scope)
         is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
             methodExpressionReceiver(expression.operand, scope)?.let(::PointerGoType)
         } else null
@@ -1799,6 +1809,8 @@ class TypeChecker(
         is NamedGoType -> scope.typeBinding(type.name)?.let(::NamedGoType) ?: dotImportedType(type.name) ?: type
         is QualifiedGoType -> {
             val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
+            if (standardPackageName(path) == "unsafe" && type.name == "Pointer")
+                return QualifiedGoType(path, type.name)
             if (importedPackages[path]?.hasExportedType(type.name) != true)
                 error("undefined imported type ${type.packageName}.${type.name}")
             QualifiedGoType(path, type.name)
@@ -1977,12 +1989,12 @@ class TypeChecker(
             if (unsafeName == "Offsetof" && selectorPath(call.arguments.single()) == null)
                 error("unsafe.Offsetof requires a struct field selector")
             expressionType(call.arguments.single(), scope)
-            return listOf(NamedGoType("uintptr"))
+            return listOf(NamedGoType("int"))
         }
         if (target is SelectorExpression) {
-            val importedType = importedPackageType(target)
+            val importedType = importedPackageType(target, scope)
             if (importedType != null) {
-                if (call.arguments.size != 1) error("conversion requires one argument")
+                if (call.arguments.size != 1 || call.expandLastArgument) error("conversion requires one argument")
                 validateType(importedType)
                 val from = expressionType(call.arguments.single(), scope)
                 if (!convertible(from, importedType, isConstantExpression(call.arguments.single(), scope)))
@@ -1992,7 +2004,7 @@ class TypeChecker(
             }
         }
         if (target is TypeExpression) {
-            if (call.arguments.size != 1) error("conversion requires one argument")
+            if (call.arguments.size != 1 || call.expandLastArgument) error("conversion requires one argument")
             val to = resolveLocalType(target.type, scope)
             validateType(to)
             val from = expressionType(call.arguments.single(), scope)
@@ -2004,7 +2016,7 @@ class TypeChecker(
         if (typeNameTarget != null && scope.getOrNull(typeNameTarget.name) == null) {
             if (isTypeName(typeNameTarget.name, scope)) {
                 val localType = scope.typeBinding(typeNameTarget.name)?.let(::NamedGoType)
-                if (call.arguments.size != 1) error("conversion requires one argument")
+                if (call.arguments.size != 1 || call.expandLastArgument) error("conversion requires one argument")
                 val from = expressionType(call.arguments.single(), scope)
                 val to = resolveLocalType(localType ?: NamedGoType(typeNameTarget.name), scope)
                 validateType(to)
@@ -2411,7 +2423,10 @@ class TypeChecker(
             (isInteger(from) || isFloatArgument(from)) && (isInteger(to) || isFloatArgument(to)) -> true
             else -> false
         }
+        val unsafePointerConversion = (isUnsafePointerType(from) && (to is PointerGoType || isInteger(to))) ||
+            (isUnsafePointerType(to) && (from is PointerGoType || isInteger(from)))
         return numericConversion ||
+            unsafePointerConversion ||
             (isString(from) && (isString(to) || isByteOrRuneSlice(to))) ||
             (isInteger(from) && isString(to)) ||
             (isByteOrRuneSlice(from) && isString(to))
@@ -2458,6 +2473,7 @@ class TypeChecker(
             }
             is QualifiedGoType -> {
                 val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
+                if (standardPackageName(path) == "unsafe" && type.name == "Pointer") return
                 if (importedPackages[path]?.hasExportedType(type.name) != true)
                     error("undefined imported type ${type.packageName}.${type.name}")
             }
@@ -2690,8 +2706,11 @@ class TypeChecker(
             else expression.name in setOf("true", "false") || dotImportedConstant(expression.name) != null ||
                 dotImportedConstantRational(expression.name) != null
         is SelectorExpression -> expression.receiver is NameExpression &&
+            scope.getOrNull(expression.receiver.name) == null && scope.typeBinding(expression.receiver.name) == null &&
             (packagePaths[expression.receiver.name]?.let { standardPackageName(it) == "math" &&
                 GoMathPackage.constant(expression.field) != null } == true ||
+                packagePaths[expression.receiver.name]?.let { standardPackageName(it) == "unsafe" &&
+                    GoUnsafePackage.constant(expression.field) != null } == true ||
                 packagePaths[expression.receiver.name]?.let { importedConstant(it, expression.field) != null } == true)
         is ParenthesizedExpression -> isConstantExpression(expression.expression, scope)
         is UnaryExpression -> expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR) &&
@@ -2722,9 +2741,11 @@ class TypeChecker(
             dotImportedConstantRational(expression.name) else null
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
-            val path = alias?.let(::importedPackagePath)
+            val path = alias?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }?.let(::importedPackagePath)
             if (path != null && standardPackageName(path) == "math")
                 GoMathPackage.constant(expression.field)?.let(GoRational::decimal)
+            else if (path != null && standardPackageName(path) == "unsafe")
+                GoUnsafePackage.constant(expression.field)?.let(GoRational::of)
             else path?.let { importedConstant(it, expression.field)?.rational }
         }
         is LiteralExpression -> when (expression.token.kind) {
@@ -2773,6 +2794,7 @@ class TypeChecker(
 
     private fun dotImportedConstantRational(name: String): GoRational? = dotImportPaths.firstNotNullOfOrNull { path ->
         if (standardPackageName(path) == "math") GoMathPackage.constant(name)?.let(GoRational::decimal)
+        else if (standardPackageName(path) == "unsafe") GoUnsafePackage.constant(name)?.let(GoRational::of)
         else importedConstant(path, name)?.rational
     }
 
@@ -2979,7 +3001,7 @@ class TypeChecker(
             val conversion = when (val target = expression.function) {
                 is TypeExpression -> true
                 is NameExpression -> scope.getOrNull(target.name) == null && isTypeName(target.name, scope)
-                is SelectorExpression -> importedPackageType(target) != null
+                is SelectorExpression -> importedPackageType(target, scope) != null
                 else -> false
             }
             !conversion || expression.arguments.any { containsCallOrReceive(it, scope) }
@@ -3032,10 +3054,12 @@ class TypeChecker(
             }
         is QualifiedGoType -> importedPackages[type.packageName]?.let { imported ->
             imported.externalizeType(imported.underlying(NamedGoType(type.name)), type.packageName)
-        } ?: type
+        } ?: if (type.packageName == "unsafe" && type.name == "Pointer")
+            PointerGoType(InterfaceGoType(emptyList())) else type
         else -> type
     }
     private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType && !type.name.startsWith("#")
+    private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
     private fun isUntyped(type: GoTypeSyntax) = type is NamedGoType && type.name.startsWith("#untyped-")
     private fun isBuiltinType(name: String) = name in builtinTypes || name == "error"
     private fun isNumeric(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
@@ -3094,7 +3118,7 @@ class TypeChecker(
     private fun isTypeConversion(expression: Expression, scope: Scope): Boolean = when (val target = expression.unparenthesized()) {
         is TypeExpression -> true
         is NameExpression -> scope.getOrNull(target.name) == null && isTypeName(target.name, scope)
-        is SelectorExpression -> importedPackageType(target) != null
+        is SelectorExpression -> importedPackageType(target, scope) != null
         else -> false
     }
     private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
@@ -3119,7 +3143,7 @@ class TypeChecker(
             is SelectorExpression -> {
                 if ((expression.receiver as? NameExpression)?.name?.let(scope::getOrNull) != null)
                     error("${expression.receiver} is not a package")
-                importedPackageType(expression) ?: error("make or new requires a type argument")
+                importedPackageType(expression, scope) ?: error("make or new requires a type argument")
             }
             else -> error("make or new requires a type argument")
         }

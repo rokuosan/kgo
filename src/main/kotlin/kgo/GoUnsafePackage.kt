@@ -4,15 +4,26 @@ import java.math.BigInteger
 
 /** Go 1.0 unsafe intrinsics and the 64-bit data layout used by this JVM target. */
 internal object GoUnsafePackage {
-    private val uintptr = NamedGoType("uintptr")
+    private val int = NamedGoType("int")
     private val any = InterfaceGoType(emptyList())
 
     private val functions = setOf("Sizeof", "Alignof", "Offsetof")
+    private val types = setOf("Pointer")
 
-    val exportedNames: Set<String> get() = functions
+    val exportedNames: Set<String> get() = functions + types + "Maxalign"
+    val exportedTypes: Set<String> get() = types
+
+    fun constant(name: String): BigInteger? = if (name == "Maxalign") BigInteger.valueOf(8) else null
+
+    fun memberType(name: String): GoTypeSyntax? = when {
+        functionType(name) != null -> functionType(name)
+        name == "Pointer" -> QualifiedGoType("unsafe", name)
+        constant(name) != null -> int
+        else -> null
+    }
 
     fun functionType(name: String): FunctionGoType? = if (name in functions)
-        FunctionGoType(listOf(ParameterSyntax(null, any)), listOf(uintptr)) else null
+        FunctionGoType(listOf(ParameterSyntax(null, any)), listOf(int)) else null
 
     data class Layout(val size: Long, val align: Long)
 

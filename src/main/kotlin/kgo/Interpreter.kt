@@ -123,6 +123,9 @@ class Interpreter(
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val globals = Environment()
     private val elementPointers = IdentityHashMap<MutableList<Any?>, MutableMap<Int, GoPointer>>()
+    private val unsafeAddressByLocation = IdentityHashMap<Any, Long>()
+    private val unsafePointerByAddress = mutableMapOf<Long, GoPointer>()
+    private var nextUnsafeAddress = 0x10000L
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
     private val functionImports = IdentityHashMap<FunctionDeclaration, RuntimeImports>()
@@ -1517,7 +1520,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         BuiltinValue(expression.name, GoFmtPackage.functionType(expression.name))
                     "math" in env.imports.dotPackages && expression.name in GoMathPackage.exportedNames -> evaluateMathPackageMember(expression.name)
                     "unsafe" in env.imports.dotPackages && expression.name in GoUnsafePackage.exportedNames ->
-                        BuiltinValue("unsafe.${expression.name}", GoUnsafePackage.functionType(expression.name))
+                        evaluateUnsafePackageMember(expression.name)
                     else -> when (expression.name) {
                     "true" -> true
                     "false" -> false
@@ -1580,7 +1583,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 env.imports.packages[expression.receiver.name] == "math") evaluateMathPackageMember(expression.field)
             else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name] == "unsafe")
-                BuiltinValue("unsafe.${expression.field}", GoUnsafePackage.functionType(expression.field))
+                evaluateUnsafePackageMember(expression.field)
             else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name]?.let(importedRuntimePackages::containsKey) == true) {
                 val path = env.imports.packages.getValue(expression.receiver.name)
@@ -1888,7 +1891,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         unsafeIntrinsicName(call.function, env)?.let { name ->
             val argument = call.arguments.singleOrNull() ?: throw RuntimeGoError("unsafe intrinsic requires one argument")
-            return GoInteger(unsafeIntrinsicValue(name, argument, env), NamedGoType("uintptr"))
+            return GoInteger(unsafeIntrinsicValue(name, argument, env), NamedGoType("int"))
         }
         val builtinName = (call.function as? NameExpression)?.name
         if (builtinName in setOf("len", "cap") && builtinName?.let {
@@ -1977,7 +1980,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             when {
                 binding?.value is TypeValue -> binding.value.type
                 binding == null -> env.imports.dotPackages.firstOrNull { path ->
-                    target.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty()
+                    target.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
+                        path == "unsafe" && target.name in GoUnsafePackage.exportedTypes
                 }?.let { path -> QualifiedGoType(path, target.name) }
                     ?: target.name.takeIf { it in builtinTypes }?.let(::NamedGoType)
                 else -> null
@@ -1985,8 +1989,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         is SelectorExpression -> {
             val alias = (target.receiver as? NameExpression)?.name
-            val path = alias?.let(env.imports.packages::get)
-            if (path != null && target.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
+            val path = alias?.takeIf { !env.contains(it) && env.typeBinding(it) == null }?.let(env.imports.packages::get)
+            if (path == "unsafe" && target.field in GoUnsafePackage.exportedTypes)
+                QualifiedGoType(path, target.field)
+            else if (path != null && target.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
                 QualifiedGoType(path, target.field) else null
         }
         else -> null
@@ -2382,7 +2388,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             imported.typeDefinitions[type.name]?.let { definition ->
                 imported.externalizeRuntimeType(imported.underlying(definition), type.packageName)
             }
-        } ?: type
+        } ?: if (type.packageName == "unsafe" && type.name == "Pointer")
+            PointerGoType(InterfaceGoType(emptyList())) else type
         else -> type
     }
 
@@ -2496,12 +2503,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoSlice -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: SliceGoType(value.elementType)
         is GoChannel -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: ChannelGoType(value.elementType, value.direction)
         is GoPointer -> {
-            val pointedType = if (value.isNil) null else runtimeType(value.get())
+            val pointedType = if (value.isNil || value.rawAddress != null && value.locationIdentity == null) null else runtimeType(value.get())
             val qualifiedPointedType = pointedType as? QualifiedGoType
             val elementType = if (qualifiedPointedType != null &&
                 (value.pointeeType == null || namedTypeName(value.pointeeType) == qualifiedPointedType.name))
                 qualifiedPointedType else value.pointeeType ?: pointedType
-            elementType?.let(::PointerGoType)
+            value.valueType ?: elementType?.let(::PointerGoType)
         }
         is GoNilValue -> value.type
         is GoComplex -> value.type
@@ -2532,6 +2539,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         GoMathPackage.constant(name) != null -> GoRational.decimal(GoMathPackage.constant(name)!!)
         GoMathPackage.functionType(name) != null -> BuiltinValue("math.$name", GoMathPackage.functionType(name))
         else -> throw RuntimeGoError("undefined math identifier $name")
+    }
+
+    private fun evaluateUnsafePackageMember(name: String): Any? = when {
+        GoUnsafePackage.functionType(name) != null -> BuiltinValue("unsafe.$name", GoUnsafePackage.functionType(name))
+        name == "Pointer" -> TypeValue(QualifiedGoType("unsafe", name))
+        GoUnsafePackage.constant(name) != null -> GoInteger(GoUnsafePackage.constant(name)!!.toLong(), NamedGoType("int"))
+        else -> throw RuntimeGoError("undefined unsafe identifier $name")
     }
 
     private fun mathCall(name: String, args: List<Any?>): Any? {
@@ -2924,13 +2938,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun copyForType(value: Any?, type: GoTypeSyntax): Any? {
         val actual = underlying(type)
         val copied = if (value == null) when (actual) {
-            is PointerGoType -> GoPointer.nil(actual.element)
+            is PointerGoType -> GoPointer.nil(actual.element, type)
             is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
             else -> null
         } else if (value is GoBoolean && actual == NamedGoType("bool")) GoBoolean(value.value, type)
         else if (value is Boolean && actual == NamedGoType("bool")) GoBoolean(value, type)
         else if (value is GoString && actual == NamedGoType("string")) GoString(value.bytes.copyOf(), type)
-        else if (value is GoPointer && actual is PointerGoType) value.retype(actual.element)
+        else if (value is GoPointer && actual is PointerGoType) value.retype(actual.element, type)
         else if (value is GoArray && actual is ArrayGoType)
             GoArray(actual.element, value.values.mapTo(mutableListOf()) { copyForType(it, actual.element) },
                 namedTypeName(type), type, namedTypePackage(type))
@@ -3052,8 +3066,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun convert(type: GoTypeSyntax, value: Any?): Any? = when (val target = underlying(type)) {
         is PointerGoType -> when (value) {
-            is GoPointer -> value.retype(target.element)
-            null, is GoNilValue -> GoPointer.nil(target.element)
+            is GoPointer -> value.retype(target.element, type)
+            is GoInteger -> if (isUnsafePointerType(type)) unsafePointer(value.value, target.element, type)
+                else throw RuntimeGoError("cannot convert value to $type")
+            is Long -> if (isUnsafePointerType(type)) unsafePointer(value, target.element, type)
+                else throw RuntimeGoError("cannot convert value to $type")
+            null, is GoNilValue -> GoPointer.nil(target.element, type)
             else -> throw RuntimeGoError("cannot convert value to $type")
         }
         is ArrayGoType -> {
@@ -3157,6 +3175,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             in integerTypeNames -> {
                 val converted = when (value) {
+                    is GoPointer -> if (target.name == "uintptr") unsafeAddress(value)
+                        else throw RuntimeGoError("cannot convert pointer to $type")
                     is Long -> value
                     is GoInteger -> value.value
                     is BigInteger -> value.toLong()
@@ -3197,6 +3217,69 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
         setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+
+    private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
+
+    private fun unsafeAddress(pointer: GoPointer): Long {
+        if (pointer.isNil) return 0L
+        pointer.rawAddress?.let { return it }
+        val identity = pointer.locationIdentity ?: throw RuntimeGoError("pointer has no address")
+        synchronized(unsafeAddressByLocation) {
+            return unsafeAddressByLocation.getOrPut(identity) {
+                val address = nextUnsafeAddress
+                nextUnsafeAddress = Math.addExact(nextUnsafeAddress, 8L)
+                unsafePointerByAddress[address] = pointer
+                registerUnsafeSubaddresses(pointer, address, mutableSetOf())
+                address
+            }
+        }
+    }
+
+    private fun registerUnsafeSubaddresses(pointer: GoPointer, base: Long, ancestors: MutableSet<String>) {
+        val identity = pointer.locationIdentity ?: return
+        unsafeAddressByLocation.putIfAbsent(identity, base)
+        unsafePointerByAddress.putIfAbsent(base, pointer)
+        val type = pointer.pointeeType?.let(::underlying) ?: return
+        val addressable = runCatching { pointer.get() }.getOrNull()
+        val arrayLength: (Expression) -> BigInteger = { integerLiteral(it, globals) }
+        when {
+            type is StructGoType && addressable is GoStruct -> {
+                val key = type.toString()
+                if (!ancestors.add(key)) return
+                type.fields.forEach { field ->
+                    val names = field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
+                    names.filter { it.isNotEmpty() && it != "_" }.forEach { name ->
+                        val offset = GoUnsafePackage.fieldOffset(type, name, ::underlying, arrayLength)?.first ?: return@forEach
+                        val child = addressable.pointer(name)
+                        val childAddress = Math.addExact(base, offset)
+                        if (child.locationIdentity != null) unsafeAddressByLocation.putIfAbsent(child.locationIdentity!!, childAddress)
+                        unsafePointerByAddress.putIfAbsent(childAddress, child)
+                        registerUnsafeSubaddresses(child, childAddress, ancestors)
+                    }
+                }
+                ancestors.remove(key)
+            }
+            type is ArrayGoType && addressable is GoArray -> {
+                val count = type.length?.let(arrayLength)?.intValueExact() ?: return
+                val elementLayout = GoUnsafePackage.layout(type.element, ::underlying, arrayLength)
+                repeat(minOf(count, addressable.values.size)) { index ->
+                    val child = addressable.pointerAt(index)
+                    val childAddress = Math.addExact(base, Math.multiplyExact(index.toLong(), elementLayout.size))
+                    if (child.locationIdentity != null) unsafeAddressByLocation.putIfAbsent(child.locationIdentity!!, childAddress)
+                    unsafePointerByAddress.putIfAbsent(childAddress, child)
+                    registerUnsafeSubaddresses(child, childAddress, ancestors)
+                }
+            }
+        }
+    }
+
+    private fun unsafePointer(address: Long, elementType: GoTypeSyntax, pointerType: GoTypeSyntax): GoPointer {
+        if (address == 0L) return GoPointer.nil(elementType, pointerType)
+        synchronized(unsafeAddressByLocation) {
+            return unsafePointerByAddress[address]?.retype(elementType, pointerType)
+                ?: GoPointer.address(address, elementType, pointerType)
+        }
+    }
 
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
         "int8", "uint8", "byte" -> 8
@@ -3434,7 +3517,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 namedTypePackage(type))
         }
         is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
-        is PointerGoType -> GoPointer.nil(actual.element)
+        is PointerGoType -> GoPointer.nil(actual.element, type)
         else -> null
     }
 
@@ -4383,23 +4466,32 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun isBlankStorageKey(key: String) = key.startsWith("\u0000blank:")
-    private class GoPointer(private val location: GoLocation?, val pointeeType: GoTypeSyntax? = null) {
-        val isNil: Boolean get() = location == null
-        fun get(): Any? = location?.get() ?: if (isNil) throw RuntimeGoError("invalid memory address or nil pointer dereference") else null
-        fun retype(type: GoTypeSyntax) = GoPointer(location, type)
+    private class GoPointer(
+        private val location: GoLocation?,
+        val pointeeType: GoTypeSyntax? = null,
+        val rawAddress: Long? = null,
+        val valueType: GoTypeSyntax? = null
+    ) {
+        val isNil: Boolean get() = location == null && (rawAddress == null || rawAddress == 0L)
+        val locationIdentity: Any? get() = location
+        fun get(): Any? = location?.get() ?: if (location == null)
+            throw RuntimeGoError("invalid memory address or nil pointer dereference") else null
+        fun retype(type: GoTypeSyntax, pointerType: GoTypeSyntax? = valueType) = GoPointer(location, type, rawAddress, pointerType)
         fun set(value: Any?) {
             val target = location ?: throw RuntimeGoError("invalid memory address or nil pointer dereference")
             target.set(value)
         }
         override fun equals(other: Any?) = other is GoPointer && when {
             isNil || other.isNil -> isNil && other.isNil
+            location != null && other.location != null -> location === other.location
+            rawAddress != null || other.rawAddress != null -> rawAddress != null && rawAddress == other.rawAddress
             else -> location === other.location
         }
-        override fun hashCode() = if (isNil) 0 else System.identityHashCode(location)
+        override fun hashCode() = if (isNil) 0 else rawAddress?.hashCode() ?: System.identityHashCode(location)
 
         companion object {
             fun reference(get: () -> Any?, set: (Any?) -> Unit, pointeeType: GoTypeSyntax? = null) =
-                GoPointer(GoLocation(get, set), pointeeType)
+                GoPointer(GoLocation(get, set), pointeeType, valueType = pointeeType?.let(::PointerGoType))
             fun cell(
                 value: Any?,
                 pointeeType: GoTypeSyntax? = null,
@@ -4407,7 +4499,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             ) = GoCell(value).let { cell ->
                 reference({ cell.value }, { cell.value = assign(cell.value, it) }, pointeeType)
             }
-            fun nil(pointeeType: GoTypeSyntax) = GoPointer(null, pointeeType)
+            fun nil(pointeeType: GoTypeSyntax, pointerType: GoTypeSyntax? = null) =
+                GoPointer(null, pointeeType, valueType = pointerType ?: PointerGoType(pointeeType))
+            fun address(address: Long, pointeeType: GoTypeSyntax, pointerType: GoTypeSyntax? = null) =
+                GoPointer(null, pointeeType, address, pointerType ?: PointerGoType(pointeeType))
         }
     }
     private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)
