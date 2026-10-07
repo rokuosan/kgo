@@ -4006,7 +4006,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             else -> true
         }
         is GoArray -> value.values.all(::runtimeComparable)
-        is GoStruct -> value.fields.values.all(::runtimeComparable)
+        is GoStruct -> value.fields.entries
+            .filterNot { isBlankStorageKey(it.key) }
+            .all { runtimeComparable(it.value) }
         is GoInterfaceValue -> runtimeComparable(value.value)
         else -> true
     }
