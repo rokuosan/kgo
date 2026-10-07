@@ -25,6 +25,7 @@ class TypeChecker(
     private val sourceImportPath: String? = null
 ) {
     private val typeDeclarations = linkedMapOf<String, GoTypeSyntax>()
+    private val checkedRuntimeTypeDeclarations = linkedMapOf<String, GoTypeSyntax>()
     private val functions = linkedMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val methods = linkedMapOf<String, FunctionDeclaration>()
@@ -188,7 +189,11 @@ class TypeChecker(
         for ((sourceFile, declaration) in declarations) {
             if (declaration is TypeDeclaration) withFileImports(sourceFile) {
                 if (declaration.name == "_") validateType(declaration.type)
-                else validateType(NamedGoType(declaration.name))
+                else {
+                    validateType(NamedGoType(declaration.name))
+                    checkedRuntimeTypeDeclarations[declaration.name] =
+                        externalizeType(typeDeclarations.getValue(declaration.name), null)
+                }
             }
         }
         for ((sourceFile, declaration) in declarations) {
@@ -279,6 +284,9 @@ class TypeChecker(
 
     internal fun exportedNames(): Set<String> =
         packageLevelNames.filterTo(linkedSetOf(), ::isExportedIdentifier)
+
+    internal fun runtimeTypeDefinitions(): Map<String, GoTypeSyntax> =
+        checkedRuntimeTypeDeclarations.toMap()
 
     internal fun exportedFunctionType(name: String, importPath: String? = null): FunctionGoType? =
         if (isExportedIdentifier(name)) functions[name]?.let(::functionType)

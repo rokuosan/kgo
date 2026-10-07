@@ -38,11 +38,17 @@ fun main(args: Array<String>) {
                 checker.checkFiles(imported.files)
                 packageCheckers[imported.importPath] = checker
             }
-            TypeChecker(packageCheckers, sourceDirectory.canonicalPath).checkFiles(sourceGraph.rootFiles)
+            val rootChecker = TypeChecker(packageCheckers, sourceDirectory.canonicalPath)
+            rootChecker.checkFiles(sourceGraph.rootFiles)
             Interpreter(outputBytes = { bytes ->
                 System.out.write(bytes)
                 System.out.flush()
-            }).run(sourceGraph.rootFiles, sourceGraph.packages)
+            }).run(
+                sourceGraph.rootFiles,
+                sourceGraph.packages,
+                rootChecker.runtimeTypeDefinitions(),
+                packageCheckers.mapValues { (_, checker) -> checker.runtimeTypeDefinitions() }
+            )
         }
     } catch (e: ScanError) {
         System.err.println(e.message)

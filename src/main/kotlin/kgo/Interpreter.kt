@@ -133,6 +133,7 @@ class Interpreter(
     private val nextLocalTypeIdentity = AtomicInteger()
     private var importedRuntimePackages: Map<String, Interpreter> = emptyMap()
     private var knownPackageNames: Map<String, String> = emptyMap()
+    private var checkedTypeDefinitions: Map<String, GoTypeSyntax> = emptyMap()
     private var exportedConstantNames: Set<String> = emptySet()
     private var exportedVariableNames: Set<String> = emptySet()
     private var exportedTypeNames: Set<String> = emptySet()
@@ -144,7 +145,12 @@ class Interpreter(
 
     fun run(files: List<GoFile>) = run(files, emptyList())
 
-    internal fun run(files: List<GoFile>, sourcePackages: List<GoSourcePackage>) {
+    internal fun run(
+        files: List<GoFile>,
+        sourcePackages: List<GoSourcePackage>,
+        rootTypeDefinitions: Map<String, GoTypeSyntax> = emptyMap(),
+        importedTypeDefinitions: Map<String, Map<String, GoTypeSyntax>> = emptyMap()
+    ) {
         if (files.isEmpty()) throw RuntimeGoError("no Go source files")
         val packageName = files.first().packageName
         if (files.any { it.packageName != packageName })
@@ -163,11 +169,13 @@ class Interpreter(
                     runtime.goroutines = goroutines
                     runtime.importedRuntimePackages = runtimes.toMap()
                     runtime.knownPackageNames = knownPackageNames
+                    runtime.checkedTypeDefinitions = importedTypeDefinitions[sourcePackage.importPath].orEmpty()
                     runtime.preparePackage(sourcePackage.files)
                     runtime.initializePackage(sourcePackage.files)
                     runtimes[sourcePackage.importPath] = runtime
                 }
                 importedRuntimePackages = runtimes
+                checkedTypeDefinitions = rootTypeDefinitions
                 preparePackage(files)
                 initializePackage(files)
                 val main = functions["main"] ?: throw RuntimeGoError("main function not found")
@@ -218,7 +226,7 @@ class Interpreter(
                 val typeScope = globals.child().also { scope ->
                     scope.imports = declarationImports[it] ?: RuntimeImports()
                 }
-                typeDefinitions[it.name] = resolveRuntimeType(it.type, typeScope)
+                typeDefinitions[it.name] = checkedTypeDefinitions[it.name] ?: resolveRuntimeType(it.type, typeScope)
                 globals.defineType(it.name, NamedGoType(it.name))
             }
         }
