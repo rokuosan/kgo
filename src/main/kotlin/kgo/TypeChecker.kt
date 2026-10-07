@@ -2231,12 +2231,12 @@ class TypeChecker(
             } else if (!isComparable(left) || !isComparable(right)) {
                 error("cannot compare values of type $left and $right")
             }
-            return boolType
+            return comparisonResultType(leftExpression, rightExpression, scope)
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
             if (!((isOrderedNumeric(left) && isOrderedNumeric(right)) || (isString(left) && isString(right)))) error("invalid ordered comparison")
             requireSameOperands(left, right, leftExpression, rightExpression, scope)
-            return boolType
+            return comparisonResultType(leftExpression, rightExpression, scope)
         }
         if (operator == TokenKind.ADD && isString(left) && isString(right)) {
             requireSameOperands(left, right, leftExpression, rightExpression, scope)
@@ -2264,6 +2264,10 @@ class TypeChecker(
         val complex = constantComplex(expression, scope) ?: return false
         return complex.imaginary.numerator.signum() == 0 && complex.real.isInteger()
     }
+
+    private fun comparisonResultType(left: Expression?, right: Expression?, scope: Scope): GoTypeSyntax =
+        if (left != null && right != null && isConstantExpression(left, scope) && isConstantExpression(right, scope))
+            untypedBool else boolType
 
     private fun requireSameOperands(
         left: GoTypeSyntax,
@@ -2318,7 +2322,10 @@ class TypeChecker(
             } else error("left operand of shift must be integer in this context")
         }
         val integralFloatConstant = constantIntegerAssignable(from, to, expression, scope)
-        if (!assignable(from, to) && !integralFloatConstant)
+        val comparisonResultAssignable = (expression?.unparenthesized() as? BinaryExpression)?.operator in
+            setOf(TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ) &&
+            isBoolean(from) && isBoolean(to)
+        if (!assignable(from, to) && !integralFloatConstant && !comparisonResultAssignable)
             error("cannot use $from as $to in $context")
         expression?.let { requireIntegerConstantRepresentable(it, to, scope) }
     }
