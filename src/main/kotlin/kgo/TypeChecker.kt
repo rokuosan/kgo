@@ -2287,7 +2287,7 @@ class TypeChecker(
             return when {
                 f == untypedInt || f == untypedRune -> isNumeric(to) || isUntyped(to)
                 f == untypedFloat -> t is NamedGoType && t.name.startsWith("float") || t is NamedGoType && t.name.startsWith("complex")
-                f == untypedComplex -> t is NamedGoType && t.name.startsWith("complex")
+                f == untypedComplex -> isNumeric(to)
                 f == untypedString -> isString(to)
                 f == untypedBool -> isBoolean(to)
                 else -> false
