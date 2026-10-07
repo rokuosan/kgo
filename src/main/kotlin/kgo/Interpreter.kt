@@ -1542,7 +1542,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (name in struct.fields) matches += struct.pointer(name)
                 struct.embeddedFields.forEach { embeddedName ->
                     val embeddedValue = struct.fields[embeddedName] ?: return@forEach
-                    val key = "${struct.namedType}.$embeddedName"
+                    val key = "${struct.packagePath}:${struct.namedType}.$embeddedName"
                     if (key !in node.ancestors) {
                         val child = if (embeddedValue is GoPointer) embeddedValue else struct.pointer(embeddedName)
                         next += Node(child, node.ancestors + key)
@@ -1607,7 +1607,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 }
                 struct.embeddedFields.forEach { embeddedName ->
                     val embeddedValue = struct.fields[embeddedName] ?: return@forEach
-                    val key = "${struct.namedType}.$embeddedName"
+                    val key = "${struct.packagePath}:${struct.namedType}.$embeddedName"
                     if (key !in node.ancestors) {
                         val child = if (embeddedValue is GoPointer) embeddedValue else struct.pointer(embeddedName)
                         next += Node(child, node.ancestors + key)
@@ -2042,8 +2042,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 }
                 val fieldTypes = fieldList.filter { it.name.isNotEmpty() }.associate { it.storageKey to it.type }
                 val runtimeStructType = resolveRuntimeType(literal.type, env)
-                GoStruct(fields, (runtimeStructType as? NamedGoType)?.name, fieldTypes,
-                    fieldList.filter { it.embedded }.mapTo(linkedSetOf()) { it.storageKey }, runtimeStructType)
+                GoStruct(fields, namedTypeName(runtimeStructType), fieldTypes,
+                    fieldList.filter { it.embedded }.mapTo(linkedSetOf()) { it.storageKey }, runtimeStructType,
+                    namedTypePackage(runtimeStructType))
             }
             else -> throw RuntimeGoError("composite literal for this type is not implemented")
         }
@@ -2174,11 +2175,20 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
         is GoRuntimeErrorValue -> runtimeErrorValueType
         is GoInterfaceValue -> value.dynamicType
-        is GoStruct -> value.namedType?.let(::NamedGoType) ?: value.staticType
+        is GoStruct -> value.namedType?.let { name ->
+            value.packagePath?.takeIf { it != packageIdentity }?.let { QualifiedGoType(it, name) } ?: NamedGoType(name)
+        } ?: value.staticType
         is GoArray -> value.namedType?.let(::NamedGoType) ?: value.type
         is GoSlice -> value.namedType?.let(::NamedGoType) ?: value.type ?: SliceGoType(value.elementType)
         is GoChannel -> value.namedType?.let(::NamedGoType) ?: value.type ?: ChannelGoType(value.elementType, value.direction)
-        is GoPointer -> value.pointeeType?.let(::PointerGoType) ?: runtimeType(value.get())?.let(::PointerGoType)
+        is GoPointer -> {
+            val pointedType = if (value.isNil) null else runtimeType(value.get())
+            val qualifiedPointedType = pointedType as? QualifiedGoType
+            val elementType = if (qualifiedPointedType != null &&
+                (value.pointeeType == null || namedTypeName(value.pointeeType) == qualifiedPointedType.name))
+                qualifiedPointedType else value.pointeeType ?: pointedType
+            elementType?.let(::PointerGoType)
+        }
         is GoNilValue -> value.type
         is GoComplex -> value.type
         is GoFloat -> value.type
@@ -2588,7 +2598,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun copyValue(value: Any?): Any? = when (value) {
         is GoStruct -> GoStruct(
             value.fields.mapValuesTo(linkedMapOf()) { copyValue(it.value) },
-            value.namedType, value.fieldTypes, value.embeddedFields, value.staticType
+            value.namedType, value.fieldTypes, value.embeddedFields, value.staticType, value.packagePath
         )
         is GoArray -> GoArray(value.elementType, value.values.mapTo(mutableListOf(), ::copyValue), value.namedType, value.type)
         is GoInterfaceValue -> GoInterfaceValue(value.dynamicType, copyValue(value.value))
@@ -2624,7 +2634,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 fieldTypes[field.storageKey] = field.type
                 if (field.embedded) embeddedFields += field.storageKey
             }
-            GoStruct(fields, (type as? NamedGoType)?.name, fieldTypes, embeddedFields, type)
+            GoStruct(fields, namedTypeName(type), fieldTypes, embeddedFields, type, namedTypePackage(type))
         }
         else if ((value is BigInteger || value is GoRational || value is GoExactComplex) && actual is InterfaceGoType) defaultConstantValue(value)
         else if (actual is NamedGoType && (actual.name in integerTypeNames || actual.name in setOf("complex64", "complex128", "float32", "float64"))) convert(type, value)
@@ -3083,8 +3093,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     fieldTypes[field.storageKey] = field.type
                 }
             }
-            GoStruct(fields, (type as? NamedGoType)?.name, fieldTypes,
-                structFieldSlots(actual).filter { it.embedded }.mapTo(linkedSetOf()) { it.storageKey }, type)
+            GoStruct(fields, namedTypeName(type), fieldTypes,
+                structFieldSlots(actual).filter { it.embedded }.mapTo(linkedSetOf()) { it.storageKey }, type,
+                namedTypePackage(type))
         }
         is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
         is PointerGoType -> GoPointer.nil(actual.element)
@@ -3096,6 +3107,18 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is QualifiedGoType -> type.name
         is PointerGoType -> embeddedFieldName(type.element)
         else -> ""
+    }
+
+    private fun namedTypeName(type: GoTypeSyntax): String? = when (type) {
+        is NamedGoType -> type.name
+        is QualifiedGoType -> type.name
+        else -> null
+    }
+
+    private fun namedTypePackage(type: GoTypeSyntax): String? = when (type) {
+        is QualifiedGoType -> type.packageName
+        is NamedGoType -> packageIdentity
+        else -> packageIdentity
     }
 
     private fun unexportedFieldPackagePath(field: StructFieldSyntax, name: String): String? {
@@ -3916,14 +3939,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val namedType: String? = null,
         val fieldTypes: Map<String, GoTypeSyntax> = emptyMap(),
         val embeddedFields: Set<String> = emptySet(),
-        val staticType: GoTypeSyntax? = null
+        val staticType: GoTypeSyntax? = null,
+        val packagePath: String? = packageIdentity
     ) {
         private val addresses = mutableMapOf<String, GoPointer>()
         fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
             GoPointer.reference({ fields[field] }, { fields[field] = copyForType(it, fieldTypes[field] ?: NamedGoType("<unknown>")) }, fieldTypes[field])
         }
         override fun equals(other: Any?): Boolean {
-            if (other !is GoStruct || (namedType != other.namedType && namedType != null && other.namedType != null)) return false
+            if (other !is GoStruct || (namedType != null && other.namedType != null &&
+                    (namedType != other.namedType || packagePath != other.packagePath))) return false
             val comparableFields = fields.keys.filterNot(::isBlankStorageKey)
             if (comparableFields.toSet() != other.fields.keys.filterNot(::isBlankStorageKey).toSet()) return false
             return comparableFields.all { goEqual(fields[it], other.fields[it]) }
