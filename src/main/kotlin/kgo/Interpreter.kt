@@ -1947,7 +1947,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         val builtinName = (call.function as? NameExpression)?.name
         if (builtinName in setOf("len", "cap") && builtinName?.let {
-                !env.contains(it) && env.typeBinding(it) == null && !functions.containsKey(it) && !typeDefinitions.containsKey(it)
+                !env.contains(it) && env.typeBinding(it) == null && it !in env.imports.packages &&
+                    !functions.containsKey(it) && !typeDefinitions.containsKey(it)
             } == true &&
             call.arguments.size == 1 && !call.expandLastArgument && !containsCallOrReceive(call.arguments.single(), env)) {
             staticRangeArrayLength(call.arguments.single(), env)?.let { return it.toLong() }
@@ -3717,7 +3718,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 throw RuntimeGoError("array length is not a constant integer expression")
             val name = (expression.function as? NameExpression)?.name
             if (name == "len" || name == "cap") {
-                if (env?.contains(name) == true || globals.contains(name))
+                val scope = env ?: globals
+                if (scope.contains(name) || scope.typeBinding(name) != null || name in scope.imports.packages)
                     throw RuntimeGoError("array length is not a constant integer expression")
                 val operand = expression.arguments.single()
                 if (name == "len") constantStringByteLength(operand, env)?.let { return it }

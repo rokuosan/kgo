@@ -2990,8 +2990,9 @@ class TypeChecker(
         } }
         is CallExpression -> {
             unsafeConstant(expression, scope)?.let { return it }
-            val builtinLength = (expression.function == NameExpression("len") || expression.function == NameExpression("cap")) &&
-                scope.getOrNull((expression.function as NameExpression).name) == null
+            val builtinName = (expression.function as? NameExpression)?.name
+            val builtinLength = builtinName in setOf("len", "cap") && builtinName != null &&
+                scope.getOrNull(builtinName) == null && builtinName !in packagePaths
             val lengthConstant = if (builtinLength &&
                 expression.arguments.size == 1 && !expression.expandLastArgument) {
                 val operand = expression.arguments.single()
