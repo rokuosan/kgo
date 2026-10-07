@@ -257,7 +257,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun exportedVariableTarget(name: String): RuntimeTarget? = if (name in exportedVariableNames) {
         val type = globals.typeOf(name)
-        RuntimeTarget({ globals.get(name) }, { globals.set(name, it) }, type)
+        val externalType = if (type != null && packageIdentity != null)
+            externalizeRuntimeType(type, packageIdentity!!) else type
+        RuntimeTarget({ globals.get(name) }, { globals.set(name, it) }, externalType)
     } else null
 
     private fun exportedVariablePointer(name: String): GoPointer? =
@@ -549,8 +551,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         sourceExpressions: List<Expression>?,
         env: Environment
     ): List<Any?> = values.mapIndexed { index, value ->
-        if (locations[index].type?.let { underlying(it) is InterfaceGoType } == true)
-            defaultRuneValue(value, sourceExpressions?.getOrNull(index), env) else value
+        if (locations[index].type?.let { underlying(it) is InterfaceGoType } == true) {
+            val expression = sourceExpressions?.getOrNull(index)
+            val normalized = defaultRuneValue(value, expression, env)
+            if (normalized == null || normalized is GoInterfaceValue) normalized
+            else {
+                val sourceType = expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) }
+                val dynamicType = sourceType?.takeUnless { it is NamedGoType && it.name.startsWith("#untyped-") }
+                    ?: runtimeType(normalized)
+                if (dynamicType == null) normalized
+                else GoInterfaceValue(canonicalAliasType(dynamicType), copyForType(normalized, dynamicType))
+            }
+        } else value
     }
 
     private fun assignToLocations(
