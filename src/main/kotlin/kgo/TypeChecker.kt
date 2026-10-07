@@ -2291,9 +2291,7 @@ class TypeChecker(
             } else error("left operand of shift must be integer in this context")
         }
         val integralFloatConstant = constantIntegerAssignable(from, to, expression, scope)
-        val comparisonResultAssignable = (expression?.unparenthesized() as? BinaryExpression)?.operator in
-            setOf(TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ) && isBoolean(to)
-        if (!assignable(from, to) && !integralFloatConstant && !comparisonResultAssignable)
+        if (!assignable(from, to) && !integralFloatConstant)
             error("cannot use $from as $to in $context")
         expression?.let { requireIntegerConstantRepresentable(it, to, scope) }
     }
