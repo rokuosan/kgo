@@ -551,18 +551,21 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         sourceExpressions: List<Expression>?,
         env: Environment
     ): List<Any?> = values.mapIndexed { index, value ->
-        if (locations[index].type?.let { underlying(it) is InterfaceGoType } == true) {
-            val expression = sourceExpressions?.getOrNull(index)
-            val normalized = defaultRuneValue(value, expression, env)
-            if (normalized == null || normalized is GoInterfaceValue) normalized
-            else {
-                val sourceType = expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) }
-                val dynamicType = sourceType?.takeUnless { it is NamedGoType && it.name.startsWith("#untyped-") }
-                    ?: runtimeType(normalized)
-                if (dynamicType == null) normalized
-                else GoInterfaceValue(canonicalAliasType(dynamicType), copyForType(normalized, dynamicType))
-            }
-        } else value
+        locations[index].type?.let { type ->
+            boxInterfaceAssignment(value, type, sourceExpressions?.getOrNull(index), env)
+        } ?: value
+    }
+
+    private fun boxInterfaceAssignment(
+        value: Any?, targetType: GoTypeSyntax, expression: Expression?, env: Environment
+    ): Any? {
+        if (underlying(targetType) !is InterfaceGoType) return value
+        val normalized = defaultRuneValue(value, expression, env)
+        if (normalized == null || normalized is GoInterfaceValue) return normalized
+        val sourceType = expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) }
+        val dynamicType = sourceType?.takeUnless { it is NamedGoType && it.name.startsWith("#untyped-") }
+            ?: runtimeType(normalized) ?: return normalized
+        return GoInterfaceValue(canonicalAliasType(dynamicType), copyForType(normalized, dynamicType), this)
     }
 
     private fun assignToLocations(
@@ -1626,7 +1629,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (current is GoInterfaceValue) {
                     if (current.value is GoRuntimeErrorValue && name == "Error")
                         candidates += Candidate(null, null, current, current.value)
-                    else methodDeclaration(current.dynamicType, name)?.let { (owner, method) ->
+                    else (current.implementationOwner ?: this).methodDeclaration(current.dynamicType, name)?.let { (owner, method) ->
                         candidates += Candidate(null, method, current, methodOwner = owner)
                     }
                     return@forEach
@@ -1746,7 +1749,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             when {
                 declaredType != null && underlying(declaredType) is InterfaceGoType ->
-                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                    boxInterfaceAssignment(value, declaredType, call.arguments.getOrNull(index), env)
                 target == BuiltinValue("panic") && index == 0 ->
                     defaultRuneValue(value, call.arguments.getOrNull(index), env)
                 index > 0 && appendElementType?.let { underlying(it) is InterfaceGoType } == true ->
@@ -1869,7 +1872,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     panicState.activePanic = null
                     return when (val value = activePanic.value) {
                         null, is GoInterfaceValue -> value
-                        else -> runtimeType(value)?.let { GoInterfaceValue(canonicalAliasType(it), value) } ?: value
+                        else -> runtimeType(value)?.let { GoInterfaceValue(canonicalAliasType(it), value, this) } ?: value
                     }
                 }
                 "complex" -> {
@@ -2164,7 +2167,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val importPath = owner.packageIdentity ?: return copyForType(value, type)
         if (value is GoInterfaceValue) {
             val dynamicType = owner.externalizeRuntimeType(value.dynamicType, importPath)
-            return GoInterfaceValue(dynamicType, copyForType(value.value, dynamicType))
+            return GoInterfaceValue(dynamicType, copyForType(value.value, dynamicType), value.implementationOwner)
         }
         return copyForType(value, type)
     }
@@ -2227,7 +2230,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun boxInterface(value: Any?, targetType: GoTypeSyntax): Any? {
         if ((underlying(targetType) as? InterfaceGoType) == null || value == null || value is GoInterfaceValue) return value
         val dynamicType = canonicalAliasType(runtimeType(value) ?: return value)
-        return GoInterfaceValue(dynamicType, value)
+        return GoInterfaceValue(dynamicType, value, this)
     }
 
     private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
@@ -2659,7 +2662,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             value.namedType, value.fieldTypes, value.embeddedFields, value.staticType, value.packagePath
         )
         is GoArray -> GoArray(value.elementType, value.values.mapTo(mutableListOf(), ::copyValue), value.namedType, value.type, value.packagePath)
-        is GoInterfaceValue -> GoInterfaceValue(value.dynamicType, copyValue(value.value))
+        is GoInterfaceValue -> GoInterfaceValue(value.dynamicType, copyValue(value.value), value.implementationOwner)
         else -> value
     }
 
@@ -3899,7 +3902,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private enum class GoTrySendResult { SENT, NOT_READY, CLOSED }
     private data class MapLookupResult(val value: Any?, val ok: Boolean)
     private data class GoAssertionResult(val value: Any?, val ok: Boolean, val dynamicType: GoTypeSyntax)
-    private data class GoInterfaceValue(val dynamicType: GoTypeSyntax, val value: Any?)
+    private data class GoInterfaceValue(
+        val dynamicType: GoTypeSyntax,
+        val value: Any?,
+        val implementationOwner: Interpreter? = null
+    )
     private data class GoNilValue(val type: GoTypeSyntax)
     private data class GoComplex(val real: Double, val imaginary: Double, val type: GoTypeSyntax)
     private data class GoFloat(val value: Double, val type: GoTypeSyntax)
