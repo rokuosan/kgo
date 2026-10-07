@@ -2019,26 +2019,26 @@ class TypeChecker(
                 when (underlying(type)) {
                     is SliceGoType -> {
                         if (args.size !in 2..3) error("make slice requires length and optional capacity")
-                        args.drop(1).forEachIndexed { index, expression ->
-                            val sizeType = types[index + 1]
-                            if (!isInteger(sizeType)) error("make size must be integer")
-                            if (isUntyped(sizeType)) requireIntegerConstantRepresentable(expression, intType, scope)
+                        val sizes = args.drop(1).mapIndexed { index, expression ->
+                            requireMakeSize(expression, types[index + 1], scope)
+                        }
+                        if (sizes.size == 2) {
+                            val length = sizes[0]
+                            val capacity = sizes[1]
+                            if (length != null && capacity != null && capacity < length)
+                                error("make slice capacity is smaller than length")
                         }
                     }
                     is MapGoType -> {
                         if (args.size !in 1..2) error("make map accepts at most one size hint")
                         args.getOrNull(1)?.let { expression ->
-                            val sizeType = types[1]
-                            if (!isInteger(sizeType)) error("make size hint must be integer")
-                            if (isUntyped(sizeType)) requireIntegerConstantRepresentable(expression, intType, scope)
+                            requireMakeSize(expression, types[1], scope)
                         }
                     }
                     is ChannelGoType -> {
                         if (args.size !in 1..2) error("make channel accepts at most one buffer size")
                         args.getOrNull(1)?.let { expression ->
-                            val sizeType = types[1]
-                            if (!isInteger(sizeType)) error("make buffer size must be integer")
-                            if (isUntyped(sizeType)) requireIntegerConstantRepresentable(expression, intType, scope)
+                            requireMakeSize(expression, types[1], scope)
                         }
                     }
                     else -> error("make requires slice, map, or channel type")
@@ -2983,6 +2983,14 @@ class TypeChecker(
     }
     private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
         dotImportedType(name) != null || (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
+    private fun requireMakeSize(expression: Expression, type: GoTypeSyntax, scope: Scope): BigInteger? {
+        if (!isInteger(type)) error("make size must be integer")
+        requireIntegerConstantRepresentable(expression, intType, scope)
+        return constantInteger(expression, scope)?.also { value ->
+            if (value.signum() < 0) error("make size must be non-negative")
+        }
+    }
+
     private fun requireCount(name: String, args: List<Expression>, count: Int, actualCount: Int = args.size) {
         if (actualCount != count) error("$name expects $count arguments")
     }
