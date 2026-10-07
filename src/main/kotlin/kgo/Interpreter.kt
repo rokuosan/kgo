@@ -262,8 +262,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         RuntimeTarget({ globals.get(name) }, { globals.set(name, it) }, externalType)
     } else null
 
-    private fun exportedVariablePointer(name: String): GoPointer? =
-        if (name in exportedVariableNames) globals.pointer(name) else null
+    private fun exportedVariablePointer(name: String): GoPointer? {
+        if (name !in exportedVariableNames) return null
+        val pointer = globals.pointer(name)
+        val type = globals.typeOf(name) ?: runtimeType(pointer.get()) ?: return pointer
+        val externalType = packageIdentity?.let { externalizeRuntimeType(type, it) } ?: type
+        return pointer.retype(externalType)
+    }
 
     private fun methodDeclaration(type: GoTypeSyntax, name: String): Pair<Interpreter, FunctionDeclaration>? {
         methods[methodKey(type, name)]?.let { return this to it }
