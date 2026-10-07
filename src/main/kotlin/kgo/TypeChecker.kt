@@ -1614,7 +1614,6 @@ class TypeChecker(
     private fun isAddressable(expression: Expression, scope: Scope): Boolean = when (expression) {
         is NameExpression -> scope.isVariable(expression.name) || dotImportedVariable(expression.name) != null
         is ParenthesizedExpression -> isAddressable(expression.expression, scope)
-        is CompositeLiteral -> true
         is UnaryExpression -> expression.operator == TokenKind.MUL &&
             underlying(expressionType(expression.operand, scope)) is PointerGoType
         is IndexExpression -> when (val receiver = underlying(expressionType(expression.receiver, scope))) {

@@ -1615,9 +1615,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         }
                     }
                     pointerReceiver && candidate.receiver is GoPointer -> candidate.receiver
-                    pointerReceiver -> if (receiverExpression.unparenthesized() is CompositeLiteral) {
-                        GoPointer.cell(candidate.receiver, runtimeType(candidate.receiver))
-                    } else addressOf(receiverExpression, env)
+                    pointerReceiver -> addressOf(receiverExpression, env)
                     candidate.receiver is GoPointer && candidate.receiver.isNil ->
                         throw RuntimeGoError("invalid memory address or nil pointer dereference")
                     candidate.receiver is GoPointer -> copyValue(dereference(candidate.receiver))
