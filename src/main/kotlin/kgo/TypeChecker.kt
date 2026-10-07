@@ -942,6 +942,7 @@ class TypeChecker(
             is ArrayGoType -> intType to source.element
             is PointerGoType -> when (val pointed = underlying(source.element)) {
                 is ArrayGoType -> intType to pointed.element
+                is MapGoType -> pointed.key to pointed.value
                 else -> error("cannot range over this pointer type")
             }
             is SliceGoType -> intType to source.element
