@@ -4622,6 +4622,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             return comparableFields.all { goEqual(fields[it], other.fields[it]) }
         }
         override fun hashCode(): Int = fields.entries.filterNot { isBlankStorageKey(it.key) }
+            .sortedBy { it.key }
             .fold(0) { hash, (name, value) ->
                 31 * (31 * hash + name.hashCode()) + goHash(value)
             }
