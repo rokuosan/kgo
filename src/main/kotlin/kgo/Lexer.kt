@@ -199,6 +199,7 @@ class Lexer(private val source: String) {
         val start = position()
         val cp = source.codePointAt(offset)
         if (cp == 0) throw ScanError("illegal character NUL", start)
+        if (cp in 0xd800..0xdfff) throw ScanError("illegal UTF-8 encoding", start)
         val count = Character.charCount(cp)
         offset += count
         val byteCount = when {
