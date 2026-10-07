@@ -2220,7 +2220,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is GoComplex -> value.copy(real = -value.real, imaginary = -value.imaginary)
             else -> typeError("unary -", value)
         }
-        TokenKind.NOT -> !booleanValue(value, "!")
+        TokenKind.NOT -> {
+            val result = !booleanValue(value, "!")
+            if (value is GoBoolean) GoBoolean(result, value.type) else result
+        }
         TokenKind.XOR -> when (value) {
             is BigInteger -> value.not()
             is GoInteger -> value.copy(value = wrapInteger(value.value.inv(), value.type))

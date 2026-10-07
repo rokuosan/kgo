@@ -1297,7 +1297,7 @@ class TypeChecker {
             val operand = expressionType(expression.operand, scope)
             when (expression.operator) {
                 TokenKind.ADD, TokenKind.SUB -> { if (!isNumeric(operand)) error("unary operator requires numeric operand"); operand }
-                TokenKind.NOT -> { requireBoolean(operand, "!"); boolType }
+                TokenKind.NOT -> { requireBoolean(operand, "!"); operand }
                 TokenKind.XOR -> { if (!isInteger(operand)) error("^ requires integer operand"); operand }
                 TokenKind.AND -> {
                     if (expression.operand !is CompositeLiteral && !isAddressable(expression.operand, scope))
