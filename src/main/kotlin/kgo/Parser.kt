@@ -548,6 +548,7 @@ class Parser(private val tokens: List<Token>) {
     }
 
     private fun parseType(): GoTypeSyntax = when {
+        match(TokenKind.LPAREN) -> parseType().also { expect(TokenKind.RPAREN) }
         match(TokenKind.MUL) -> PointerGoType(parseType())
         match(TokenKind.LBRACK) -> {
             if (match(TokenKind.RBRACK)) SliceGoType(parseType())
@@ -669,7 +670,7 @@ class Parser(private val tokens: List<Token>) {
             TokenKind.AND_ASSIGN, TokenKind.OR_ASSIGN, TokenKind.XOR_ASSIGN, TokenKind.SHL_ASSIGN,
             TokenKind.SHR_ASSIGN, TokenKind.AND_NOT_ASSIGN)
         private val unaryOperators = setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR, TokenKind.AND, TokenKind.MUL, TokenKind.ARROW)
-        private fun typeStart(kind: TokenKind) = kind in setOf(TokenKind.IDENT, TokenKind.MUL, TokenKind.LBRACK, TokenKind.MAP, TokenKind.CHAN, TokenKind.ARROW, TokenKind.STRUCT, TokenKind.INTERFACE, TokenKind.FUNC)
+        private fun typeStart(kind: TokenKind) = kind in setOf(TokenKind.IDENT, TokenKind.LPAREN, TokenKind.MUL, TokenKind.LBRACK, TokenKind.MAP, TokenKind.CHAN, TokenKind.ARROW, TokenKind.STRUCT, TokenKind.INTERFACE, TokenKind.FUNC)
         private fun precedence(kind: TokenKind) = when (kind) {
             TokenKind.LOR -> 1
             TokenKind.LAND -> 2
