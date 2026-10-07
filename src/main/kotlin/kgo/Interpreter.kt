@@ -2089,7 +2089,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is ArrayGoType -> ArrayGoType(type.length, externalizeRuntimeType(type.element, importPath))
         is MapGoType -> MapGoType(externalizeRuntimeType(type.key, importPath), externalizeRuntimeType(type.value, importPath))
         is ChannelGoType -> ChannelGoType(externalizeRuntimeType(type.element, importPath), type.direction)
-        is StructGoType -> StructGoType(type.fields.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) })
+        is StructGoType -> StructGoType(type.fields.map { field ->
+            field.copy(
+                type = externalizeRuntimeType(field.type, importPath),
+                packagePath = field.packagePath ?: importPath.takeIf { path ->
+                    field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
+                        field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                }
+            )
+        })
         is InterfaceGoType -> InterfaceGoType(type.methods.map { method -> method.copy(
             parameters = method.parameters.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) },
             results = method.results.map { externalizeRuntimeType(it, importPath) },
