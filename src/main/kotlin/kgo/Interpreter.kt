@@ -429,7 +429,6 @@ class Interpreter(
 
     private suspend fun executeBlock(block: BlockStatement, parent: Environment, createScope: Boolean = true) {
         val env = if (createScope) parent.child() else parent
-        predeclareBlockTypes(block, env)
         executeStatementList(block.statements, env)
     }
 
@@ -443,6 +442,8 @@ class Interpreter(
             } catch (jump: GotoSignal) {
                 val target = statements.indexOfFirst { hasLeadingLabel(it, jump.label) }
                 if (target < 0) throw jump
+                env.clearLocalTypes()
+                predeclareTypes(statements.take(target), env)
                 index = target
             }
         }
@@ -451,10 +452,6 @@ class Interpreter(
     private fun hasLeadingLabel(statement: Statement, label: String): Boolean = when (statement) {
         is LabeledStatement -> statement.label == label || hasLeadingLabel(statement.statement, label)
         else -> false
-    }
-
-    private fun predeclareBlockTypes(block: BlockStatement, env: Environment) {
-        predeclareTypes(block.statements, env)
     }
 
     private fun predeclareTypes(statements: List<Statement>, env: Environment) {
@@ -824,7 +821,6 @@ class Interpreter(
         received: GoReceiveResult? = null
     ) {
         val env = parent.child()
-        predeclareTypes(clause.statements, env)
         if (assignment != null && received != null) {
             assignValues(assignment.targets, assignment.operator, expandValues(listOf(received), assignment.targets.size), env)
         }
@@ -855,7 +851,6 @@ class Interpreter(
         while (index < statement.clauses.size) {
             try {
                 val caseScope = scope.child()
-                predeclareTypes(statement.clauses[index].statements, caseScope)
                 executeStatementList(statement.clauses[index].statements, caseScope)
                 return
             } catch (_: FallthroughSignal) {
@@ -891,7 +886,6 @@ class Interpreter(
             else -> (value as? GoInterfaceValue)?.value
         }
         val caseScope = scope.child()
-        predeclareTypes(clause.statements, caseScope)
         if (statement.guard.name != null && statement.guard.name != "_")
             caseScope.define(statement.guard.name, caseValue, singleType ?: interfaceOperandType(statement.guard.expression, scope))
         try {
@@ -4202,6 +4196,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
         fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
         fun defineType(name: String, type: NamedGoType) { namedTypes[name] = type }
+        fun clearLocalTypes() { namedTypes.clear() }
         fun typeBinding(name: String): NamedGoType? = namedTypes[name] ?: parent?.typeBinding(name)
         fun containsLocalType(name: String) = name in namedTypes
         fun pointer(name: String): GoPointer {
