@@ -5,7 +5,7 @@ internal object GoFmtPackage {
     private val any = InterfaceGoType(emptyList())
     private val variadic = ParameterSyntax(null, SliceGoType(any), variadic = true)
     private val int = NamedGoType("#predeclared-int")
-    private val error = NamedGoType("error")
+    private val error = NamedGoType("#predeclared-error")
     private val byte = NamedGoType("#predeclared-uint8")
     private val writer = InterfaceGoType(listOf(
         InterfaceMethodSyntax(

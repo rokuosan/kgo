@@ -1001,6 +1001,7 @@ class Interpreter(
         NamedGoType("uint8") -> if (!typeDefinitions.containsKey("uint8")) predeclaredUInt8RuntimeType else type
         NamedGoType("rune") -> if (!typeDefinitions.containsKey("rune")) predeclaredIntRuntimeType else type
         NamedGoType("int") -> if (!typeDefinitions.containsKey("int")) predeclaredIntRuntimeType else type
+        NamedGoType("error") -> if (!typeDefinitions.containsKey("error")) predeclaredErrorRuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
         is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
@@ -2412,7 +2413,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
-            "error" -> errorInterfaceType
+            "error", "#predeclared-error" -> errorInterfaceType
             else -> type
         }
         is QualifiedGoType -> importedRuntimePackages[type.packageName]?.let { imported ->
@@ -4752,6 +4753,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private class FallthroughSignal : RuntimeException(null, null, false, false)
 
     companion object {
+        private val predeclaredErrorRuntimeType = NamedGoType("#predeclared-error")
         private val predeclaredIntRuntimeType = NamedGoType("#predeclared-int")
         private val predeclaredUInt8RuntimeType = NamedGoType("#predeclared-uint8")
         private val integerTypeNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")

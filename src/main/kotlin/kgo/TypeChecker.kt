@@ -3208,13 +3208,17 @@ class TypeChecker(
     }
 
     private fun underlying(type: GoTypeSyntax, seen: Set<String> = emptySet()): GoTypeSyntax = when (type) {
-        is NamedGoType -> if (type.name in setOf("#predeclared-int", "#predeclared-uint8")) type else typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
-            ?: when (type.name) {
-        "byte" -> predeclaredUint8Type
-                "rune" -> predeclaredIntType
-                "error" -> errorInterfaceType
-                else -> type
-            }
+        is NamedGoType -> when (type.name) {
+            "#predeclared-error" -> errorInterfaceType
+            "#predeclared-int", "#predeclared-uint8" -> type
+            else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
+                ?: when (type.name) {
+                    "byte" -> predeclaredUint8Type
+                    "rune" -> predeclaredIntType
+                    "error" -> errorInterfaceType
+                    else -> type
+                }
+        }
         is QualifiedGoType -> importedPackages[type.packageName]?.let { imported ->
             imported.externalizeType(imported.underlying(NamedGoType(type.name)), type.packageName)
         } ?: if (type.packageName == "unsafe" && type.name == "Pointer")
@@ -3288,6 +3292,7 @@ class TypeChecker(
         NamedGoType("uint8") -> if ("uint8" !in typeDeclarations) predeclaredUint8Type else type
         runeType -> if ("rune" !in typeDeclarations) predeclaredIntType else type
         intType -> if ("int" !in typeDeclarations) predeclaredIntType else type
+        NamedGoType("error") -> if ("error" !in typeDeclarations) predeclaredErrorType else type
         else -> type
     }
     private fun requireBoolean(type: GoTypeSyntax, context: String) { if (!isBoolean(type)) error("$context must be boolean") }
@@ -3414,6 +3419,7 @@ class TypeChecker(
         private val intType = NamedGoType("int")
         private val predeclaredIntType = NamedGoType("#predeclared-int")
         private val predeclaredUint8Type = NamedGoType("#predeclared-uint8")
+        private val predeclaredErrorType = NamedGoType("#predeclared-error")
         private val byteType = NamedGoType("byte")
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")
