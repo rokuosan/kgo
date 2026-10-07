@@ -3197,9 +3197,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else -> value
     }
 
-    private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
-        type == NamedGoType("byte") && !typeDefinitions.containsKey("byte") ||
-            type == NamedGoType("uint8") && !typeDefinitions.containsKey("uint8")
     private fun isByteElementType(type: GoTypeSyntax): Boolean =
         (underlying(type) as? NamedGoType)?.name == "uint8"
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
@@ -3309,7 +3306,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             else -> throw RuntimeGoError("append requires a slice")
         }
         if (expandString && values.singleOrNull() is GoString) {
-            if (!isPredeclaredByteType(slice.elementType)) throw RuntimeGoError("append string expansion requires a byte slice")
+            if (!isByteElementType(slice.elementType)) throw RuntimeGoError("append string expansion requires a byte slice")
             return slice.append((values.single() as GoString).bytes.map { (it.toInt() and 0xff).toLong() })
         }
         return slice.append(values)
@@ -3344,7 +3341,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             null -> emptyList()
             is GoString -> {
-                if (!isPredeclaredByteType(destinationType.element)) throw RuntimeGoError("copy from string requires a byte slice")
+                if (!isByteElementType(destinationType.element)) throw RuntimeGoError("copy from string requires a byte slice")
                 source.bytes.map { (it.toInt() and 0xff).toLong() }
             }
             else -> throw RuntimeGoError("copy source must be a slice or string")

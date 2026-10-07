@@ -2130,7 +2130,7 @@ class TypeChecker(
                 val slice = underlying(types[0]) as? SliceGoType ?: error("append requires slice")
                 if (expandLastArgument) {
                     types.drop(1).dropLast(1).forEachIndexed { i, type -> requireAssignable(type, slice.element, "append", args.getOrNull(i + 1), scope) }
-                    if (!(isString(types.last()) && isPredeclaredByteType(slice.element)))
+                    if (!(isString(types.last()) && isByteElementType(slice.element)))
                         requireAssignable(types.last(), SliceGoType(slice.element), "append slice")
                 } else types.drop(1).forEachIndexed { i, type -> requireAssignable(type, slice.element, "append", args.getOrNull(i + 1), scope) }
                 listOf(types[0])
@@ -2144,7 +2144,7 @@ class TypeChecker(
                         if (!sameType(destination.element, source.element)) error("copy slice element types do not match")
                     destination is SliceGoType && types[1] == nilType -> Unit
                     destination is SliceGoType && isString(types[1]) ->
-                        if (!isPredeclaredByteType(destination.element)) error("copy from string requires a byte slice")
+                        if (!isByteElementType(destination.element)) error("copy from string requires a byte slice")
                     types[0] == nilType && source is SliceGoType -> Unit
                     types[0] == nilType && isString(types[1]) -> Unit
                     else -> error("copy requires slices, or a byte slice and string")
@@ -2457,10 +2457,6 @@ class TypeChecker(
 
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
         (underlying(type) as? NamedGoType)?.name == "int32"
-
-    private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
-        type == NamedGoType("byte") && "byte" !in typeDeclarations ||
-            type == NamedGoType("uint8") && "uint8" !in typeDeclarations
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
         type == NamedGoType("rune") && "rune" !in typeDeclarations ||
