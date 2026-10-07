@@ -2816,7 +2816,7 @@ class TypeChecker(
             containsCallOrReceive(it.value, scope) }
         is ElidedCompositeLiteral -> expression.elements.any { (it.key?.let { key -> containsCallOrReceive(key, scope) } ?: false) ||
             containsCallOrReceive(it.value, scope) }
-        is FunctionLiteralExpression -> true
+        is FunctionLiteralExpression -> false
         else -> false
     }
 

@@ -1840,7 +1840,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             containsCallOrReceive(it.value, env) }
         is ElidedCompositeLiteral -> expression.elements.any { (it.key?.let { key -> containsCallOrReceive(key, env) } ?: false) ||
             containsCallOrReceive(it.value, env) }
-        is FunctionLiteralExpression -> true
+        is FunctionLiteralExpression -> false
         else -> false
     }
 
