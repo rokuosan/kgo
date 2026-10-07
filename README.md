@@ -19,8 +19,8 @@ basic built-ins (`make`, `append`, `copy`, `delete`, `len`, and `cap`) are also
 implemented in the runtime subset. Pointers to arrays support indexing,
 slicing, and ranging. Named struct, scalar, array, slice, map, channel, and
 function types retain method receiver information for value and pointer
-receiver dispatch. Method expressions on named types and pointers expose the
-receiver as their first function argument.
+receiver dispatch. Method expressions on named types, pointers, and interfaces
+expose the receiver as their first function argument.
 Method calls are supported, while bound method values are rejected because
 they were added after Go 1.0.
 Array and struct comparisons use Go value equality, including when they are used
