@@ -1973,8 +1973,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         writeFmtOutput(effectiveArgs.firstOrNull()
                             ?: throw RuntimeGoError("Fprint requires an io.Writer"), rendered, environment)
                     } else {
-                        output(rendered)
-                        fmtWriteResult(encodeGoUtf8Text(rendered).size, null)
+                        output(decodeGoUtf8Text(rendered))
+                        fmtWriteResult(rendered.size, null)
                     }
                 }
                 "Println", "Fprintln" -> {
@@ -1984,8 +1984,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         writeFmtOutput(effectiveArgs.firstOrNull()
                             ?: throw RuntimeGoError("Fprintln requires an io.Writer"), rendered, environment)
                     } else {
-                        output(rendered)
-                        fmtWriteResult(encodeGoUtf8Text(rendered).size, null)
+                        output(decodeGoUtf8Text(rendered))
+                        fmtWriteResult(rendered.size, null)
                     }
                 }
                 else -> if (target.name.startsWith("math.")) return mathCall(target.name.removePrefix("math."), args)
@@ -1995,12 +1995,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         throw RuntimeGoError("cannot call value")
     }
 
-    private fun formatPrintArguments(values: List<Any?>, alwaysSpace: Boolean, newline: Boolean): String = buildString {
+    private fun formatPrintArguments(values: List<Any?>, alwaysSpace: Boolean, newline: Boolean): ByteArray {
+        val bytes = mutableListOf<Byte>()
         values.forEachIndexed { index, value ->
-            if (index > 0 && (alwaysSpace || (!isStringOperand(values[index - 1]) && !isStringOperand(value)))) append(' ')
-            append(stringify(value))
+            if (index > 0 && (alwaysSpace || (!isStringOperand(values[index - 1]) && !isStringOperand(value))))
+                bytes += 0x20.toByte()
+            val actual = if (value is GoInterfaceValue) value.value else value
+            bytes += if (actual is GoString) actual.bytes.toList() else encodeGoUtf8Text(stringify(value)).toList()
         }
-        if (newline) append('\n')
+        if (newline) bytes += 0x0a.toByte()
+        return bytes.toByteArray()
     }
 
     private fun isStringOperand(value: Any?): Boolean {
@@ -2009,10 +2013,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         return underlying(type) == NamedGoType("string")
     }
 
-    private suspend fun writeFmtOutput(writer: Any?, text: String, environment: Environment?): Any {
+    private suspend fun writeFmtOutput(writer: Any?, bytes: ByteArray, environment: Environment?): Any {
         val scope = environment ?: globals
         val method = selectStructMember(writer, "Write", NameExpression("<fmt writer>"), scope)
-        val bytes = encodeGoUtf8Text(text)
         val byteType = NamedGoType("byte")
         val slice = GoSlice(
             byteType,
