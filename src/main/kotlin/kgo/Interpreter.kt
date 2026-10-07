@@ -4111,8 +4111,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is SliceGoType, is MapGoType, is FunctionGoType -> false
             else -> true
         }
-        is GoArray -> value.values.all(::runtimeComparable)
-        is GoStruct -> value.fields.values.all(::runtimeComparable)
+        // Their static field types are comparable. Interface fields may still
+        // panic later when their dynamic values are actually compared.
+        is GoArray, is GoStruct -> true
         is GoInterfaceValue -> runtimeComparable(value.value)
         else -> true
     }
@@ -4132,7 +4133,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             .fold(0) { hash, (name, element) ->
                 31 * (31 * hash + name.hashCode()) + goHash(element)
             }
-        is GoInterfaceValue -> goHash(value.value)
+        is GoInterfaceValue -> {
+            if (!runtimeComparable(value.value)) throw RuntimeGoError("hash of unhashable type")
+            goHash(value.value)
+        }
         else -> value.hashCode()
     }
 
