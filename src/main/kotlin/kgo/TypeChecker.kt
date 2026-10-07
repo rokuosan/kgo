@@ -303,7 +303,15 @@ class TypeChecker(
             is ArrayGoType -> ArrayGoType(current.length, visit(current.element))
             is MapGoType -> MapGoType(visit(current.key), visit(current.value))
             is ChannelGoType -> ChannelGoType(visit(current.element), current.direction)
-            is StructGoType -> StructGoType(current.fields.map { it.copy(type = visit(it.type)) })
+            is StructGoType -> StructGoType(current.fields.map { field ->
+                field.copy(
+                    type = visit(field.type),
+                    packagePath = field.packagePath ?: importPath.takeIf { path ->
+                        field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
+                            field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                    }
+                )
+            })
             is InterfaceGoType -> InterfaceGoType(current.methods.map { method -> method.copy(
                 parameters = method.parameters.map { it.copy(type = visit(it.type)) },
                 results = method.results.map(::visit),
@@ -1740,7 +1748,13 @@ class TypeChecker(
         is MapGoType -> MapGoType(resolveLocalType(type.key, scope), resolveLocalType(type.value, scope))
         is ChannelGoType -> ChannelGoType(resolveLocalType(type.element, scope), type.direction)
         is StructGoType -> StructGoType(type.fields.map { field ->
-            field.copy(type = resolveLocalType(field.type, scope))
+            field.copy(
+                type = resolveLocalType(field.type, scope),
+                packagePath = field.packagePath ?: packageIdentity.takeIf { path ->
+                    field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
+                        field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                }
+            )
         })
         is InterfaceGoType -> InterfaceGoType(
             type.methods.map { method ->
@@ -2504,7 +2518,7 @@ class TypeChecker(
         else "${packageIdentity ?: packageName ?: "<package>"}:$name"
 
     private fun sameType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
-        if (left == right) return true
+        if (left == right && !containsStructLiteral(left)) return true
         if ("byte" !in typeDeclarations && "uint8" !in typeDeclarations &&
             (left == byteType && right == NamedGoType("uint8") || right == byteType && left == NamedGoType("uint8"))) return true
         if ("rune" !in typeDeclarations && "int32" !in typeDeclarations &&
@@ -2518,13 +2532,18 @@ class TypeChecker(
             left is ChannelGoType && right is ChannelGoType -> left.direction == right.direction && sameType(left.element, right.element)
             left is StructGoType && right is StructGoType -> {
                 val leftFields = left.fields.flatMap { field ->
-                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { Triple(it, field.type, field.tag) }
+                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { name ->
+                        Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag)
+                    }
                 }
                 val rightFields = right.fields.flatMap { field ->
-                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { Triple(it, field.type, field.tag) }
+                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { name ->
+                        Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag)
+                    }
                 }
                 leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (a, b) ->
-                    a.first == b.first && a.third.orEmpty() == b.third.orEmpty() && sameType(a.second, b.second)
+                    a.first == b.first && a.second == b.second &&
+                        a.third.second.orEmpty() == b.third.second.orEmpty() && sameType(a.third.first, b.third.first)
                 }
             }
             left is InterfaceGoType && right is InterfaceGoType -> {
@@ -2537,6 +2556,28 @@ class TypeChecker(
             left is FunctionGoType && right is FunctionGoType -> sameSignature(left, right)
             else -> false
         }
+    }
+
+    private fun containsStructLiteral(type: GoTypeSyntax): Boolean = when (type) {
+        is PointerGoType -> containsStructLiteral(type.element)
+        is SliceGoType -> containsStructLiteral(type.element)
+        is ArrayGoType -> containsStructLiteral(type.element)
+        is MapGoType -> containsStructLiteral(type.key) || containsStructLiteral(type.value)
+        is ChannelGoType -> containsStructLiteral(type.element)
+        is StructGoType -> true
+        is InterfaceGoType -> type.methods.any { method ->
+            method.parameters.any { containsStructLiteral(it.type) } || method.results.any(::containsStructLiteral)
+        } || type.embeddedTypes.any(::containsStructLiteral)
+        is FunctionGoType -> type.parameters.any { containsStructLiteral(it.type) } || type.results.any(::containsStructLiteral)
+        else -> false
+    }
+
+    private fun unexportedFieldPackagePath(field: StructFieldSyntax, name: String): String? {
+        if (name.firstOrNull()?.isLowerCase() != true) return null
+        val embeddedType = if (field.names.isEmpty()) field.type.let {
+            if (it is PointerGoType) it.element else it
+        } else null
+        return field.packagePath ?: (embeddedType as? QualifiedGoType)?.packageName ?: packageIdentity ?: packageName
     }
 
     private fun sameArrayLength(left: Expression?, right: Expression?): Boolean {

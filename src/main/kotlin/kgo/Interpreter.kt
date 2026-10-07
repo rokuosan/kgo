@@ -786,7 +786,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun sameRuntimeType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
         val a = canonicalAliasType(left)
         val b = canonicalAliasType(right)
-        if (a == b) return true
+        if (a == b && !containsStructLiteral(a)) return true
         return when {
             a is PointerGoType && b is PointerGoType -> sameRuntimeType(a.element, b.element)
             a is SliceGoType && b is SliceGoType -> sameRuntimeType(a.element, b.element)
@@ -799,15 +799,16 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             a is StructGoType && b is StructGoType -> {
                 val leftFields = a.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
-                        .map { Triple(it, field.type, field.tag.orEmpty()) }
+                        .map { name -> Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag.orEmpty()) }
                 }
                 val rightFields = b.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
-                        .map { Triple(it, field.type, field.tag.orEmpty()) }
+                        .map { name -> Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag.orEmpty()) }
                 }
                 leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (leftField, rightField) ->
-                    leftField.first == rightField.first && leftField.third == rightField.third &&
-                        sameRuntimeType(leftField.second, rightField.second)
+                    leftField.first == rightField.first && leftField.second == rightField.second &&
+                        leftField.third.second == rightField.third.second &&
+                        sameRuntimeType(leftField.third.first, rightField.third.first)
                 }
             }
             a is InterfaceGoType && b is InterfaceGoType -> {
@@ -820,6 +821,20 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             a is FunctionGoType && b is FunctionGoType -> sameFunctionType(a, b)
             else -> false
         }
+    }
+
+    private fun containsStructLiteral(type: GoTypeSyntax): Boolean = when (type) {
+        is PointerGoType -> containsStructLiteral(type.element)
+        is SliceGoType -> containsStructLiteral(type.element)
+        is ArrayGoType -> containsStructLiteral(type.element)
+        is MapGoType -> containsStructLiteral(type.key) || containsStructLiteral(type.value)
+        is ChannelGoType -> containsStructLiteral(type.element)
+        is StructGoType -> true
+        is InterfaceGoType -> type.methods.any { method ->
+            method.parameters.any { containsStructLiteral(it.type) } || method.results.any(::containsStructLiteral)
+        } || type.embeddedTypes.any(::containsStructLiteral)
+        is FunctionGoType -> type.parameters.any { containsStructLiteral(it.type) } || type.results.any(::containsStructLiteral)
+        else -> false
     }
 
     private fun sameRuntimeArrayLength(left: Expression?, right: Expression?): Boolean {
@@ -2108,7 +2123,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is MapGoType -> MapGoType(resolveRuntimeType(type.key, env), resolveRuntimeType(type.value, env))
         is ChannelGoType -> ChannelGoType(resolveRuntimeType(type.element, env), type.direction)
         is StructGoType -> StructGoType(type.fields.map { field ->
-            field.copy(type = resolveRuntimeType(field.type, env))
+            field.copy(
+                type = resolveRuntimeType(field.type, env),
+                packagePath = field.packagePath ?: packageIdentity.takeIf { path ->
+                    field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
+                        field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                }
+            )
         })
         is InterfaceGoType -> InterfaceGoType(
             type.methods.map { method ->
@@ -3067,6 +3088,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is QualifiedGoType -> type.name
         is PointerGoType -> embeddedFieldName(type.element)
         else -> ""
+    }
+
+    private fun unexportedFieldPackagePath(field: StructFieldSyntax, name: String): String? {
+        if (name.firstOrNull()?.isLowerCase() != true) return null
+        val embeddedType = if (field.names.isEmpty()) field.type.let {
+            if (it is PointerGoType) it.element else it
+        } else null
+        return field.packagePath ?: (embeddedType as? QualifiedGoType)?.packageName ?: packageIdentity
     }
 
     private fun structFieldSlots(type: StructGoType): List<RuntimeStructField> =

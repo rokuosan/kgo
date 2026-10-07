@@ -97,7 +97,12 @@ data class CompositeElement(val key: Expression?, val value: Expression)
 
 sealed interface GoTypeSyntax
 data class ParameterSyntax(val name: String?, val type: GoTypeSyntax, val variadic: Boolean = false)
-data class StructFieldSyntax(val names: List<String>, val type: GoTypeSyntax, val tag: String? = null)
+data class StructFieldSyntax(
+    val names: List<String>,
+    val type: GoTypeSyntax,
+    val tag: String? = null,
+    val packagePath: String? = null
+)
 data class InterfaceMethodSyntax(
     val name: String,
     val parameters: List<ParameterSyntax>,
