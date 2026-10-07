@@ -10,7 +10,6 @@ class Lexer(private val source: String) {
 
     fun scan(): List<Token> {
         val tokens = mutableListOf<Token>()
-        if (source.startsWith('\uFEFF')) advance()
         while (true) {
             skipSpaceAndComments(tokens)
             if (offset >= source.length) {
