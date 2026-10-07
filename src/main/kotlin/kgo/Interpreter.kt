@@ -839,6 +839,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             functionType?.results?.singleOrNull()?.let { resolveRuntimeType(it, env) }
         }
+        is BinaryExpression -> when (expression.operator) {
+            TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ -> NamedGoType("bool")
+            TokenKind.LAND, TokenKind.LOR -> staticExpressionType(expression.left, env) ?: staticExpressionType(expression.right, env)
+            else -> null
+        }
         is IndexExpression -> when (val receiver = staticExpressionType(expression.receiver, env)?.let(::underlying)) {
             is ArrayGoType -> receiver.element
             is SliceGoType -> receiver.element
@@ -846,6 +851,25 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             else -> null
         }
         else -> null
+    }
+
+    private fun logicalResultType(
+        leftExpression: Expression,
+        leftValue: Any?,
+        rightExpression: Expression,
+        env: Environment
+    ): GoTypeSyntax? {
+        fun operandType(expression: Expression, value: Any?): GoTypeSyntax? =
+            staticExpressionType(expression, env) ?: when {
+                expression.unparenthesized() is NameExpression &&
+                    (expression.unparenthesized() as NameExpression).name in setOf("true", "false") -> null
+                value is Boolean -> null
+                else -> runtimeType(value)
+            }
+
+        val left = operandType(leftExpression, leftValue)
+        val right = operandType(rightExpression, null)
+        return (left ?: right)?.let { resolveRuntimeType(it, env) }
     }
 
     private fun staticPromotedFieldType(type: StructGoType, name: String, env: Environment): GoTypeSyntax? {
@@ -1122,9 +1146,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         is BinaryExpression -> {
             val left = copyValue(evaluate(expression.left, env))
-            if (expression.operator == TokenKind.LAND && !booleanValue(left, "&&")) false
-            else if (expression.operator == TokenKind.LOR && booleanValue(left, "||")) true
-            else binary(left, expression.operator, copyValue(evaluate(expression.right, env)))
+            if (expression.operator == TokenKind.LAND || expression.operator == TokenKind.LOR) {
+                val leftBoolean = booleanValue(left, expression.operator.name)
+                val result = when {
+                    expression.operator == TokenKind.LAND && !leftBoolean -> false
+                    expression.operator == TokenKind.LOR && leftBoolean -> true
+                    else -> booleanValue(evaluate(expression.right, env), expression.operator.name)
+                }
+                logicalResultType(expression.left, left, expression.right, env)?.let { GoBoolean(result, it) } ?: result
+            } else binary(left, expression.operator, copyValue(evaluate(expression.right, env)))
         }
         is SelectorExpression -> {
             val methodReceiverType = methodExpressionReceiver(expression.receiver, env)

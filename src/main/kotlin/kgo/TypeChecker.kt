@@ -1898,7 +1898,10 @@ class TypeChecker {
         }
         val l = underlying(left); val r = underlying(right)
         if (operator in setOf(TokenKind.LAND, TokenKind.LOR)) {
-            requireBoolean(left, "logical operator"); requireBoolean(right, "logical operator"); return boolType
+            requireBoolean(left, "logical operator")
+            requireBoolean(right, "logical operator")
+            requireSameOperands(left, right, leftExpression, rightExpression, scope)
+            return commonType(left, right)
         }
         if (operator in setOf(TokenKind.EQL, TokenKind.NEQ)) {
             if (!constantOperandsAssignable(left, right, leftExpression, rightExpression, scope))
