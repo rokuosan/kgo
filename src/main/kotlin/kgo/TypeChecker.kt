@@ -3210,6 +3210,7 @@ class TypeChecker(
     private fun underlying(type: GoTypeSyntax, seen: Set<String> = emptySet()): GoTypeSyntax = when (type) {
         is NamedGoType -> when (type.name) {
             "#predeclared-error" -> errorInterfaceType
+            "#predeclared-bool" -> boolType
             "#predeclared-int", "#predeclared-uint8" -> type
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
@@ -3293,6 +3294,7 @@ class TypeChecker(
         runeType -> if ("rune" !in typeDeclarations) predeclaredIntType else type
         intType -> if ("int" !in typeDeclarations) predeclaredIntType else type
         NamedGoType("error") -> if ("error" !in typeDeclarations) predeclaredErrorType else type
+        boolType -> if ("bool" !in typeDeclarations) predeclaredBoolType else type
         else -> type
     }
     private fun requireBoolean(type: GoTypeSyntax, context: String) { if (!isBoolean(type)) error("$context must be boolean") }
@@ -3420,6 +3422,7 @@ class TypeChecker(
         private val predeclaredIntType = NamedGoType("#predeclared-int")
         private val predeclaredUint8Type = NamedGoType("#predeclared-uint8")
         private val predeclaredErrorType = NamedGoType("#predeclared-error")
+        private val predeclaredBoolType = NamedGoType("#predeclared-bool")
         private val byteType = NamedGoType("byte")
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")

@@ -5,7 +5,7 @@ internal object GoMathPackage {
     private val float64 = NamedGoType("float64")
     private val float32 = NamedGoType("float32")
     private val int = NamedGoType("#predeclared-int")
-    private val bool = NamedGoType("bool")
+    private val bool = NamedGoType("#predeclared-bool")
     private val integerConstants = setOf(
         "MaxInt8", "MinInt8", "MaxInt16", "MinInt16", "MaxInt32", "MinInt32", "MaxInt64", "MinInt64",
         "MaxUint8", "MaxUint16", "MaxUint32", "MaxUint64"

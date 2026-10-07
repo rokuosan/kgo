@@ -1002,6 +1002,7 @@ class Interpreter(
         NamedGoType("rune") -> if (!typeDefinitions.containsKey("rune")) predeclaredIntRuntimeType else type
         NamedGoType("int") -> if (!typeDefinitions.containsKey("int")) predeclaredIntRuntimeType else type
         NamedGoType("error") -> if (!typeDefinitions.containsKey("error")) predeclaredErrorRuntimeType else type
+        NamedGoType("bool") -> if (!typeDefinitions.containsKey("bool")) predeclaredBoolRuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
         is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
@@ -2410,11 +2411,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
-        is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
+        is NamedGoType -> when (type.name) {
+            "#predeclared-bool" -> NamedGoType("bool")
+            else -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
             "error", "#predeclared-error" -> errorInterfaceType
             else -> type
+            }
         }
         is QualifiedGoType -> importedRuntimePackages[type.packageName]?.let { imported ->
             imported.typeDefinitions[type.name]?.let { definition ->
@@ -2667,14 +2671,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             "Mod" -> binary { a, b -> a % b }
             "Pow" -> binary(Math::pow)
             "Remainder" -> binary(Math::IEEEremainder)
-            "IsNaN" -> { count(1); java.lang.Double.isNaN(x()) }
+            "IsNaN" -> { count(1); GoBoolean(java.lang.Double.isNaN(x()), predeclaredBoolRuntimeType) }
             "IsInf" -> {
                 count(2)
                 val value = x()
                 val sign = number(args[1], "math.IsInf sign")
-                java.lang.Double.isInfinite(value) && (sign == 0L || sign < 0L && value < 0.0 || sign > 0L && value > 0.0)
+                GoBoolean(java.lang.Double.isInfinite(value) &&
+                    (sign == 0L || sign < 0L && value < 0.0 || sign > 0L && value > 0.0), predeclaredBoolRuntimeType)
             }
-            "Signbit" -> { count(1); java.lang.Double.doubleToRawLongBits(x()) < 0L }
+            "Signbit" -> { count(1); GoBoolean(java.lang.Double.doubleToRawLongBits(x()) < 0L, predeclaredBoolRuntimeType) }
             "Inf" -> { count(1); if (number(args[0], "math.Inf sign") < 0L) Double.NEGATIVE_INFINITY else Double.POSITIVE_INFINITY }
             "NaN" -> { count(0); Double.NaN }
             "Sincos" -> {
@@ -4753,6 +4758,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private class FallthroughSignal : RuntimeException(null, null, false, false)
 
     companion object {
+        private val predeclaredBoolRuntimeType = NamedGoType("#predeclared-bool")
         private val predeclaredErrorRuntimeType = NamedGoType("#predeclared-error")
         private val predeclaredIntRuntimeType = NamedGoType("#predeclared-int")
         private val predeclaredUInt8RuntimeType = NamedGoType("#predeclared-uint8")
