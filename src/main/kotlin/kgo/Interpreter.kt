@@ -1054,27 +1054,14 @@ class Interpreter(
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.get(i))
             }
             is GoPointer -> {
-                when (value.pointeeType?.let(::underlying)) {
-                    is MapGoType -> {
-                        if (value.isNil) throw RuntimeGoError("range over nil pointer")
-                        when (val pointedMap = value.get()) {
-                            is GoMap -> executeMapRange(pointedMap, range, body, loopEnv, labels,
-                                declarationTypes, onlyIndexIsUsed)
-                            is GoNilValue -> Unit // A pointer to a nil map ranges over zero entries.
-                            else -> throw RuntimeGoError("range over pointer requires a map")
-                        }
-                    }
-                    else -> {
-                        val arrayLength = staticRangeArrayLength(range.expression, env)
-                            ?: if (!value.isNil) (value.get() as? GoArray)?.values?.size
-                                ?: throw RuntimeGoError("range over pointer requires an array")
-                            else throw RuntimeGoError("range over nil pointer requires a known array length")
-                        rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index ->
-                            if (onlyIndexIsUsed) listOf(index.toLong()) else {
-                                val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
-                                listOf(index.toLong(), array.values[index])
-                            }
-                        }
+                val arrayLength = staticRangeArrayLength(range.expression, env)
+                    ?: if (!value.isNil) (value.get() as? GoArray)?.values?.size
+                        ?: throw RuntimeGoError("range over pointer requires an array")
+                    else throw RuntimeGoError("range over nil pointer requires a known array length")
+                rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index ->
+                    if (onlyIndexIsUsed) listOf(index.toLong()) else {
+                        val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
+                        listOf(index.toLong(), array.values[index])
                     }
                 }
             }
@@ -1082,34 +1069,22 @@ class Interpreter(
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
             }
             is GoMap -> {
-                executeMapRange(value, range, body, loopEnv, labels, declarationTypes, onlyIndexIsUsed)
+                // Go 1 leaves map iteration order unspecified. Snapshot keys, then
+                // recheck membership and read values as each entry is reached so
+                // deleting an unreached entry suppresses that iteration value.
+                for (key in value.values.keys.toList().shuffled()) {
+                    yield()
+                    if (!value.values.containsKey(key)) continue
+                    val entryValue = if (onlyIndexIsUsed) null else value.values[key]
+                    if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
+                        (if (onlyIndexIsUsed) listOf(copyValue(key.value)) else listOf(copyValue(key.value), entryValue))
+                            .take(range.targets.size), loopEnv, declaredTypes = declarationTypes)
+                    try { executeBlock(body, loopEnv) }
+                    catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
+                    catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
+                }
             }
             else -> throw RuntimeGoError("range over this value is not implemented")
-        }
-    }
-
-    private suspend fun executeMapRange(
-        value: GoMap,
-        range: RangeClause,
-        body: BlockStatement,
-        loopEnv: Environment,
-        labels: Set<String>,
-        declarationTypes: List<GoTypeSyntax>?,
-        onlyIndexIsUsed: Boolean
-    ) {
-        // Go 1 leaves map iteration order unspecified. Snapshot keys, then
-        // recheck membership and read values as each entry is reached so
-        // deleting an unreached entry suppresses that iteration value.
-        for (key in value.values.keys.toList().shuffled()) {
-            yield()
-            if (!value.values.containsKey(key)) continue
-            val entryValue = if (onlyIndexIsUsed) null else value.values[key]
-            if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
-                (if (onlyIndexIsUsed) listOf(copyValue(key.value)) else listOf(copyValue(key.value), entryValue))
-                    .take(range.targets.size), loopEnv, declaredTypes = declarationTypes)
-            try { executeBlock(body, loopEnv) }
-            catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
-            catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
         }
     }
 
@@ -1119,7 +1094,7 @@ class Interpreter(
             is ArrayGoType -> NamedGoType("int") to source.element
             is PointerGoType -> (underlying(source.element) as? ArrayGoType)?.let {
                 NamedGoType("int") to it.element
-            } ?: (underlying(source.element) as? MapGoType)?.let { it.key to it.value }
+            }
             is SliceGoType -> NamedGoType("int") to source.element
             is MapGoType -> source.key to source.value
             is ChannelGoType -> null to source.element

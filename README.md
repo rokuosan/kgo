@@ -5,7 +5,7 @@ An experimental Go 1.0 language implementation targeting the JVM, written in Kot
 The interpreter currently covers a growing Go 1.0 core: declarations and basic
 type syntax, functions, scalar expressions, variables, assignments, `if`, `for`,
 `switch`, `select`, `defer`, channels, goroutines, and `range` over arrays,
-pointers to arrays and maps, slices, maps, strings, and channels.
+pointers to arrays, slices, maps, strings, and channels.
 Complex values, complex arithmetic, and the `complex`, `real`, and `imag`
 built-ins are supported for represented numeric types.
 `panic` and `recover` unwind deferred calls per goroutine, and `recover` succeeds
@@ -17,8 +17,7 @@ concrete numeric type is selected.
 Composite literals, structs, arrays, slices, maps, indexing, slicing, and their
 basic built-ins (`make`, `append`, `copy`, `delete`, `len`, and `cap`) are also
 implemented in the runtime subset. Pointers to arrays support indexing,
-slicing, and ranging; pointers to maps support ranging as specified by Go 1.0.
-Named struct, scalar, array, slice, map, channel, and
+slicing, and ranging. Named struct, scalar, array, slice, map, channel, and
 function types retain method receiver information for value and pointer
 receiver dispatch. Method expressions on named types and pointers expose the
 receiver as their first function argument.
