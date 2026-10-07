@@ -385,10 +385,7 @@ class Parser(private val tokens: List<Token>) {
 
     private fun parseFor(): ForStatement {
         if (at(TokenKind.LBRACE)) return ForStatement(null, null, null, parseBlock())
-        if (match(TokenKind.RANGE)) {
-            val expression = expressionHeader { expression() }
-            return ForStatement(null, null, null, parseBlock(), RangeClause(emptyList(), null, expression))
-        }
+        if (match(TokenKind.RANGE)) fail("range clause requires at least one iteration variable")
         if (match(TokenKind.SEMICOLON)) {
             val condition = if (at(TokenKind.SEMICOLON)) null else expressionHeader { expression() }
             expect(TokenKind.SEMICOLON)
