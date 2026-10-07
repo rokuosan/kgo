@@ -29,7 +29,7 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
         if (path == "fmt" || path == "math") return path
         val directory = resolve(path, importerDirectory)
             ?: throw GoTypeError("cannot locate imported package $path")
-        val identity = if (path.startsWith("./") || path.startsWith("../")) directory.path else path
+        val identity = if (isRelativeImportPath(path)) directory.path else path
         when (states[identity]) {
             2 -> return identity
             1 -> throw GoTypeError("import cycle involving $path")
@@ -63,7 +63,7 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
 
     private fun resolve(path: String, importerDirectory: File): File? {
         val candidates = buildList {
-            if (path.startsWith("./") || path.startsWith("../")) {
+            if (isRelativeImportPath(path)) {
                 add(importerDirectory.resolve(path))
             } else {
                 add(importerDirectory.resolve(path))
@@ -80,6 +80,9 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
             runCatching { candidate.canonicalFile }.getOrNull()
         }.firstOrNull { it.isDirectory }
     }
+
+    private fun isRelativeImportPath(path: String) = path == "." || path == ".." ||
+        path.startsWith("./") || path.startsWith("../")
 
     private fun findModule(directory: File): Pair<File, String>? {
         var current: File? = directory
