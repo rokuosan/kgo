@@ -2563,6 +2563,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoMap -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: MapGoType(value.keyType, value.valueType)
         is FunctionValue -> value.type ?: value.owner.checkedFunctionType(value.function)
         is MethodValue -> value.owner.checkedFunctionType(value.function)
+        is RuntimeErrorMethodValue -> FunctionGoType(emptyList(), listOf(NamedGoType("string")))
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> NamedGoType("int")
@@ -2996,6 +2997,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             value.retype(actual.element, actual.direction, namedTypeName(type), type, namedTypePackage(type))
         else if (value is FunctionValue && actual is FunctionGoType) value.copy(type = type)
         else if (value is MethodValue && actual is FunctionGoType) value
+        else if (value is RuntimeErrorMethodValue && actual is FunctionGoType) value
         else if (value is MethodExpressionValue && actual is FunctionGoType) value.copy(type = type)
         else if (value is GoStruct && actual is StructGoType) {
             val fields = linkedMapOf<String, Any?>()
@@ -3150,6 +3152,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is FunctionGoType -> when (value) {
             is FunctionValue -> value.copy(type = type)
             is MethodValue -> value
+            is RuntimeErrorMethodValue -> value
             is MethodExpressionValue -> value.copy(type = type)
             is BuiltinValue -> value.copy(type = type)
             null, is GoNilValue -> GoNilValue(type)
