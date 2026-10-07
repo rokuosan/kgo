@@ -243,6 +243,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun exportedVariable(name: String): Any? =
         if (name in exportedVariableNames) globals.getOrNull(name) else null
 
+    private fun exportedIdentifierType(name: String): GoTypeSyntax? {
+        if (name !in exportedConstantNames && name !in exportedVariableNames) return null
+        val type = globals.typeOf(name) ?: runtimeType(globals.getOrNull(name)) ?: return null
+        return packageIdentity?.let { externalizeRuntimeType(type, it) } ?: type
+    }
+
+    private fun importedExportedValue(path: String, name: String, value: Any?): Any? {
+        val owner = importedRuntimePackages[path] ?: return value
+        val type = owner.exportedIdentifierType(name) ?: return value
+        return externalizeImportedResult(value, type, owner)
+    }
+
     private fun exportedVariableTarget(name: String): RuntimeTarget? = if (name in exportedVariableNames) {
         val type = globals.typeOf(name)
         RuntimeTarget({ globals.get(name) }, { globals.set(name, it) }, type)
@@ -1349,7 +1361,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 importedRuntimePackages[path]?.exportedFunction(expression.name)
             }
             val dotImportedConstant = env.imports.dotPackages.firstNotNullOfOrNull { path ->
-                importedRuntimePackages[path]?.exportedConstant(expression.name)
+                importedRuntimePackages[path]?.exportedConstant(expression.name)?.let { value ->
+                    importedExportedValue(path, expression.name, value)
+                }
             }
             val dotImportedVariablePath = env.imports.dotPackages.firstOrNull { path ->
                 expression.name in importedRuntimePackages[path]?.exportedVariableNames.orEmpty()
@@ -1362,7 +1376,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 ?: functions[expression.name]?.let { FunctionValue(it, globals, owner = this) }
                 ?: dotImportedFunction
                 ?: dotImportedConstant
-                ?: dotImportedVariablePath?.let { path -> importedRuntimePackages[path]?.exportedVariable(expression.name) }
+                ?: dotImportedVariablePath?.let { path -> importedRuntimePackages[path]?.exportedVariable(expression.name)?.let { value ->
+                    importedExportedValue(path, expression.name, value)
+                } }
                 ?: dotImportedTypePath?.let { path -> TypeValue(QualifiedGoType(path, expression.name)) }
                 ?: when {
                     "fmt" in env.imports.dotPackages && expression.name in GoFmtPackage.exportedNames ->
@@ -1434,8 +1450,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 val imported = importedRuntimePackages.getValue(path)
                 when {
                     imported.exportedFunction(expression.field) != null -> imported.exportedFunction(expression.field)
-                    expression.field in imported.exportedConstantNames -> imported.exportedConstant(expression.field)
-                    expression.field in imported.exportedVariableNames -> imported.exportedVariable(expression.field)
+                    expression.field in imported.exportedConstantNames -> imported.exportedConstant(expression.field)?.let { value ->
+                        importedExportedValue(path, expression.field, value)
+                    }
+                    expression.field in imported.exportedVariableNames -> imported.exportedVariable(expression.field)?.let { value ->
+                        importedExportedValue(path, expression.field, value)
+                    }
                     expression.field in imported.exportedTypeNames -> TypeValue(QualifiedGoType(path, expression.field))
                     else -> throw RuntimeGoError("undefined imported identifier ${expression.field}")
                 }
