@@ -17,6 +17,7 @@ internal data class ExportedConstant(
     val boolean: Boolean?,
     val complex: ConstantComplexValue?
 )
+private data class TypeMethod(val signature: FunctionGoType, val pointerReceiver: Boolean)
 
 /** Static checks for the declaration and statement forms currently represented by the AST. */
 class TypeChecker(private val importedPackages: Map<String, TypeChecker> = emptyMap()) {
@@ -1554,13 +1555,10 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                             val fieldIsVisible = externalNamedType == null || isExportedIdentifier(expression.field)
                             if (fieldIsVisible && expression.field in fieldNames) candidates += Candidate(field.type)
                         }
-                        val named = namedType(node.type)
-                        if (named != null) methods["$named.${expression.field}"]?.let { method ->
-                            val pointerReceiver = method.receiver?.type is PointerGoType
-                            candidates += Candidate(
-                                functionType(method), pointerReceiver && !node.pointer &&
-                                    !isAddressable(expression.receiver, scope), isMethod = true
-                            )
+                        val method = methodType(node.type, expression.field)
+                        if (method != null) {
+                            candidates += Candidate(method.signature, method.pointerReceiver && !node.pointer &&
+                                !isAddressable(expression.receiver, scope), isMethod = true)
                         }
                         actual.fields.filter { it.names.isEmpty() }.forEach { field ->
                             val embedded = field.type
@@ -1600,6 +1598,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
             resolveLocalType(scope.typeBinding(expression.name)?.let(::NamedGoType) ?: NamedGoType(expression.name), scope)
         }
         is ParenthesizedExpression -> methodExpressionReceiver(expression.expression, scope)
+        is SelectorExpression -> importedPackageType(expression)
         is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
             methodExpressionReceiver(expression.operand, scope)?.let(::PointerGoType)
         } else null
@@ -1630,6 +1629,20 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
         val path = packagePaths[alias] ?: return null
         if (standardPackageName(path) in setOf("fmt", "math")) return null
         return importedPackages[path]?.exportedVariableType(expression.field, path)?.let { path to it }
+    }
+
+    private fun methodType(type: GoTypeSyntax, name: String): TypeMethod? {
+        val base = (type as? PointerGoType)?.element ?: type
+        if (base is QualifiedGoType) {
+            if (!isExportedIdentifier(name)) return null
+            val imported = importedPackages[base.packageName] ?: return null
+            val function = imported.methods["${base.name}.$name"] ?: return null
+            return TypeMethod(externalizeType(imported.functionType(function), base.packageName) as FunctionGoType,
+                function.receiver?.type is PointerGoType)
+        }
+        val key = "${namedType(type) ?: return null}.$name"
+        val function = methods[key] ?: return null
+        return TypeMethod(functionType(function), function.receiver?.type is PointerGoType)
     }
 
     private fun requireAssignmentTarget(expression: Expression, scope: Scope, allowBlank: Boolean = true) {
@@ -2422,6 +2435,16 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
             val candidates = linkedMapOf<String, MutableList<FunctionGoType>>()
             val next = mutableListOf<SearchNode>()
             level.forEach { node ->
+                val named = (node.type as? PointerGoType)?.element as? QualifiedGoType
+                    ?: node.type as? QualifiedGoType
+                if (named != null) {
+                    val imported = importedPackages[named.packageName]
+                    val foreignType = if (node.pointer) PointerGoType(NamedGoType(named.name)) else NamedGoType(named.name)
+                    imported?.methodSet(foreignType)?.forEach { (name, signature) ->
+                        if (isExportedIdentifier(name))
+                            candidates.getOrPut(name) { mutableListOf() } += imported.externalizeType(signature, named.packageName) as FunctionGoType
+                    }
+                }
                 when (val nodeType = selectorBaseType(node.type)) {
                     is InterfaceGoType -> interfaceMethods(nodeType).forEach { (name, signature) ->
                         candidates.getOrPut(name) { mutableListOf() } += signature

@@ -237,6 +237,17 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         RuntimeTarget({ globals.get(name) }, { globals.set(name, it) }, type)
     } else null
 
+    private fun methodDeclaration(type: GoTypeSyntax, name: String): Pair<Interpreter, FunctionDeclaration>? {
+        methods[methodKey(type, name)]?.let { return this to it }
+        val base = (type as? PointerGoType)?.element ?: type
+        if (base is QualifiedGoType) {
+            if (name.firstOrNull()?.isUpperCase() != true) return null
+            val owner = importedRuntimePackages[base.packageName] ?: return null
+            owner.methods[owner.methodKey(NamedGoType(base.name), name)]?.let { return owner to it }
+        }
+        return null
+    }
+
     private suspend fun invoke(
         function: FunctionDeclaration,
         arguments: List<Any?>,
@@ -982,11 +993,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is TypeAssertionExpression -> resolveRuntimeType(expression.type, env)
         is SelectorExpression -> {
             val receiverType = staticExpressionType(expression.receiver, env)?.let { resolveRuntimeType(it, env) }
-            val method = receiverType?.let { methods[methodKey(it, expression.field)] }
-            if (method != null) FunctionGoType(method.parameterTypes.mapIndexed { index, type ->
-                ParameterSyntax(method.parameters.getOrNull(index), type,
-                    method.variadic && index == method.parameterTypes.lastIndex)
-            }, method.resultTypes)
+            val method = receiverType?.let { methodDeclaration(it, expression.field) }
+            if (method != null) FunctionGoType(method.second.parameterTypes.mapIndexed { index, type ->
+                ParameterSyntax(method.second.parameters.getOrNull(index), type,
+                    method.second.variadic && index == method.second.parameterTypes.lastIndex)
+            }, method.second.resultTypes)
             else {
                 val struct = receiverType?.let(::underlying).let { if (it is PointerGoType) underlying(it.element) else it }
                 when (struct) {
@@ -1345,13 +1356,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 val receiver = evaluate(expression.receiver, env)
                 if (receiver is GoPointer && receiver.isNil) {
                     val baseType = receiver.pointeeType ?: throw RuntimeGoError("nil pointer has no static type")
-                    val method = methods["${methodKey(baseType, expression.field)}"]
+                    val (owner, method) = methodDeclaration(baseType, expression.field)
                         ?: throw RuntimeGoError("unknown field or method: ${expression.field}")
                     if (method.receiver?.type !is PointerGoType)
                         throw RuntimeGoError("invalid memory address or nil pointer dereference")
-                    MethodValue(method, receiver)
+                    MethodValue(method, receiver, owner)
                 } else if (receiver is GoInterfaceValue) {
-                    val method = methods["${methodKey(receiver.dynamicType, expression.field)}"]
+                    val (owner, method) = methodDeclaration(receiver.dynamicType, expression.field)
                         ?: throw RuntimeGoError("unknown interface method: ${expression.field}")
                     val pointerReceiver = method.receiver?.type is PointerGoType
                     val boundReceiver = when {
@@ -1360,7 +1371,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         receiver.value is GoPointer -> copyValue(dereference(receiver.value))
                         else -> copyValue(receiver.value)
                     }
-                    MethodValue(method, boundReceiver)
+                    MethodValue(method, boundReceiver, owner)
                 } else {
                     selectStructMember(receiver, expression.field, expression.receiver, env)
                 }
@@ -1399,6 +1410,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 ?: if (expression.name in builtinTypes) NamedGoType(expression.name) else null
         }
         is ParenthesizedExpression -> methodExpressionReceiver(expression.expression, env)
+        is SelectorExpression -> {
+            val alias = (expression.receiver as? NameExpression)?.name
+            val path = alias?.let(env.imports.packages::get)
+            if (path != null && expression.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
+                QualifiedGoType(path, expression.field) else null
+        }
         is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
             methodExpressionReceiver(expression.operand, env)?.let(::PointerGoType)
         } else null
@@ -1471,7 +1488,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val owner: GoStruct?,
             val method: FunctionDeclaration?,
             val receiver: Any?,
-            val runtimeError: GoRuntimeErrorValue? = null
+            val runtimeError: GoRuntimeErrorValue? = null,
+            val methodOwner: Interpreter? = null
         )
         var level = listOf(Node(receiver, emptySet()))
         while (level.isNotEmpty()) {
@@ -1480,8 +1498,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             level.forEach { node ->
                 if (node.value is GoPointer && node.value.isNil) {
                     val embeddedType = node.value.pointeeType
-                    if (embeddedType != null) methods[methodKey(embeddedType, name)]?.let {
-                        candidates += Candidate(null, it, node.value)
+                    if (embeddedType != null) methodDeclaration(embeddedType, name)?.let { (owner, method) ->
+                        candidates += Candidate(null, method, node.value, methodOwner = owner)
                     }
                     return@forEach
                 }
@@ -1489,7 +1507,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (current is GoInterfaceValue) {
                     if (current.value is GoRuntimeErrorValue && name == "Error")
                         candidates += Candidate(null, null, current, current.value)
-                    else methods[methodKey(current.dynamicType, name)]?.let { candidates += Candidate(null, it, current) }
+                    else methodDeclaration(current.dynamicType, name)?.let { (owner, method) ->
+                        candidates += Candidate(null, method, current, methodOwner = owner)
+                    }
                     return@forEach
                 }
                 val struct = current as? GoStruct
@@ -1499,13 +1519,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         return@forEach
                     }
                     val valueType = (node.value as? GoPointer)?.pointeeType ?: runtimeType(current) ?: return@forEach
-                    methods[methodKey(valueType, name)]?.let { candidates += Candidate(null, it, node.value) }
+                    methodDeclaration(valueType, name)?.let { (owner, method) ->
+                        candidates += Candidate(null, method, node.value, methodOwner = owner)
+                    }
                     return@forEach
                 }
                 if (name in struct.fields) candidates += Candidate(struct, null, node.value)
-                val receiverType = (node.value as? GoPointer)?.pointeeType
-                    ?: struct.namedType?.let(::NamedGoType)
-                receiverType?.let { methods[methodKey(it, name)] }?.let { candidates += Candidate(null, it, node.value) }
+                val receiverType = (node.value as? GoPointer)?.pointeeType ?: runtimeType(current)
+                receiverType?.let { methodDeclaration(it, name) }?.let { (owner, method) ->
+                    candidates += Candidate(null, method, node.value, methodOwner = owner)
+                }
                 struct.embeddedFields.forEach { embeddedName ->
                     val embeddedValue = struct.fields[embeddedName] ?: return@forEach
                     val key = "${struct.namedType}.$embeddedName"
@@ -1539,7 +1562,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     candidate.receiver is GoPointer -> copyValue(dereference(candidate.receiver))
                     else -> copyValue(candidate.receiver)
                 }
-                return MethodValue(method, methodReceiver)
+                return MethodValue(method, methodReceiver, candidate.methodOwner ?: this)
             }
             level = next
         }
@@ -1692,7 +1715,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
             is MethodValue -> {
-                val values = invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument,
+                val values = target.owner.invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument,
                     panicState = panicState, deferredCall = deferredCall)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
@@ -2353,6 +2376,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun runtimeMethodSet(type: GoTypeSyntax): Map<String, FunctionGoType> {
         // A pointer to an interface does not inherit the interface's method set.
         if (type is PointerGoType && underlying(type.element) is InterfaceGoType) return emptyMap()
+        val qualified = (type as? PointerGoType)?.element as? QualifiedGoType ?: type as? QualifiedGoType
+        if (qualified != null) {
+            val owner = importedRuntimePackages[qualified.packageName]
+            val foreignType = if (type is PointerGoType) PointerGoType(NamedGoType(qualified.name))
+                else NamedGoType(qualified.name)
+            if (owner != null) return owner.runtimeMethodSet(foreignType).filterKeys { it.firstOrNull()?.isUpperCase() == true }
+        }
         val actual = underlying(type)
         if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
         if (type == runtimeErrorValueType) return mapOf(
@@ -3631,7 +3661,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     )
     private data class BuiltinValue(val name: String, val type: GoTypeSyntax? = null)
     private data class TypeValue(val type: GoTypeSyntax)
-    private data class MethodValue(val function: FunctionDeclaration, val receiver: Any?)
+    private data class MethodValue(val function: FunctionDeclaration, val receiver: Any?, val owner: Interpreter)
     private data class MethodExpressionValue(val receiverType: GoTypeSyntax, val name: String, val type: GoTypeSyntax)
     private data class GoMultiValue(val values: List<Any?>)
     private data class GoReceiveResult(val value: Any?, val ok: Boolean)
