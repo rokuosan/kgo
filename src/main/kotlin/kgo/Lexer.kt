@@ -97,7 +97,7 @@ class Lexer(private val source: String) {
             advance()
             kind = TokenKind.IMAG
         }
-        if (!imaginary && kind == TokenKind.INT && source[begin] == '0' && offset - begin > 1 &&
+        if (!hexadecimal && !imaginary && kind == TokenKind.INT && source[begin] == '0' && offset - begin > 1 &&
             source.substring(begin, offset).any { it in '8'..'9' }) {
             throw ScanError("invalid digit in octal literal", start)
         }
