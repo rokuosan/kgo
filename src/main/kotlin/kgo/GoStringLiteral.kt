@@ -96,7 +96,7 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
 }
 
 internal fun encodeGoCodePoint(value: Int): ByteArray {
-    val codePoint = if (value in 0..0x10ffff) value else 0xfffd
+    val codePoint = if (value in 0..0x10ffff && value !in 0xd800..0xdfff) value else 0xfffd
     return when {
         codePoint <= 0x7f -> byteArrayOf(codePoint.toByte())
         codePoint <= 0x7ff -> byteArrayOf(
