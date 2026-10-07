@@ -2655,7 +2655,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
         is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
         is GoStruct -> value.fields.entries.filterNot { isBlankStorageKey(it.key) }
-            .fold(value.namedType?.hashCode() ?: 0) { hash, (name, element) ->
+            .fold(0) { hash, (name, element) ->
             31 * (31 * hash + name.hashCode()) + goHash(element)
         }
         is GoInterfaceValue -> 31 * value.dynamicType.hashCode() + goHash(value.value)
@@ -3082,13 +3082,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             GoPointer.reference({ fields[field] }, { fields[field] = copyForType(it, fieldTypes[field] ?: NamedGoType("<unknown>")) }, fieldTypes[field])
         }
         override fun equals(other: Any?): Boolean {
-            if (other !is GoStruct || namedType != other.namedType) return false
+            if (other !is GoStruct || (namedType != other.namedType && namedType != null && other.namedType != null)) return false
             val comparableFields = fields.keys.filterNot(::isBlankStorageKey)
             if (comparableFields.toSet() != other.fields.keys.filterNot(::isBlankStorageKey).toSet()) return false
             return comparableFields.all { goEqual(fields[it], other.fields[it]) }
         }
-        override fun hashCode(): Int = 31 * (namedType?.hashCode() ?: 0) +
-            fields.filterKeys { !isBlankStorageKey(it) }.hashCode()
+        override fun hashCode(): Int = fields.filterKeys { !isBlankStorageKey(it) }.hashCode()
     }
 
     private fun isBlankStorageKey(key: String) = key.startsWith("\u0000blank:")
