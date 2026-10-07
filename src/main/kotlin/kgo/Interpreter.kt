@@ -3666,10 +3666,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         if (left is GoFloat || right is GoFloat) return real(left) == real(right)
         if (left is Double && right is Double) return left == right
-        if (left is GoArray && right is GoArray)
-            return left.values.size == right.values.size &&
-                left.values.indices.all { goEqual(left.values[it], right.values[it]) }
-        if (left is GoStruct && right is GoStruct) return left == right
+        if (left is GoArray || right is GoArray || left is GoStruct || right is GoStruct)
+            throw RuntimeGoError("comparing uncomparable type ${runtimeType(left) ?: runtimeType(right) ?: "aggregate"}")
         return left == right
     }
 
@@ -3689,8 +3687,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is SliceGoType, is MapGoType, is FunctionGoType -> false
             else -> true
         }
-        is GoArray -> value.values.all(::runtimeComparable)
-        is GoStruct -> value.fields.values.all(::runtimeComparable)
+        is GoArray, is GoStruct -> false
         is GoInterfaceValue -> runtimeComparable(value.value)
         else -> true
     }
@@ -3704,11 +3701,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is Double -> if (value == 0.0) 0 else value.hashCode()
         is GoFloat -> if (value.value == 0.0) 0 else value.value.hashCode()
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
-        is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
-        is GoStruct -> value.fields.entries.filterNot { isBlankStorageKey(it.key) }
-            .fold(0) { hash, (name, element) ->
-            31 * (31 * hash + name.hashCode()) + goHash(element)
-        }
+        is GoArray, is GoStruct -> throw RuntimeGoError("hash of unhashable type")
         is GoInterfaceValue -> 31 * canonicalAliasType(value.dynamicType).hashCode() + goHash(value.value)
         else -> value.hashCode()
     }
