@@ -2300,7 +2300,7 @@ class TypeChecker(
                 val typed = listOf(first, second).firstOrNull { !isUntyped(it) }
                 listOf(when {
                     typed == null -> untypedComplex
-                    underlying(typed) == NamedGoType("float32") -> NamedGoType("complex64")
+                    underlying(typed) in setOf(NamedGoType("float32"), predeclaredFloat32Type) -> NamedGoType("complex64")
                     else -> NamedGoType("complex128")
                 })
             }
@@ -2309,8 +2309,8 @@ class TypeChecker(
                 val type = types.single()
                 if (type == untypedComplex) listOf(untypedFloat)
                 else when (underlying(type)) {
-                    NamedGoType("complex64") -> listOf(NamedGoType("float32"))
-                    NamedGoType("complex128") -> listOf(NamedGoType("float64"))
+                    NamedGoType("complex64") -> listOf(predeclaredFloat32Type)
+                    NamedGoType("complex128") -> listOf(predeclaredFloat64Type)
                     else -> error("$name requires a complex argument")
                 }
             }

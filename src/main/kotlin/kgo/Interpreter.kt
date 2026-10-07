@@ -4200,7 +4200,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else -> typeError("arithmetic", value)
     }
     private fun floatResult(value: Double, complexType: GoTypeSyntax): Any =
-        if (underlying(complexType) == NamedGoType("complex64")) GoFloat(value.toFloat().toDouble(), NamedGoType("float32")) else value
+        if (underlying(complexType) == NamedGoType("complex64"))
+            GoFloat(value.toFloat().toDouble(), predeclaredFloat32RuntimeType)
+        else GoFloat(value, predeclaredFloat64RuntimeType)
     private fun booleanValue(value: Any?, operation: String): Boolean = when (value) {
         is Boolean -> value
         is GoBoolean -> value.value
