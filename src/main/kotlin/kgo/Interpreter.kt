@@ -379,7 +379,8 @@ class Interpreter(
             if (name != null && name != "_") env.define(name, zeroValue(signature.results[index]), signature.results[index])
         }
         val priorRecoverAllowed = panicState.recoverAllowed
-        panicState.recoverAllowed = deferredCall
+        val deferredRecoverAllowed = deferredCall && priorRecoverAllowed
+        panicState.recoverAllowed = deferredRecoverAllowed
         var defersRun = false
         return try {
             executeBlock(body, env, createScope = false)
@@ -394,7 +395,7 @@ class Interpreter(
                 }
             }
             defersRun = true
-            env.runDefers()
+            env.runDefers(deferredRecoverAllowed)
             val values = when {
                 returned.values.isEmpty() && resultNames.isNotEmpty() && resultNames.all { it != null } ->
                     resultNames.mapIndexed { i, name ->
@@ -417,18 +418,19 @@ class Interpreter(
         } catch (panic: PanicSignal) {
             panicState.activePanic = panic
             defersRun = true
-            env.runDefers()
+            env.runDefers(allowRecover = true)
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } catch (failure: RuntimeGoError) {
             val message = failure.message ?: "runtime panic"
             val panic = PanicSignal(GoRuntimeErrorValue(message), message)
             panicState.activePanic = panic
             defersRun = true
-            env.runDefers()
+            env.runDefers(allowRecover = true)
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } finally {
             try {
-                if (!defersRun && currentCoroutineContext().isActive) env.runDefers()
+                if (!defersRun && currentCoroutineContext().isActive)
+                    env.runDefers(deferredRecoverAllowed)
             } finally {
                 if (panicState.activePanic == null && priorActivePanic != null && !priorActivePanic.recovered)
                     panicState.activePanic = priorActivePanic
@@ -4233,14 +4235,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
-        suspend fun runDefers() {
+        suspend fun runDefers(allowRecover: Boolean = false) {
             val panicAtStart = panicState.activePanic
             val actions = deferredCalls.asReversed().toList()
             deferredCalls.clear()
             var panicFromDefer: PanicSignal? = null
             for (action in actions) {
                 val previousPermission = panicState.recoverAllowed
-                panicState.recoverAllowed = true
+                panicState.recoverAllowed = panicState.activePanic != null &&
+                    (allowRecover || panicFromDefer != null)
                 try {
                     action()
                 } catch (panic: PanicSignal) {
@@ -4254,7 +4257,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 } finally {
                     panicState.recoverAllowed = previousPermission
                 }
-                if (panicState.activePanic == null && panicFromDefer?.recovered == true) panicFromDefer = null
+                if (panicState.activePanic == null && panicFromDefer?.recovered == true) {
+                    panicFromDefer = null
+                    if (allowRecover && panicAtStart != null && !panicAtStart.recovered)
+                        panicState.activePanic = panicAtStart
+                }
             }
             if (panicState.activePanic == null && panicAtStart != null && !panicAtStart.recovered)
                 panicState.activePanic = panicAtStart
