@@ -872,6 +872,7 @@ class TypeChecker(
             var added = 0
             names.forEachIndexed { i, name ->
                 if (name == "_") return@forEachIndexed
+                if (scope.containsLocalType(name)) error("$name redeclared in this block")
                 if (scope.containsLocal(name)) {
                     if (scope.isConstant(name)) error("cannot assign to constant $name")
                     requireAssignable(valueTypes[i], scope.get(name), "assignment", statement.values.getOrNull(i), scope)
@@ -2983,6 +2984,7 @@ class TypeChecker(
         fun defineType(name: String, identity: String) { typeNames[name] = identity }
         fun typeBinding(name: String): String? = typeNames[name] ?: parent?.typeBinding(name)
         fun hasBinding(name: String): Boolean = name in values || name in typeNames || parent?.hasBinding(name) == true
+        fun containsLocalType(name: String) = name in typeNames
         fun containsLocal(name: String) = name in values || name in typeNames
         fun get(name: String): GoTypeSyntax = getOrNull(name) ?: throw GoTypeError("undefined: $name")
         fun getOrNull(name: String): GoTypeSyntax? = values[name] ?: parent?.getOrNull(name)

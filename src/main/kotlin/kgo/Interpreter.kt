@@ -546,6 +546,7 @@ class Interpreter(
             names.zip(values).forEachIndexed { index, (name, value) ->
                 if (name == "_") return@forEachIndexed
                 if (!declared.add(name)) throw RuntimeGoError("$name repeated on left side of :=")
+                if (env.containsLocalType(name)) throw RuntimeGoError("$name redeclared in this block")
                 val initialized = defaultConstantValue(value, sourceExpressions?.getOrNull(index), env)
                 if (env.containsLocal(name)) env.set(name, initialized)
                 else env.define(name, initialized, inferredStorageType(
@@ -3866,6 +3867,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
         fun defineType(name: String, type: NamedGoType) { namedTypes[name] = type }
         fun typeBinding(name: String): NamedGoType? = namedTypes[name] ?: parent?.typeBinding(name)
+        fun containsLocalType(name: String) = name in namedTypes
         fun pointer(name: String): GoPointer {
             val owner = owner(name) ?: throw RuntimeGoError("undefined: $name")
             return owner.addresses.getOrPut(name) {
