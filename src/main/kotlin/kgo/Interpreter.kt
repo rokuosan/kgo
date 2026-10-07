@@ -4024,10 +4024,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
             return elementPointer(values, index, elementType)
         }
-        override fun equals(other: Any?) = other is GoArray && namedType == other.namedType &&
-            (namedType == null || packagePath == other.packagePath) && values.size == other.values.size &&
-            values.indices.all { goEqual(values[it], other.values[it]) }
-        override fun hashCode() = values.hashCode()
     }
     private inner class GoSlice(
         val elementType: GoTypeSyntax,
@@ -4113,14 +4109,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 fields[field] = preserveAggregateStorage(fields[field], assigned, fieldType)
             }, fieldTypes[field])
         }
-        override fun equals(other: Any?): Boolean {
-            if (other !is GoStruct || (namedType != null && other.namedType != null &&
-                    (namedType != other.namedType || packagePath != other.packagePath))) return false
-            val comparableFields = fields.keys.filterNot(::isBlankStorageKey)
-            if (comparableFields.toSet() != other.fields.keys.filterNot(::isBlankStorageKey).toSet()) return false
-            return comparableFields.all { goEqual(fields[it], other.fields[it]) }
-        }
-        override fun hashCode(): Int = fields.filterKeys { !isBlankStorageKey(it) }.hashCode()
     }
 
     private fun isBlankStorageKey(key: String) = key.startsWith("\u0000blank:")
