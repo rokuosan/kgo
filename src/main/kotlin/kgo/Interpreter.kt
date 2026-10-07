@@ -2695,7 +2695,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 is Long -> GoFloat(if (target.name == "float32") value.toFloat().toDouble() else value.toDouble(), type)
                 is BigInteger -> value.toDouble().let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
                 is GoRational -> value.toDouble().let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
-                is GoExactComplex -> value.real.toDouble().let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
+                is GoExactComplex -> {
+                    if (value.imaginary.numerator.signum() != 0) throw RuntimeGoError("cannot convert complex value to float")
+                    value.real.toDouble().let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
+                }
+                is GoComplex -> {
+                    if (value.imaginary != 0.0) throw RuntimeGoError("cannot convert complex value to float")
+                    GoFloat(if (target.name == "float32") value.real.toFloat().toDouble() else value.real, type)
+                }
                 is GoInteger -> integerAsDouble(value).let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
                 is Double -> GoFloat(if (target.name == "float32") value.toFloat().toDouble() else value, type)
                 is GoFloat -> GoFloat(if (target.name == "float32") value.value.toFloat().toDouble() else value.value, type)
@@ -2718,6 +2725,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     is GoInteger -> value.value
                     is BigInteger -> value.toLong()
                     is GoRational -> value.integerValue("integer conversion").toLong()
+                    is GoExactComplex -> {
+                        if (value.imaginary.numerator.signum() != 0) throw RuntimeGoError("cannot convert complex value to integer")
+                        value.real.integerValue("integer conversion").toLong()
+                    }
+                    is GoComplex -> {
+                        if (value.imaginary != 0.0 || !value.real.isFinite() || value.real % 1.0 != 0.0)
+                            throw RuntimeGoError("cannot convert complex value to integer")
+                        value.real.toLong()
+                    }
                     is Double -> value.toLong()
                     is GoFloat -> value.value.toLong()
                     else -> throw RuntimeGoError("cannot convert to integer")
