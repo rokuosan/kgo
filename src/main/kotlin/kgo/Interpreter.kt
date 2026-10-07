@@ -3942,7 +3942,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             if (left == null || right == null) return left == null && right == null
             val leftType = ((left as? GoInterfaceValue)?.dynamicType ?: runtimeType(left))?.let(::canonicalAliasType)
             val rightType = ((right as? GoInterfaceValue)?.dynamicType ?: runtimeType(right))?.let(::canonicalAliasType)
-            if (leftType != rightType) return false
+            if (leftType != rightType && (leftType == null || rightType == null ||
+                    !sameRuntimeType(leftType, rightType))) return false
             val leftInterface = left as? GoInterfaceValue
             val rightInterface = right as? GoInterfaceValue
             val leftValue = if (leftInterface != null) leftInterface.value else left
@@ -4015,6 +4016,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun goHash(value: Any?): Int = when (value) {
         null -> 0
+        is GoNilValue -> 0
         is GoRational -> value.hashCode()
         is GoExactComplex -> 31 * value.real.hashCode() + value.imaginary.hashCode()
         is GoBoolean -> value.value.hashCode()
@@ -4027,7 +4029,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             .fold(0) { hash, (name, element) ->
                 31 * (31 * hash + name.hashCode()) + goHash(element)
             }
-        is GoInterfaceValue -> 31 * canonicalAliasType(value.dynamicType).hashCode() + goHash(value.value)
+        is GoInterfaceValue -> goHash(value.value)
         else -> value.hashCode()
     }
 
