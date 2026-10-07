@@ -1132,14 +1132,14 @@ class Interpreter(
     private fun rangeVariableTypes(range: RangeClause, env: Environment): List<GoTypeSyntax> {
         val source = staticExpressionType(range.expression, env)?.let(::underlying) ?: return emptyList()
         val pair = when (source) {
-            is ArrayGoType -> NamedGoType("int") to source.element
+            is ArrayGoType -> predeclaredIntRuntimeType to source.element
             is PointerGoType -> (underlying(source.element) as? ArrayGoType)?.let {
-                NamedGoType("int") to it.element
+                predeclaredIntRuntimeType to it.element
             }
-            is SliceGoType -> NamedGoType("int") to source.element
+            is SliceGoType -> predeclaredIntRuntimeType to source.element
             is MapGoType -> source.key to source.value
             is ChannelGoType -> null to source.element
-            NamedGoType("string") -> NamedGoType("int") to predeclaredIntRuntimeType
+            NamedGoType("string") -> predeclaredIntRuntimeType to predeclaredIntRuntimeType
             else -> null
         } ?: return emptyList()
         return listOfNotNull(pair.first, pair.second).take(range.targets.size)

@@ -1003,18 +1003,18 @@ class TypeChecker(
             error("range variables require = or :=")
         val source = underlying(expressionType(range.expression, scope))
         val keyAndValue = when (source) {
-            is ArrayGoType -> intType to source.element
+            is ArrayGoType -> predeclaredIntType to source.element
             is PointerGoType -> when (val pointed = underlying(source.element)) {
-                is ArrayGoType -> intType to pointed.element
+                is ArrayGoType -> predeclaredIntType to pointed.element
                 else -> error("cannot range over this pointer type")
             }
-            is SliceGoType -> intType to source.element
+            is SliceGoType -> predeclaredIntType to source.element
             is MapGoType -> source.key to source.value
             is ChannelGoType -> {
                 if (source.direction == ChannelDirection.SEND_ONLY) error("cannot range over send-only channel")
                 null to source.element
             }
-            is NamedGoType -> if (source.name == "string") intType to predeclaredIntType else error("cannot range over ${source.name}")
+            is NamedGoType -> if (source.name == "string") predeclaredIntType to predeclaredIntType else error("cannot range over ${source.name}")
             else -> error("cannot range over this type")
         }
         if (source is ChannelGoType && range.targets.size > 1) error("range over channel permits one iteration variable")
@@ -1648,7 +1648,7 @@ class TypeChecker(
         context: String,
         scope: Scope
     ) {
-        requireIntegerConstantRepresentable(expression, intType, scope)
+        requireIntegerConstantRepresentable(expression, predeclaredIntType, scope)
         val index = constantInteger(expression, scope) ?: return
         if (index.signum() < 0) error("$context index must be non-negative")
         if (length != null && index >= length) error("$context index $index is out of bounds")
@@ -1929,7 +1929,7 @@ class TypeChecker(
             }
             val length = maxIndex + BigInteger.ONE
             val lengthExpression = LiteralExpression(Token(TokenKind.INT, length.toString(), Position(0, 1, 1)))
-            requireIntegerConstantRepresentable(lengthExpression, intType, scope)
+            requireIntegerConstantRepresentable(lengthExpression, predeclaredIntType, scope)
             return ArrayGoType(lengthExpression, type.element).also(::validateType)
         }
         return literalType
@@ -1952,7 +1952,7 @@ class TypeChecker(
                 requireInteger(expressionType(expression, scope), "array length")
                 val value = constantInteger(expression, scope) ?: error("array length must be constant")
                 if (value.signum() < 0) error("array length must be non-negative")
-                requireIntegerConstantRepresentable(expression, intType, scope)
+                requireIntegerConstantRepresentable(expression, predeclaredIntType, scope)
                 LiteralExpression(Token(TokenKind.INT, value.toString(), Position(0, 1, 1)))
             }
             ArrayGoType(length, resolveLocalType(type.element, scope))
@@ -1993,7 +1993,7 @@ class TypeChecker(
                     requireInteger(expressionType(length, scope), "array length")
                     val constant = constantInteger(length, scope) ?: error("array length must be constant")
                     if (constant.signum() < 0) error("array length must be non-negative")
-                    requireIntegerConstantRepresentable(length, intType, scope)
+                    requireIntegerConstantRepresentable(length, predeclaredIntType, scope)
                     constant
                 }
                 var nextIndex = BigInteger.ZERO
@@ -2003,7 +2003,7 @@ class TypeChecker(
                         requireInteger(expressionType(key, scope), "composite index")
                         val constant = constantInteger(key, scope) ?: error("composite index must be constant")
                         if (constant.signum() < 0) error("composite index must be non-negative")
-                        requireIntegerConstantRepresentable(key, intType, scope)
+                        requireIntegerConstantRepresentable(key, predeclaredIntType, scope)
                         constant
                     } ?: nextIndex
                     if (!usedIndices.add(index)) error("duplicate composite index $index")
@@ -2264,7 +2264,7 @@ class TypeChecker(
                 if ((name == "cap" && string) || (!string && !pointerToArray && type !is SliceGoType &&
                         type !is ArrayGoType && type !is MapGoType && type !is ChannelGoType))
                     error("$name not defined for this type")
-                listOf(intType)
+                listOf(predeclaredIntType)
             }
             "append" -> {
                 if (types.isEmpty()) error("append requires a slice")
@@ -2291,7 +2291,7 @@ class TypeChecker(
                     types[0] == nilType && isString(types[1]) -> Unit
                     else -> error("copy requires slices, or a byte slice and string")
                 }
-                listOf(intType)
+                listOf(predeclaredIntType)
             }
             "delete" -> {
                 requireCount(name, args, 2, types.size)
@@ -2638,7 +2638,7 @@ class TypeChecker(
                 requireInteger(expressionType(length, globals), "array length")
                 val constant = constantInteger(length, globals) ?: error("array length must be constant")
                 if (constant.signum() < 0) error("array length must be non-negative")
-                requireIntegerConstantRepresentable(length, intType, globals)
+                requireIntegerConstantRepresentable(length, predeclaredIntType, globals)
                 validateType(type.element, active)
             }
             is MapGoType -> { validateType(type.key, active); validateType(type.value, active, true); if (!isComparable(type.key)) error("invalid map key type") }
@@ -3339,7 +3339,7 @@ class TypeChecker(
         dotImportedType(name) != null || (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
     private fun requireMakeSize(expression: Expression, type: GoTypeSyntax, scope: Scope): BigInteger? {
         if (!isInteger(type)) error("make size must be integer")
-        requireIntegerConstantRepresentable(expression, intType, scope)
+        requireIntegerConstantRepresentable(expression, predeclaredIntType, scope)
         return constantInteger(expression, scope)?.also { value ->
             if (value.signum() < 0) error("make size must be non-negative")
         }
