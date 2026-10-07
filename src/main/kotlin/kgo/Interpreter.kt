@@ -1681,7 +1681,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is IndexExpression -> index(
             evaluate(expression.receiver, env), evaluate(expression.index, env), expression.index, env
         )
-        is SliceExpression -> slice(evaluate(expression.receiver, env), expression.low?.let { evaluate(it, env) },
+        is SliceExpression -> slice(evaluateIndexReceiver(expression.receiver, env), expression.low?.let { evaluate(it, env) },
             expression.high?.let { evaluate(it, env) })
         is TypeAssertionExpression -> {
             val assertion = assertType(evaluate(expression.receiver, env), resolveRuntimeType(expression.type, env))
