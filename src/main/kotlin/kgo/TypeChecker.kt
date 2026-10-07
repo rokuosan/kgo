@@ -2392,11 +2392,12 @@ class TypeChecker(
         } else target
         val targetName = (underlying(checkedTarget) as? NamedGoType)?.name ?: return
         if (targetName in floatNames) {
-            val value = constantRational(expression, scope) ?: constantComplex(expression, scope)?.let {
-                if (it.imaginary.numerator.signum() != 0)
-                    error("constant is not representable as $checkedTarget")
-                it.real
-            } ?: return
+            val value = constantRational(expression, scope) ?: constantInteger(expression, scope)?.let(GoRational::of)
+                ?: constantComplex(expression, scope)?.let {
+                    if (it.imaginary.numerator.signum() != 0)
+                        error("constant is not representable as $checkedTarget")
+                    it.real
+                } ?: return
             val overflows = if (targetName == "float32") !value.toFloat().isFinite() else !value.toDouble().isFinite()
             if (overflows)
                 error("constant overflows $checkedTarget")
