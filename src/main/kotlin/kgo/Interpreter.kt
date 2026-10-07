@@ -4018,7 +4018,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun runtimeComparable(value: Any?): Boolean = when (value) {
-        is GoSlice, is GoMap, is FunctionValue, is BuiltinValue -> false
+        is GoSlice, is GoMap, is FunctionValue, is MethodExpressionValue, is BuiltinValue -> false
         is GoNilValue -> when (underlying(value.type)) {
             is SliceGoType, is MapGoType, is FunctionGoType -> false
             else -> true
