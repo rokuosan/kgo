@@ -1901,6 +1901,8 @@ class TypeChecker(
                 val builtin = builtinCall(typeNameTarget.name, call.arguments, scope, call.expandLastArgument)
                 if (builtin != null) {
                     if (typeNameTarget.name == "panic") terminatingPanicCalls += call
+                    if (typeNameTarget.name in setOf("len", "cap") && constantInteger(call, scope) != null)
+                        return listOf(untypedInt)
                     return builtin
                 }
             }
