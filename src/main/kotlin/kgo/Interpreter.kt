@@ -2893,7 +2893,19 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val candidates = linkedMapOf<String, MutableList<FunctionGoType>>()
             val next = mutableListOf<SearchNode>()
             level.forEach { node ->
-                when (val nodeUnderlying = baseType(node.type)) {
+                val nodeUnderlying = baseType(node.type)
+                val namedType = (node.type as? PointerGoType)?.element as? QualifiedGoType
+                    ?: node.type as? QualifiedGoType
+                if (namedType != null && nodeUnderlying !is InterfaceGoType) {
+                    val owner = importedRuntimePackages[namedType.packageName]
+                    val foreignType = if (node.pointer) PointerGoType(NamedGoType(namedType.name))
+                        else NamedGoType(namedType.name)
+                    owner?.runtimeMethodSet(foreignType)?.forEach { (name, signature) ->
+                        candidates.getOrPut(name) { mutableListOf() } +=
+                            owner.externalizeRuntimeType(signature, namedType.packageName) as FunctionGoType
+                    }
+                }
+                when (nodeUnderlying) {
                     is InterfaceGoType -> interfaceMethodsRuntime(nodeUnderlying).forEach { (name, signature) ->
                         candidates.getOrPut(name) { mutableListOf() } += signature
                     }

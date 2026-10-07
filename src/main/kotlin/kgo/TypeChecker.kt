@@ -2733,16 +2733,17 @@ class TypeChecker(
             val candidates = linkedMapOf<String, MutableList<FunctionGoType>>()
             val next = mutableListOf<SearchNode>()
             level.forEach { node ->
+                val nodeType = selectorBaseType(node.type)
                 val named = (node.type as? PointerGoType)?.element as? QualifiedGoType
                     ?: node.type as? QualifiedGoType
-                if (named != null) {
+                if (named != null && nodeType !is InterfaceGoType) {
                     val imported = importedPackages[named.packageName]
                     val foreignType = if (node.pointer) PointerGoType(NamedGoType(named.name)) else NamedGoType(named.name)
                     imported?.methodSet(foreignType)?.forEach { (name, signature) ->
                         candidates.getOrPut(name) { mutableListOf() } += imported.externalizeType(signature, named.packageName) as FunctionGoType
                     }
                 }
-                when (val nodeType = selectorBaseType(node.type)) {
+                when (nodeType) {
                     is InterfaceGoType -> interfaceMethods(nodeType).forEach { (name, signature) ->
                         candidates.getOrPut(name) { mutableListOf() } += signature
                     }
