@@ -4111,10 +4111,17 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is SliceGoType, is MapGoType, is FunctionGoType -> false
             else -> true
         }
-        // Their static field types are comparable. Interface fields may still
-        // panic later when their dynamic values are actually compared.
-        is GoArray, is GoStruct -> true
+        is GoArray -> runtimeTypeComparable(ArrayGoType(null, value.elementType))
+        is GoStruct -> value.staticType?.let(::runtimeTypeComparable)
+            ?: value.fieldTypes.values.all(::runtimeTypeComparable)
         is GoInterfaceValue -> runtimeComparable(value.value)
+        else -> true
+    }
+
+    private fun runtimeTypeComparable(type: GoTypeSyntax): Boolean = when (val actual = underlying(type)) {
+        is SliceGoType, is MapGoType, is FunctionGoType -> false
+        is ArrayGoType -> runtimeTypeComparable(actual.element)
+        is StructGoType -> actual.fields.all { runtimeTypeComparable(it.type) }
         else -> true
     }
 
