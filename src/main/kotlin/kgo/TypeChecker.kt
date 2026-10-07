@@ -907,6 +907,8 @@ class TypeChecker(
     }
 
     private fun checkRange(range: RangeClause, body: BlockStatement, scope: Scope) {
+        if (range.targets.isNotEmpty() && range.operator == null)
+            error("range variables require = or :=")
         val source = underlying(expressionType(range.expression, scope))
         val keyAndValue = when (source) {
             is ArrayGoType -> intType to source.element

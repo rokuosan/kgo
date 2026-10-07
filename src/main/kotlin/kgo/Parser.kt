@@ -402,10 +402,8 @@ class Parser(private val tokens: List<Token>) {
             val expression = expressionHeader { expression() }
             return ForStatement(null, null, null, parseBlock(), RangeClause(possibleTargets, possibleOperator, expression))
         }
-        if (possibleOperator == null && match(TokenKind.RANGE)) {
-            val expression = expressionHeader { expression() }
-            return ForStatement(null, null, null, parseBlock(), RangeClause(possibleTargets, null, expression))
-        }
+        if (possibleOperator == null && match(TokenKind.RANGE))
+            fail("range variables require = or :=")
         index = start
         val first = expressionHeader { parseSimpleStatement() }
         if (match(TokenKind.SEMICOLON)) {
