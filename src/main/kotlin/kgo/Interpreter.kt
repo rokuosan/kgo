@@ -397,14 +397,18 @@ class Interpreter(
     private suspend fun executeBlock(block: BlockStatement, parent: Environment, createScope: Boolean = true) {
         val env = if (createScope) parent.child() else parent
         predeclareBlockTypes(block, env)
+        executeStatementList(block.statements, env)
+    }
+
+    private suspend fun executeStatementList(statements: List<Statement>, env: Environment) {
         var index = 0
-        while (index < block.statements.size) {
+        while (index < statements.size) {
             yield()
             try {
-                execute(block.statements[index], env)
+                execute(statements[index], env)
                 index++
             } catch (jump: GotoSignal) {
-                val target = block.statements.indexOfFirst { it is LabeledStatement && it.label == jump.label }
+                val target = statements.indexOfFirst { it is LabeledStatement && it.label == jump.label }
                 if (target < 0) throw jump
                 index = target
             }
@@ -797,7 +801,7 @@ class Interpreter(
         if (assignment != null && received != null) {
             assignValues(assignment.targets, assignment.operator, expandValues(listOf(received), assignment.targets.size), env)
         }
-        try { for (statement in clause.statements) execute(statement, env) }
+        try { executeStatementList(clause.statements, env) }
         catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal }
     }
 
@@ -825,7 +829,7 @@ class Interpreter(
             try {
                 val caseScope = scope.child()
                 predeclareTypes(statement.clauses[index].statements, caseScope)
-                statement.clauses[index].statements.forEach { execute(it, caseScope) }
+                executeStatementList(statement.clauses[index].statements, caseScope)
                 return
             } catch (_: FallthroughSignal) {
                 if (index == statement.clauses.lastIndex) throw RuntimeGoError("fallthrough in final switch clause")
@@ -864,7 +868,7 @@ class Interpreter(
         if (statement.guard.name != null && statement.guard.name != "_")
             caseScope.define(statement.guard.name, caseValue, singleType ?: interfaceOperandType(statement.guard.expression, scope))
         try {
-            clause.statements.forEach { execute(it, caseScope) }
+            executeStatementList(clause.statements, caseScope)
         } catch (signal: BreakSignal) {
             if (!targets(signal.label, labels)) throw signal
         } catch (_: FallthroughSignal) {

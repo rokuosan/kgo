@@ -42,7 +42,7 @@ class TypeChecker(
     private var functionLabels: Map<String, LabelInfo> = emptyMap()
     private var usedLabels: MutableSet<String> = mutableSetOf()
     private var labelBlockPath: List<Any> = emptyList()
-    private var blockStatementIndices: Map<BlockStatement, Int> = emptyMap()
+    private var blockStatementIndices: Map<Any, Int> = emptyMap()
     internal var packageName: String? = null
         private set
     private var packageLevelNames: Set<String> = emptySet()
@@ -518,9 +518,7 @@ class TypeChecker(
         labelBlockPath = previousPath + block
         try {
             block.statements.forEachIndexed { index, statement ->
-                val previousIndices = blockStatementIndices
-                blockStatementIndices = previousIndices + (block to index)
-                try { checkStatement(statement, scope) } finally { blockStatementIndices = previousIndices }
+                withStatementIndex(block, index) { checkStatement(statement, scope) }
             }
         }
         finally {
@@ -624,13 +622,13 @@ class TypeChecker(
     private data class LabelInfo(
         val statement: Statement,
         val blockPath: List<Any>,
-        val ownerBlock: BlockStatement?,
+        val ownerBlock: Any?,
         val statementIndex: Int?
     )
 
     private fun collectLabels(body: BlockStatement): Map<String, LabelInfo> {
         val labels = linkedMapOf<String, LabelInfo>()
-        fun visit(statement: Statement, path: List<Any>, ownerBlock: BlockStatement?, statementIndex: Int?) {
+        fun visit(statement: Statement, path: List<Any>, ownerBlock: Any?, statementIndex: Int?) {
             when (statement) {
                 is LabeledStatement -> {
                     if (statement.label == "_") error("label cannot be blank")
@@ -651,15 +649,19 @@ class TypeChecker(
                 }
                 is SwitchStatement -> {
                     statement.init?.let { visit(it, path, ownerBlock, statementIndex) }
-                    statement.clauses.forEach { clause -> clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) } }
+                    statement.clauses.forEach { clause ->
+                        clause.statements.forEachIndexed { index, child -> visit(child, path + clause, clause, index) }
+                    }
                 }
                 is TypeSwitchStatement -> {
                     statement.init?.let { visit(it, path, ownerBlock, statementIndex) }
-                    statement.clauses.forEach { clause -> clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) } }
+                    statement.clauses.forEach { clause ->
+                        clause.statements.forEachIndexed { index, child -> visit(child, path + clause, clause, index) }
+                    }
                 }
                 is SelectStatement -> statement.cases.forEach { clause ->
-                    clause.communication?.let { visit(it, path + clause, ownerBlock, statementIndex) }
-                    clause.statements.forEach { visit(it, path + clause, ownerBlock, statementIndex) }
+                    clause.communication?.let { visit(it, path + clause, clause, -1) }
+                    clause.statements.forEachIndexed { index, child -> visit(child, path + clause, clause, index) }
                 }
                 else -> Unit
             }
@@ -671,7 +673,18 @@ class TypeChecker(
     private fun isPrefix(prefix: List<Any>, path: List<Any>): Boolean =
         prefix.size <= path.size && prefix.indices.all { prefix[it] === path[it] }
 
+    private fun <T> withStatementIndex(owner: Any, index: Int, action: () -> T): T {
+        val previous = blockStatementIndices
+        val current = IdentityHashMap<Any, Int>().apply {
+            putAll(previous)
+            put(owner, index)
+        }
+        blockStatementIndices = current
+        return try { action() } finally { blockStatementIndices = previous }
+    }
+
     private fun introducesVariable(statement: Statement): Boolean = when (statement) {
+        is LabeledStatement -> introducesVariable(statement.statement)
         is VariableStatement -> true
         is AssignmentStatement -> statement.operator == TokenKind.DEFINE
         is DeclarationStatement -> statement.declarations.any { it is VariableDeclaration }
@@ -839,8 +852,15 @@ class TypeChecker(
                     val owner = target.ownerBlock
                     val sourceIndex = owner?.let { blockStatementIndices[it] }
                     val targetIndex = target.statementIndex
+                    val ownerStatements = when (owner) {
+                        is BlockStatement -> owner.statements
+                        is SelectCase -> owner.statements
+                        is SwitchClause -> owner.statements
+                        is TypeSwitchClause -> owner.statements
+                        else -> emptyList()
+                    }
                     if (owner != null && sourceIndex != null && targetIndex != null && targetIndex > sourceIndex &&
-                        owner.statements.subList(sourceIndex + 1, targetIndex).any(::introducesVariable)) {
+                        ownerStatements.subList(sourceIndex + 1, targetIndex).any(::introducesVariable)) {
                         error("goto $label jumps over a variable declaration")
                     }
                     usedLabels += label
@@ -992,7 +1012,13 @@ class TypeChecker(
                 }
                 else -> error("invalid select communication")
             }
-            inLabelBlock(clause) { withLocalTypeScope { clause.statements.forEach { checkStatement(it, caseScope) } } }
+            inLabelBlock(clause) {
+                withLocalTypeScope {
+                    clause.statements.forEachIndexed { index, child ->
+                        withStatementIndex(clause, index) { checkStatement(child, caseScope) }
+                    }
+                }
+            }
         }
     }
 
@@ -1037,7 +1063,13 @@ class TypeChecker(
                 val identity = constantCaseIdentity(case, caseType, tagType, caseScope)
                 if (identity != null && !seenCases.add(identity)) error("duplicate case $case in switch")
             }
-            inLabelBlock(clause) { withLocalTypeScope { clause.statements.forEach { checkStatement(it, caseScope) } } }
+            inLabelBlock(clause) {
+                withLocalTypeScope {
+                    clause.statements.forEachIndexed { index, child ->
+                        withStatementIndex(clause, index) { checkStatement(child, caseScope) }
+                    }
+                }
+            }
         }
     }
 
@@ -1297,7 +1329,13 @@ class TypeChecker(
                 ?.let { resolveLocalType(it, switchScope) }
             if (statement.guard.name != null && statement.guard.name != "_")
                 caseScope.define(statement.guard.name, singleType ?: interfaceType)
-            inLabelBlock(clause) { withLocalTypeScope { clause.statements.forEach { checkStatement(it, caseScope) } } }
+            inLabelBlock(clause) {
+                withLocalTypeScope {
+                    clause.statements.forEachIndexed { index, child ->
+                        withStatementIndex(clause, index) { checkStatement(child, caseScope) }
+                    }
+                }
+            }
         }
     }
 
