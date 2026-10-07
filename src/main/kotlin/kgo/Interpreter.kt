@@ -3569,7 +3569,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is UnaryExpression -> when (expression.operator) {
             TokenKind.ADD -> integerLiteral(expression.operand, env)
             TokenKind.SUB -> integerLiteral(expression.operand, env).negate()
-            TokenKind.XOR -> integerLiteral(expression.operand, env).not()
+            TokenKind.XOR -> {
+                val value = integerLiteral(expression.operand, env).not()
+                val scope = env ?: globals
+                val operandType = staticExpressionType(expression.operand, scope)?.let { resolveRuntimeType(it, scope) }
+                val underlyingType = operandType?.let(::underlying) as? NamedGoType
+                if (underlyingType?.name in setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")) {
+                    val width = integerBitWidth(operandType!!)
+                    value.and(BigInteger.ONE.shiftLeft(width).subtract(BigInteger.ONE))
+                } else value
+            }
             else -> throw RuntimeGoError("invalid integer constant expression")
         }
         is BinaryExpression -> {

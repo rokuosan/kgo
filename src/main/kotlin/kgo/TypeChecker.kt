@@ -2812,7 +2812,13 @@ class TypeChecker(
         is UnaryExpression -> constantInteger(expression.operand, scope)?.let { value -> when (expression.operator) {
             TokenKind.ADD -> value
             TokenKind.SUB -> value.negate()
-            TokenKind.XOR -> value.not()
+            TokenKind.XOR -> {
+                val operandType = expressionType(expression.operand, scope)
+                if (isUnsignedInteger(operandType)) {
+                    val mask = BigInteger.ONE.shiftLeft(integerBitWidth(operandType)).subtract(BigInteger.ONE)
+                    value.not().and(mask)
+                } else value.not()
+            }
             else -> null
         } }
         is CallExpression -> {
@@ -3091,6 +3097,12 @@ class TypeChecker(
     }
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean =
         (underlying(type) as? NamedGoType)?.name in setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+    private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
+        "int8", "uint8", "byte" -> 8
+        "int16", "uint16" -> 16
+        "int32", "uint32", "rune" -> 32
+        else -> 64
+    }
     private fun isString(type: GoTypeSyntax) = underlying(type) == stringType || type == untypedString
     private fun isBoolean(type: GoTypeSyntax) = underlying(type) == boolType || type == untypedBool
     private fun isNilable(type: GoTypeSyntax) = when (underlying(type)) { is PointerGoType, is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType, is InterfaceGoType -> true; else -> false }
