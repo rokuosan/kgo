@@ -2369,7 +2369,6 @@ class TypeChecker(
         if (operator in setOf(TokenKind.EQL, TokenKind.NEQ)) {
             if (!constantOperandsAssignable(left, right, leftExpression, rightExpression, scope))
                 error("incompatible comparison: $left and $right")
-            requireUntypedOperandRepresentable(left, right, leftExpression, rightExpression, scope)
             if (left == nilType) {
                 if (!isNilable(right)) error("cannot compare nil with $right")
             } else if (right == nilType) {
@@ -2424,20 +2423,6 @@ class TypeChecker(
     ) {
         if (!constantOperandsAssignable(left, right, leftExpression, rightExpression, scope))
             error("mismatched operand types: $left and $right")
-        requireUntypedOperandRepresentable(left, right, leftExpression, rightExpression, scope)
-    }
-
-    private fun requireUntypedOperandRepresentable(
-        left: GoTypeSyntax,
-        right: GoTypeSyntax,
-        leftExpression: Expression?,
-        rightExpression: Expression?,
-        scope: Scope
-    ) {
-        if (isUntyped(left) && !isUntyped(right))
-            leftExpression?.let { requireIntegerConstantRepresentable(it, right, scope) }
-        if (isUntyped(right) && !isUntyped(left))
-            rightExpression?.let { requireIntegerConstantRepresentable(it, left, scope) }
     }
 
     private fun commonType(left: GoTypeSyntax, right: GoTypeSyntax): GoTypeSyntax = when {
