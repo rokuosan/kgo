@@ -2356,7 +2356,7 @@ class TypeChecker(
                 error("shift count must have unsigned integer type")
             }
             return if (isUntyped(left)) {
-                if (rightExpression?.let { isConstantExpression(it, scope) } == false) defaultType(left) else untypedInt
+                if (rightExpression?.let { isConstantExpression(it, scope) } == false) predeclaredIntType else untypedInt
             } else left
         }
         val l = underlying(left); val r = underlying(right)
@@ -2447,9 +2447,7 @@ class TypeChecker(
         values.zip(expressions).forEach { (from, expression) ->
             if (isUntyped(from)) requireIntegerConstantRepresentable(expression, defaultType(from), scope)
             nonConstantUntypedShift(expression, scope)?.let { shift ->
-                val defaulted = defaultType(expressionType(shift.left, scope))
-                if (!isInteger(defaulted)) error("left operand of shift must be integer")
-                requireIntegerConstantRepresentable(shift.left, defaulted, scope)
+                requireIntegerConstantRepresentable(shift.left, predeclaredIntType, scope)
             }
         }
     }
