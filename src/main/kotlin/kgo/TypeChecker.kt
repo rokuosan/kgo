@@ -2322,15 +2322,17 @@ class TypeChecker(
                     error("constant is not representable as $checkedTarget")
                 it.real
             } ?: return
-            val converted = value.toDouble()
-            if (!converted.isFinite() || targetName == "float32" && !converted.toFloat().isFinite())
+            val overflows = if (targetName == "float32") !value.toFloat().isFinite() else !value.toDouble().isFinite()
+            if (overflows)
                 error("constant overflows $checkedTarget")
             return
         }
         if (targetName in complexNames) {
             val value = constantComplex(expression, scope) ?: return
-            val components = listOf(value.real.toDouble(), value.imaginary.toDouble())
-            if (components.any { !it.isFinite() || targetName == "complex64" && !it.toFloat().isFinite() })
+            val overflows = if (targetName == "complex64") {
+                !value.real.toFloat().isFinite() || !value.imaginary.toFloat().isFinite()
+            } else !value.real.toDouble().isFinite() || !value.imaginary.toDouble().isFinite()
+            if (overflows)
                 error("constant overflows $checkedTarget")
             return
         }

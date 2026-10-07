@@ -2,8 +2,6 @@ package kgo
 
 import java.math.BigInteger
 import java.math.BigDecimal
-import java.math.MathContext
-import java.math.RoundingMode
 import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -53,7 +51,8 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
     }
     fun negate() = of(numerator.negate(), denominator)
     fun isInteger() = denominator == BigInteger.ONE
-    fun toDouble(): Double = BigDecimal(numerator).divide(BigDecimal(denominator), DOUBLE_CONTEXT).toDouble()
+    fun toDouble(): Double = roundedBinary(53, -1022, 1023)
+    fun toFloat(): Float = roundedBinary(24, -126, 127).toFloat()
     override fun compareTo(other: GoRational): Int = (numerator * other.denominator).compareTo(other.numerator * denominator)
     override fun equals(other: Any?) = other is GoRational && numerator == other.numerator && denominator == other.denominator
     override fun hashCode() = 31 * numerator.hashCode() + denominator.hashCode()
@@ -61,7 +60,36 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
 
     companion object {
         val ZERO = GoRational(BigInteger.ZERO, BigInteger.ONE)
-        private val DOUBLE_CONTEXT = MathContext(1200, RoundingMode.HALF_EVEN)
+        private fun GoRational.roundedBinary(precision: Int, minimumExponent: Int, maximumExponent: Int): Double {
+            if (numerator.signum() == 0) return 0.0
+            val negative = numerator.signum() < 0
+            val n = numerator.abs()
+            val d = denominator
+            var exponent = n.bitLength() - d.bitLength()
+            val belowEstimate = if (exponent >= 0) n < d.shiftLeft(exponent) else n.shiftLeft(-exponent) < d
+            if (belowEstimate) exponent--
+            if (exponent > maximumExponent) return if (negative) Double.NEGATIVE_INFINITY else Double.POSITIVE_INFINITY
+
+            val subnormal = exponent < minimumExponent
+            if (subnormal && exponent < minimumExponent - 1) return if (negative) -0.0 else 0.0
+            val scale = if (subnormal) precision - 1 - minimumExponent else precision - 1 - exponent
+            val scaledNumerator = if (scale >= 0) n.shiftLeft(scale) else n
+            val scaledDenominator = if (scale < 0) d.shiftLeft(-scale) else d
+            val division = scaledNumerator.divideAndRemainder(scaledDenominator)
+            var significand = division[0]
+            val halfway = division[1].shiftLeft(1).compareTo(scaledDenominator)
+            if (halfway > 0 || halfway == 0 && significand.testBit(0)) significand += BigInteger.ONE
+            if (!subnormal && significand.bitLength() > precision) {
+                significand = significand.shiftRight(1)
+                exponent++
+                if (exponent > maximumExponent)
+                    return if (negative) Double.NEGATIVE_INFINITY else Double.POSITIVE_INFINITY
+            }
+            val binaryScale = if (subnormal) minimumExponent - (precision - 1) else exponent - (precision - 1)
+            val value = Math.scalb(significand.toDouble(), binaryScale)
+            return if (negative) -value else value
+        }
+
         fun of(numerator: BigInteger, denominator: BigInteger = BigInteger.ONE): GoRational {
             if (denominator.signum() == 0) throw RuntimeGoError("division by zero")
             val sign = if (denominator.signum() < 0) BigInteger.ONE.negate() else BigInteger.ONE
@@ -3009,31 +3037,43 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             "bool" -> GoBoolean(booleanValue(value, "bool conversion"), type)
             "float32", "float64" -> when (value) {
-                is Long -> GoFloat(if (target.name == "float32") value.toFloat().toDouble() else value.toDouble(), type)
-                is BigInteger -> value.toDouble().let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
-                is GoRational -> value.toDouble().let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
+                is Long -> GoFloat(if (target.name == "float32") GoRational.of(BigInteger.valueOf(value)).toFloat().toDouble() else value.toDouble(), type)
+                is BigInteger -> GoFloat(if (target.name == "float32") GoRational.of(value).toFloat().toDouble() else value.toDouble(), type)
+                is GoRational -> GoFloat(if (target.name == "float32") value.toFloat().toDouble() else value.toDouble(), type)
                 is GoExactComplex -> {
                     if (value.imaginary.numerator.signum() != 0) throw RuntimeGoError("cannot convert complex value to float")
-                    value.real.toDouble().let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
+                    GoFloat(if (target.name == "float32") value.real.toFloat().toDouble() else value.real.toDouble(), type)
                 }
                 is GoComplex -> {
                     if (value.imaginary != 0.0) throw RuntimeGoError("cannot convert complex value to float")
                     GoFloat(if (target.name == "float32") value.real.toFloat().toDouble() else value.real, type)
                 }
-                is GoInteger -> integerAsDouble(value).let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
+                is GoInteger -> GoFloat(if (target.name == "float32") GoRational.of(integerValue(value, "float conversion")).toFloat().toDouble() else integerAsDouble(value), type)
                 is Double -> GoFloat(if (target.name == "float32") value.toFloat().toDouble() else value, type)
                 is GoFloat -> GoFloat(if (target.name == "float32") value.value.toFloat().toDouble() else value.value, type)
                 else -> throw RuntimeGoError("cannot convert to float")
             }
             "complex64", "complex128" -> {
-                val real = when (value) { is Long -> value.toDouble(); is BigInteger -> value.toDouble(); is GoRational -> value.toDouble(); is GoExactComplex -> value.real.toDouble(); is GoInteger -> integerAsDouble(value); is Double -> value; is GoFloat -> value.value; is GoComplex -> value.real; else -> throw RuntimeGoError("cannot convert to complex") }
+                val narrow = target.name == "complex64"
+                fun exactFloat(integer: BigInteger) = if (narrow) GoRational.of(integer).toFloat().toDouble() else integer.toDouble()
+                val real = when (value) {
+                    is Long -> exactFloat(BigInteger.valueOf(value))
+                    is BigInteger -> exactFloat(value)
+                    is GoRational -> if (narrow) value.toFloat().toDouble() else value.toDouble()
+                    is GoExactComplex -> if (narrow) value.real.toFloat().toDouble() else value.real.toDouble()
+                    is GoInteger -> exactFloat(integerValue(value, "complex conversion"))
+                    is Double -> value
+                    is GoFloat -> value.value
+                    is GoComplex -> value.real
+                    else -> throw RuntimeGoError("cannot convert to complex")
+                }
                 val imaginary = when (value) {
                     is GoComplex -> value.imaginary
-                    is GoExactComplex -> value.imaginary.toDouble()
+                    is GoExactComplex -> if (target.name == "complex64") value.imaginary.toFloat().toDouble() else value.imaginary.toDouble()
                     else -> 0.0
                 }
                 val convertedType = type
-                if (target.name == "complex64") GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), convertedType)
+                if (narrow) GoComplex(real.toFloat().toDouble(), imaginary.toFloat().toDouble(), convertedType)
                 else GoComplex(real, imaginary, convertedType)
             }
             in integerTypeNames -> {
