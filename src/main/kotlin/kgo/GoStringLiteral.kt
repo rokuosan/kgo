@@ -1,5 +1,7 @@
 package kgo
 
+import java.math.BigInteger
+
 internal fun canonicalGoStringLiteral(text: String): String =
     decodeGoStringLiteralBytes(text).joinToString(separator = "") { byte ->
         (byte.toInt() and 0xff).toString(16).padStart(2, '0')
@@ -37,7 +39,7 @@ internal fun decodeGoCharacterLiteral(text: String): Int {
             if (hex.length != digits || !hex.all(Char::isHexDigit))
                 throw RuntimeGoError("invalid Unicode character escape")
             val codePoint = hex.toLong(16).toInt()
-            if (codePoint !in 0..0x10ffff || codePoint in 0xd800..0xdfff)
+            if (codePoint !in 0..0x10ffff)
                 throw RuntimeGoError("invalid Unicode code point")
             codePoint
         }
@@ -59,7 +61,7 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
     if (text.first() == '`') return text.substring(1, text.length - 1).replace("\r", "").toByteArray(Charsets.UTF_8)
     val body = text.substring(1, text.length - 1)
     val bytes = mutableListOf<Byte>()
-    fun appendCodePoint(codePoint: Int) { bytes += String(Character.toChars(codePoint)).toByteArray(Charsets.UTF_8).toList() }
+    fun appendCodePoint(codePoint: Int) { bytes += encodeGoCodePoint(codePoint).toList() }
     var i = 0
     while (i < body.length) {
         val c = body[i++]
@@ -90,3 +92,31 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
     }
     return bytes.toByteArray()
 }
+
+internal fun encodeGoCodePoint(value: Int): ByteArray {
+    val codePoint = if (value in 0..0x10ffff) value else 0xfffd
+    return when {
+        codePoint <= 0x7f -> byteArrayOf(codePoint.toByte())
+        codePoint <= 0x7ff -> byteArrayOf(
+            (0xc0 or (codePoint shr 6)).toByte(),
+            (0x80 or (codePoint and 0x3f)).toByte()
+        )
+        codePoint <= 0xffff -> byteArrayOf(
+            (0xe0 or (codePoint shr 12)).toByte(),
+            (0x80 or ((codePoint shr 6) and 0x3f)).toByte(),
+            (0x80 or (codePoint and 0x3f)).toByte()
+        )
+        else -> byteArrayOf(
+            (0xf0 or (codePoint shr 18)).toByte(),
+            (0x80 or ((codePoint shr 12) and 0x3f)).toByte(),
+            (0x80 or ((codePoint shr 6) and 0x3f)).toByte(),
+            (0x80 or (codePoint and 0x3f)).toByte()
+        )
+    }
+}
+
+internal fun encodeGoCodePoint(value: Long): ByteArray =
+    encodeGoCodePoint(if (value in 0..0x10ffff) value.toInt() else -1)
+
+internal fun encodeGoCodePoint(value: BigInteger): ByteArray =
+    encodeGoCodePoint(if (value >= BigInteger.ZERO && value <= BigInteger.valueOf(0x10ffff)) value.toInt() else -1)

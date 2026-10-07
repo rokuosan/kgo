@@ -2858,12 +2858,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is NamedGoType -> when (target.name) {
             "string" -> when (value) {
                 is GoString -> GoString(value.bytes.copyOf(), type)
-                is Long -> GoString(codePointString(value).toByteArray(Charsets.UTF_8), type)
-                is BigInteger -> GoString(codePointString(value).toByteArray(Charsets.UTF_8), type)
-                is GoInteger -> GoString(codePointString(value.value).toByteArray(Charsets.UTF_8), type)
+                is Long -> GoString(encodeGoCodePoint(value), type)
+                is BigInteger -> GoString(encodeGoCodePoint(value), type)
+                is GoInteger -> GoString(encodeGoCodePoint(integerValue(value, "string conversion")), type)
                 is GoSlice -> when {
                     isPredeclaredByteType(value.elementType) -> GoString(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), type)
-                    isPredeclaredRuneType(value.elementType) -> GoString(value.toList().joinToString("") { codePointString(number(it, "string conversion")) }.toByteArray(Charsets.UTF_8), type)
+                    isPredeclaredRuneType(value.elementType) -> GoString(value.toList().flatMap {
+                        encodeGoCodePoint(number(it, "string conversion")).toList()
+                    }.toByteArray(), type)
                     else -> throw RuntimeGoError("cannot convert slice to string")
                 }
                 is GoNilValue -> if (isByteOrRuneSlice(value.type)) GoString(byteArrayOf(), type) else throw RuntimeGoError("cannot convert to string")
@@ -2953,15 +2955,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun integerAsDouble(value: GoInteger): Double = integerValue(value, "float conversion").toDouble()
-
-    private fun codePointString(value: Long): String {
-        val codePoint = value.toInt()
-        return if (value !in 0..Character.MAX_CODE_POINT.toLong() || codePoint in 0xd800..0xdfff)
-            "\ufffd" else String(Character.toChars(codePoint))
-    }
-
-    private fun codePointString(value: BigInteger): String = if (value < BigInteger.ZERO ||
-        value > BigInteger.valueOf(Character.MAX_CODE_POINT.toLong())) "\ufffd" else codePointString(value.toLong())
 
     private fun append(args: List<Any?>, expandString: Boolean = false): Any? {
         val first = args.firstOrNull()
@@ -3317,9 +3310,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             constantStringByteLength(expression.arguments.single(), env) ?: runCatching {
                 val value = integerLiteral(expression.arguments.single(), env)
                 val codePoint = runCatching { value.intValueExact() }.getOrNull() ?: -1
-                val rune = if (codePoint < 0 || codePoint > Character.MAX_CODE_POINT || codePoint in 0xd800..0xdfff)
-                    0xfffd else codePoint
-                BigInteger.valueOf(String(Character.toChars(rune)).toByteArray(Charsets.UTF_8).size.toLong())
+                BigInteger.valueOf(encodeGoCodePoint(codePoint).size.toLong())
             }.getOrNull()
         } else null
         else -> null
@@ -3790,7 +3781,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         if (first in 0xe0..0xef && continuation(offset + 1) && continuation(offset + 2)) {
             val second = bytes[offset + 1].toInt() and 0xff
-            if ((first != 0xe0 || second >= 0xa0) && (first != 0xed || second < 0xa0)) {
+            if (first != 0xe0 || second >= 0xa0) {
                 val cp = ((first and 0x0f) shl 12) or ((second and 0x3f) shl 6) or (bytes[offset + 2].toInt() and 0x3f)
                 return cp to 3
             }

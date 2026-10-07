@@ -1267,9 +1267,8 @@ class TypeChecker(
             if (target == null || underlying(target) != stringType || expression.arguments.size != 1 || expression.expandLastArgument) null
             else constantStringIdentity(expression.arguments.single(), scope) ?: constantInteger(expression.arguments.single(), scope)?.let { value ->
                 val codePoint = runCatching { value.intValueExact() }.getOrNull()
-                val rune = if (codePoint == null || codePoint !in 0..Character.MAX_CODE_POINT || codePoint in 0xd800..0xdfff)
-                    0xfffd else codePoint
-                String(Character.toChars(rune)).toByteArray(Charsets.UTF_8).joinToString("") { byte ->
+                val bytes = encodeGoCodePoint(codePoint ?: -1)
+                bytes.joinToString("") { byte ->
                     (byte.toInt() and 0xff).toString(16).padStart(2, '0')
                 }
             }
@@ -2770,8 +2769,7 @@ class TypeChecker(
             if (target == null || underlying(target) != stringType || expression.arguments.size != 1 || expression.expandLastArgument) null
             else constantStringLength(expression.arguments.single(), scope) ?: constantInteger(expression.arguments.single(), scope)?.let { value ->
                 val codePoint = runCatching { value.intValueExact() }.getOrNull()
-                val rune = if (codePoint == null || codePoint !in 0..Character.MAX_CODE_POINT || codePoint in 0xd800..0xdfff)
-                    0xfffd else codePoint
+                val rune = if (codePoint == null || codePoint !in 0..Character.MAX_CODE_POINT) 0xfffd else codePoint
                 BigInteger.valueOf(when {
                     rune <= 0x7f -> 1L
                     rune <= 0x7ff -> 2L
