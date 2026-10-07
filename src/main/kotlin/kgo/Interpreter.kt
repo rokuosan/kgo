@@ -797,7 +797,8 @@ class Interpreter(
         val selected = awaitChannelSelect(operations, defaultIndex)
         selected.failure?.let { throw it }
         val receive = operations.filterIsInstance<SelectReceive>().firstOrNull { it.caseIndex == selected.caseIndex }
-        executeSelectedCase(statement.cases[selected.caseIndex], env, labels, receive?.assignment, selected.received)
+        executeSelectedCase(statement.cases[selected.caseIndex], env, labels, receive?.assignment,
+            selected.received, receive?.channel?.elementType)
     }
 
     private suspend fun awaitChannelSelect(
@@ -840,11 +841,16 @@ class Interpreter(
         parent: Environment,
         labels: Set<String>,
         assignment: AssignmentStatement? = null,
-        received: GoReceiveResult? = null
+        received: GoReceiveResult? = null,
+        receiveElementType: GoTypeSyntax? = null
     ) {
         val env = parent.child()
         if (assignment != null && received != null) {
-            assignValues(assignment.targets, assignment.operator, expandValues(listOf(received), assignment.targets.size), env)
+            val declaredTypes = if (assignment.operator == TokenKind.DEFINE && receiveElementType != null)
+                listOf(receiveElementType) + if (assignment.targets.size > 1) listOf(NamedGoType("bool")) else emptyList()
+            else null
+            assignValues(assignment.targets, assignment.operator,
+                expandValues(listOf(received), assignment.targets.size), env, declaredTypes = declaredTypes)
         }
         try { executeStatementList(clause.statements, env) }
         catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal }
@@ -4072,7 +4078,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             throw RuntimeGoError("constant overflows default int")
         }
     } else value ?: throw RuntimeGoError("invalid integer value")
-    private fun defaultConstantValue(value: Any?, expression: Expression? = null, env: Environment? = null): Any = when {
+    private fun defaultConstantValue(value: Any?, expression: Expression? = null, env: Environment? = null): Any? = when {
+        value == null -> null
         value is BigInteger && expression != null && env != null && isRuneConstantExpression(expression, env) ->
             GoInteger(value.longValueExact(), NamedGoType("int32"))
         value is GoRational -> value.toDouble()
