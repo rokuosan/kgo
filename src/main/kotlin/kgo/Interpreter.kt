@@ -525,6 +525,8 @@ class Interpreter(
             val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
             assignValues(statement.targets, statement.operator, values, env, statement.values)
         } else {
+            // Go 1 evaluates all left-hand index/pointer operands before the right-hand expressions,
+            // then performs writes left-to-right. Resolve every target before evaluating the RHS.
             val locations = statement.targets.map { resolveTarget(it, env) }
             val previous = if (statement.operator == TokenKind.ASSIGN) emptyList() else locations.map { it.get() }
             val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
