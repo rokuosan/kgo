@@ -737,7 +737,7 @@ class Interpreter(
                 val path = env.imports.packages[target.receiver.name]
                 if (path != null) importedRuntimePackages[path]?.exportedVariableTarget(target.field)?.let { return it }
             }
-            val receiver = evaluateAssignmentReceiver(target.receiver, env)
+            val receiver = evaluateStructReceiver(target.receiver, env)
             val type = staticExpressionType(target, env)
             RuntimeTarget(
                 { pointerToStructField(receiver, target.field).get() },
@@ -766,6 +766,17 @@ class Interpreter(
         return if (dereference?.operator == TokenKind.MUL) evaluate(dereference.operand, env)
         else evaluate(expression, env)
     }
+
+    private suspend fun evaluateStructReceiver(expression: Expression, env: Environment): Any? =
+        when (expression.unparenthesized()) {
+            is UnaryExpression -> {
+                val dereference = expression.unparenthesized() as UnaryExpression
+                if (dereference.operator == TokenKind.MUL) evaluate(dereference.operand, env)
+                else evaluate(expression, env)
+            }
+            is SelectorExpression, is IndexExpression -> addressOf(expression, env)
+            else -> evaluate(expression, env)
+        }
 
     private fun pointedArray(pointer: GoPointer): GoArray {
         var value: Any? = pointer
@@ -1717,7 +1728,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     importedRuntimePackages[path]?.exportedVariablePointer(expression.field)
                 }
             } else null
-            pointer ?: pointerToStructField(evaluate(expression.receiver, env), expression.field)
+            pointer ?: pointerToStructField(evaluateStructReceiver(expression.receiver, env), expression.field)
         }
         is IndexExpression -> {
             val receiver = evaluate(expression.receiver, env)
