@@ -2201,8 +2201,17 @@ class TypeChecker(
             error("... requires a single final argument")
         return when (name) {
             "print", "println" -> emptyList()
-            "panic" -> { requireCount(name, args, 1, types.size); emptyList() }
-            "recover" -> { requireCount(name, args, 0, types.size); listOf(NamedGoType("interface{}")) }
+            "panic" -> {
+                if (expandLastArgument) error("panic does not accept ...")
+                requireCount(name, args, 1, types.size)
+                requireAssignable(types.single(), InterfaceGoType(emptyList()), "panic argument", args.single(), scope)
+                emptyList()
+            }
+            "recover" -> {
+                if (expandLastArgument) error("recover does not accept ...")
+                requireCount(name, args, 0, types.size)
+                listOf(InterfaceGoType(emptyList()))
+            }
             "make" -> {
                 if (expandLastArgument) error("make does not accept ...")
                 if (types.isEmpty()) error("make requires a type argument")

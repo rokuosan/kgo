@@ -553,7 +553,7 @@ class Interpreter(
                 when (channel) {
                     is GoChannel -> channel.send(
                         if (underlying(channel.elementType) is InterfaceGoType)
-                            defaultRuneValue(value, statement.value, env) else value
+                            defaultConstantValue(value, statement.value, env) else value
                     )
                     is GoNilValue -> if (underlying(channel.type) is ChannelGoType) awaitCancellation() else throw RuntimeGoError("send on non-channel")
                     else -> throw RuntimeGoError("send on non-channel")
@@ -652,7 +652,7 @@ class Interpreter(
         value: Any?, targetType: GoTypeSyntax, expression: Expression?, env: Environment, resultIndex: Int = 0
     ): Any? {
         if (underlying(targetType) !is InterfaceGoType) return value
-        val normalized = defaultRuneValue(value, expression, env)
+        val normalized = defaultConstantValue(value, expression, env)
         if (normalized == null || normalized is GoInterfaceValue) return normalized
         val sourceType = expression?.let {
             (staticExpressionResultType(it, resultIndex, env) ?: staticExpressionType(it, env))
@@ -708,12 +708,12 @@ class Interpreter(
                     RuntimeTarget(
                         {
                             val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
-                                defaultRuneValue(key, target.index, env) else key
+                                defaultConstantValue(key, target.index, env) else key
                             mapValue(receiver, mapKey(mapIndex, receiver.keyType))
                         },
                         {
                             val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
-                                defaultRuneValue(key, target.index, env) else key
+                                defaultConstantValue(key, target.index, env) else key
                             receiver.values[mapKey(mapIndex, receiver.keyType)] = copyForType(it, receiver.valueType)
                         },
                         receiver.valueType
@@ -724,7 +724,7 @@ class Interpreter(
                         ?: throw RuntimeGoError("cannot assign through index")
                     RuntimeTarget({ zeroValue(mapType.value) }, {
                         val mapIndex = if (underlying(mapType.key) is InterfaceGoType)
-                            defaultRuneValue(key, target.index, env) else key
+                            defaultConstantValue(key, target.index, env) else key
                         mapKey(mapIndex, mapType.key)
                         throw RuntimeGoError("assignment to entry in nil map")
                     }, mapType.value)
@@ -782,7 +782,7 @@ class Interpreter(
                     val sendValue = evaluate(communication.value, env)
                     val channel = selectChannelOrNull(channelValue) ?: return@mapIndexedNotNull null
                     val value = if (underlying(channel.elementType) is InterfaceGoType)
-                        defaultRuneValue(sendValue, communication.value, env) else sendValue
+                        defaultConstantValue(sendValue, communication.value, env) else sendValue
                     SelectSend(caseIndex, channel, copyForType(value, channel.elementType))
                 }
                 is ExpressionStatement -> {
@@ -1314,10 +1314,10 @@ class Interpreter(
         val leftIsUntypedNil = leftType == null && leftExpression?.let { isNilOperand(it, env) } == true
         val rightIsUntypedNil = rightType == null && rightExpression?.let { isNilOperand(it, env) } == true
         if (!leftIsInterface && !leftIsUntypedNil && rightIsInterface) {
-            left = boxInterface(leftExpression?.let { defaultRuneValue(leftValue, it, env) } ?: leftValue, rightType)
+            left = boxInterface(leftExpression?.let { defaultConstantValue(leftValue, it, env) } ?: leftValue, rightType)
         }
         if (!rightIsInterface && !rightIsUntypedNil && leftIsInterface) {
-            right = boxInterface(rightExpression?.let { defaultRuneValue(rightValue, it, env) } ?: rightValue, leftType)
+            right = boxInterface(rightExpression?.let { defaultConstantValue(rightValue, it, env) } ?: rightValue, leftType)
         }
         return left to right
     }
@@ -1508,7 +1508,7 @@ class Interpreter(
             if (receiver is GoMap) {
                 val keyType = receiver.keyType
                 val mapIndex = if (underlying(keyType) is InterfaceGoType)
-                    defaultRuneValue(key, index.index, env) else key
+                    defaultConstantValue(key, index.index, env) else key
                 val mapKey = mapKey(mapIndex, keyType)
                 val found = receiver.values.containsKey(mapKey)
                 return listOf(MapLookupResult(mapValue(receiver, mapKey), found))
@@ -1986,11 +1986,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 declaredType != null && underlying(declaredType) is InterfaceGoType ->
                     boxInterfaceAssignment(value, declaredType, argumentExpression, env, resultIndex)
                 target == BuiltinValue("panic") && index == 0 ->
-                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                    defaultConstantValue(value, call.arguments.getOrNull(index), env)
                 index > 0 && appendElementType?.let { underlying(it) is InterfaceGoType } == true ->
-                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                    defaultConstantValue(value, call.arguments.getOrNull(index), env)
                 index == 1 && deleteKeyType?.let { underlying(it) is InterfaceGoType } == true ->
-                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                    defaultConstantValue(value, call.arguments.getOrNull(index), env)
                 else -> value
             }
         }
@@ -2110,7 +2110,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     emitOutput(formatBuiltinPrint(effectiveArgs, target.name == "println"))
                     return null
                 }
-                "panic" -> args.singleOrNull().let { throw PanicSignal(it, stringify(it)) }
+                "panic" -> {
+                    val value = boxInterface(args.singleOrNull(), InterfaceGoType(emptyList()))
+                    throw PanicSignal(value, stringify(value))
+                }
                 "recover" -> {
                     if (!panicState.recoverAllowed) return null
                     val activePanic = panicState.activePanic ?: return null
@@ -2416,7 +2419,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private suspend fun evaluateCompositeValue(expression: Expression, type: GoTypeSyntax, env: Environment): Any? = when {
         expression !is ElidedCompositeLiteral -> {
             val value = evaluate(expression, env)
-            if (underlying(type) is InterfaceGoType) defaultRuneValue(value, expression, env) else value
+            if (underlying(type) is InterfaceGoType) defaultConstantValue(value, expression, env) else value
         }
         underlying(type) is PointerGoType -> {
             val pointerType = underlying(type) as PointerGoType
@@ -3066,12 +3069,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             is GoMap -> {
                 val key = if (underlying(receiver.keyType) is InterfaceGoType && indexExpression != null && env != null)
-                    defaultRuneValue(rawIndex, indexExpression, env) else rawIndex
+                    defaultConstantValue(rawIndex, indexExpression, env) else rawIndex
                 mapValue(receiver, mapKey(key, receiver.keyType))
             }
             is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { mapType ->
                 val key = if (underlying(mapType.key) is InterfaceGoType && indexExpression != null && env != null)
-                    defaultRuneValue(rawIndex, indexExpression, env) else rawIndex
+                    defaultConstantValue(rawIndex, indexExpression, env) else rawIndex
                 mapKey(key, mapType.key)
                 zeroValue(mapType.value)
             } ?: throw RuntimeGoError("cannot index this value")
