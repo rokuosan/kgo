@@ -2268,7 +2268,7 @@ class TypeChecker(
     }
 
     private fun assignable(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
-        if (from == to) return true
+        if (sameType(from, to)) return true
         if (from == nilType) return isNilable(to)
         val requiredMethods = (underlying(to) as? InterfaceGoType)?.let(::interfaceMethods)
         if (requiredMethods != null) {
