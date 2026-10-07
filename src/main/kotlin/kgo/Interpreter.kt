@@ -2809,7 +2809,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             targetInterface != null -> implementsInterface(iface.dynamicType, targetInterface)
             else -> sameRuntimeType(iface.dynamicType, target)
         }
-        return GoAssertionResult(if (matches) iface.value else zeroValue(target), matches, iface.dynamicType)
+        val assertedValue = if (!matches) zeroValue(target) else if (targetInterface != null)
+            GoInterfaceValue(iface.dynamicType, copyForType(iface.value, iface.dynamicType), iface.implementationOwner)
+        else iface.value
+        return GoAssertionResult(assertedValue, matches, iface.dynamicType)
     }
 
     private fun implementsInterface(type: GoTypeSyntax, target: InterfaceGoType): Boolean {
