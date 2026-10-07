@@ -2650,7 +2650,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val owner = importedRuntimePackages[qualified.packageName]
             val foreignType = if (type is PointerGoType) PointerGoType(NamedGoType(qualified.name))
                 else NamedGoType(qualified.name)
-            if (owner != null) return owner.runtimeMethodSet(foreignType)
+            if (owner != null) return owner.runtimeMethodSet(foreignType).mapValues { (_, signature) ->
+                owner.externalizeRuntimeType(signature, qualified.packageName) as FunctionGoType
+            }
         }
         val actual = underlying(type)
         if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
