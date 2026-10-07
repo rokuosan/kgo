@@ -2555,7 +2555,7 @@ class TypeChecker(
             val t = underlying(to)
             return when {
                 f == untypedInt || f == untypedRune -> isNumeric(to) || isUntyped(to)
-                f == untypedFloat -> t is NamedGoType && t.name.startsWith("float") || t is NamedGoType && t.name.startsWith("complex")
+                f == untypedFloat -> (t as? NamedGoType)?.name?.let { it in floatNames || it in complexNames } == true
                 f == untypedComplex -> isNumeric(to)
                 f == untypedString -> isString(to)
                 f == untypedBool -> isBoolean(to)
