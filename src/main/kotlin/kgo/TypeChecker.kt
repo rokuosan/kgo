@@ -1987,8 +1987,11 @@ class TypeChecker(
                     }
                     else -> error("embedded field must be a type name or pointer to a type name")
                 }
-                if (field.type is PointerGoType && underlying(embedded) is InterfaceGoType)
-                    error("embedded pointer field cannot have interface type")
+                val embeddedUnderlying = underlying(embedded)
+                if (embeddedUnderlying is PointerGoType)
+                    error("embedded field type cannot be a pointer")
+                if (field.type is PointerGoType && embeddedUnderlying is InterfaceGoType)
+                    error("embedded field type cannot be a pointer to an interface")
                 listOf(embeddedFieldName(embedded))
             } else field.names
             fieldNames.filter { it != "_" }.forEach { name ->
