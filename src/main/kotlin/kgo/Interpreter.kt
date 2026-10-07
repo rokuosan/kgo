@@ -939,9 +939,11 @@ class Interpreter(
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
         val onlyIndexIsUsed = range.targets.size <= 1 || range.targets.getOrNull(1).isBlankIdentifier()
         val declarationTypes = if (range.operator == TokenKind.DEFINE) rangeVariableTypes(range, env) else null
-        if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
+        if (onlyIndexIsUsed) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
+                // A constant array length means the range expression itself is not evaluated,
+                // even when it contains calls or receives with side effects.
                 rangeIndexed(arrayLength, range, body, env, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
