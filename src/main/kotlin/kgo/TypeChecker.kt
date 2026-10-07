@@ -297,7 +297,7 @@ class TypeChecker(
         )
     }
 
-    private fun isExportedIdentifier(name: String): Boolean = name.firstOrNull()?.isUpperCase() == true
+    private fun isExportedIdentifier(name: String): Boolean = GoUnicode6.isExportedIdentifier(name)
 
     private fun externalizeType(type: GoTypeSyntax, importPath: String?): GoTypeSyntax {
         fun visit(current: GoTypeSyntax): GoTypeSyntax = when (current) {
@@ -312,15 +312,15 @@ class TypeChecker(
                 field.copy(
                     type = visit(field.type),
                     packagePath = field.packagePath ?: importPath.takeIf { path ->
-                        field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
-                            field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                        field.names.any(GoUnicode6::isUnexportedIdentifier) ||
+                            field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))
                     }
                 )
             })
             is InterfaceGoType -> InterfaceGoType(current.methods.map { method -> method.copy(
                 parameters = method.parameters.map { it.copy(type = visit(it.type)) },
                 results = method.results.map(::visit),
-                packagePath = method.packagePath ?: importPath.takeIf { method.name.firstOrNull()?.isLowerCase() == true }
+                packagePath = method.packagePath ?: importPath.takeIf { GoUnicode6.isUnexportedIdentifier(method.name) }
             ) }, current.embeddedTypes.map(::visit))
             is FunctionGoType -> FunctionGoType(current.parameters.map { it.copy(type = visit(it.type)) }, current.results.map(::visit))
             is QualifiedGoType -> current
@@ -1724,8 +1724,8 @@ class TypeChecker(
             field.copy(
                 type = resolveLocalType(field.type, scope),
                 packagePath = field.packagePath ?: packageIdentity.takeIf { path ->
-                    field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
-                        field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                    field.names.any(GoUnicode6::isUnexportedIdentifier) ||
+                        field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))
                 }
             )
         })
@@ -2547,7 +2547,7 @@ class TypeChecker(
     }
 
     private fun unexportedFieldPackagePath(field: StructFieldSyntax, name: String): String? {
-        if (name.firstOrNull()?.isLowerCase() != true) return null
+        if (!GoUnicode6.isUnexportedIdentifier(name)) return null
         val embeddedType = if (field.names.isEmpty()) field.type.let {
             if (it is PointerGoType) it.element else it
         } else null

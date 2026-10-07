@@ -92,6 +92,15 @@ internal object GoUnicode6 {
 
     fun isDecimalDigit(codePoint: Int): Boolean = contains(decimalDigitRanges, codePoint)
 
+    fun isExportedIdentifier(name: String): Boolean {
+        if (name.isEmpty()) return false
+        val firstCodePoint = name.codePointAt(0)
+        return isLetter(firstCodePoint) && Character.getType(firstCodePoint) == Character.UPPERCASE_LETTER.toInt()
+    }
+
+    fun isUnexportedIdentifier(name: String): Boolean =
+        name.isNotEmpty() && name != "_" && !isExportedIdentifier(name)
+
     private fun contains(ranges: IntArray, codePoint: Int): Boolean {
         var low = 0
         var high = ranges.size / 2

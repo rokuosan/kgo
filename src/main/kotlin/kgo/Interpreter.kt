@@ -192,13 +192,13 @@ class Interpreter(
         val packageConstants = file.declarations.filterIsInstance<ConstantDeclaration>()
         val packageVariables = file.declarations.filterIsInstance<VariableDeclaration>()
         exportedTypeNames = file.declarations.filterIsInstance<TypeDeclaration>().mapNotNullTo(mutableSetOf()) {
-            it.name.takeIf { name -> name != "_" && name.firstOrNull()?.isUpperCase() == true }
+            it.name.takeIf { name -> name != "_" && GoUnicode6.isExportedIdentifier(name) }
         }
         exportedConstantNames = packageConstants.flatMap { it.names }.filterTo(mutableSetOf()) {
-            it != "_" && it.firstOrNull()?.isUpperCase() == true
+            it != "_" && GoUnicode6.isExportedIdentifier(it)
         }
         exportedVariableNames = packageVariables.flatMap { it.names }.filterTo(mutableSetOf()) {
-            it != "_" && it.firstOrNull()?.isUpperCase() == true
+            it != "_" && GoUnicode6.isExportedIdentifier(it)
         }
         packageConstants.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name -> globals.define(name, null, declaration.type) } }
         packageVariables.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name ->
@@ -235,7 +235,7 @@ class Interpreter(
     }
 
     private fun exportedFunction(name: String): FunctionValue? {
-        if (name.firstOrNull()?.isUpperCase() != true) return null
+        if (!GoUnicode6.isExportedIdentifier(name)) return null
         val function = functions[name]?.takeIf { it.receiver == null } ?: return null
         val importPath = packageIdentity ?: return FunctionValue(function, globals, owner = this)
         val signature = FunctionGoType(
@@ -285,7 +285,7 @@ class Interpreter(
         methods[methodKey(type, name)]?.let { return this to it }
         val base = (type as? PointerGoType)?.element ?: type
         if (base is QualifiedGoType) {
-            if (name.firstOrNull()?.isUpperCase() != true && packageIdentity != base.packageName) return null
+            if (!GoUnicode6.isExportedIdentifier(name) && packageIdentity != base.packageName) return null
             val owner = importedRuntimePackages[base.packageName] ?: return null
             owner.methods[owner.methodKey(NamedGoType(base.name), name)]?.let { return owner to it }
         }
@@ -2229,15 +2229,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             field.copy(
                 type = externalizeRuntimeType(field.type, importPath),
                 packagePath = field.packagePath ?: importPath.takeIf { path ->
-                    field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
-                        field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                    field.names.any(GoUnicode6::isUnexportedIdentifier) ||
+                        field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))
                 }
             )
         })
         is InterfaceGoType -> InterfaceGoType(type.methods.map { method -> method.copy(
             parameters = method.parameters.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) },
             results = method.results.map { externalizeRuntimeType(it, importPath) },
-            packagePath = method.packagePath ?: importPath.takeIf { method.name.firstOrNull()?.isLowerCase() == true }
+            packagePath = method.packagePath ?: importPath.takeIf { GoUnicode6.isUnexportedIdentifier(method.name) }
         ) }, type.embeddedTypes.map { externalizeRuntimeType(it, importPath) })
         is FunctionGoType -> FunctionGoType(
             type.parameters.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) },
@@ -2279,8 +2279,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             field.copy(
                 type = resolveRuntimeType(field.type, env),
                 packagePath = field.packagePath ?: packageIdentity.takeIf { path ->
-                    field.names.any { it.firstOrNull()?.isLowerCase() == true } ||
-                        field.names.isEmpty() && embeddedFieldName(field.type).firstOrNull()?.isLowerCase() == true
+                    field.names.any(GoUnicode6::isUnexportedIdentifier) ||
+                        field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))
                 }
             )
         })
@@ -2730,11 +2730,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         return "${(base as? NamedGoType)?.name ?: base}.$name"
     }
 
-    private fun runtimePackageMethodKey(name: String): String = if (name.firstOrNull()?.isUpperCase() == true) name
+    private fun runtimePackageMethodKey(name: String): String = if (GoUnicode6.isExportedIdentifier(name)) name
         else "${packageIdentity ?: "<package>"}:$name"
 
     private fun runtimeInterfaceMethodKey(method: InterfaceMethodSyntax): String =
-        if (method.name.firstOrNull()?.isUpperCase() == true) method.name
+        if (GoUnicode6.isExportedIdentifier(method.name)) method.name
         else "${method.packagePath ?: packageIdentity ?: "<package>"}:${method.name}"
 
     private fun dereference(value: Any?): Any? = if (value is GoPointer) value.get() else value
@@ -3260,7 +3260,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun unexportedFieldPackagePath(field: StructFieldSyntax, name: String): String? {
-        if (name.firstOrNull()?.isLowerCase() != true) return null
+        if (!GoUnicode6.isUnexportedIdentifier(name)) return null
         val embeddedType = if (field.names.isEmpty()) field.type.let {
             if (it is PointerGoType) it.element else it
         } else null
