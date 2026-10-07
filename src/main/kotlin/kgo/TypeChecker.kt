@@ -98,6 +98,7 @@ class TypeChecker(
             is TypeDeclaration -> Unit
             is FunctionDeclaration -> {
                 val receiver = declaration.receiver
+                if (receiver != null && declaration.name == "_") error("method name cannot be blank")
                 if (receiver == null) {
                     if (declaration.name == "init") initFunctions += declaration
                     else if (declaration.name != "_" && functions.putIfAbsent(declaration.name, declaration) != null)
@@ -2363,6 +2364,7 @@ class TypeChecker(
                     if (underlying(it) !is InterfaceGoType) error("embedded interface element must be an interface")
                 }
                 type.methods.forEach { method ->
+                    if (method.name == "_") error("interface method name cannot be blank")
                     if (!names.add(method.name)) error("duplicate interface method ${method.name}")
                     method.parameters.forEach { validateType(it.type, active, true) }
                     method.results.forEach { validateType(it, active, true) }
