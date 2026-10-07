@@ -226,7 +226,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private fun exportedFunction(name: String): FunctionValue? {
         if (name.firstOrNull()?.isUpperCase() != true) return null
         val function = functions[name]?.takeIf { it.receiver == null } ?: return null
-        return FunctionValue(function, globals, owner = this)
+        val importPath = packageIdentity ?: return FunctionValue(function, globals, owner = this)
+        val signature = FunctionGoType(
+            function.parameterTypes.mapIndexed { index, type ->
+                ParameterSyntax(function.parameters.getOrNull(index), externalizeRuntimeType(type, importPath),
+                    function.variadic && index == function.parameterTypes.lastIndex)
+            },
+            function.resultTypes.map { externalizeRuntimeType(it, importPath) }
+        )
+        return FunctionValue(function, globals, signature, this)
     }
 
     private fun exportedConstant(name: String): Any? =
@@ -1791,7 +1799,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is FunctionValue -> {
                 val values = target.owner.invoke(target.function, args, parent = target.closure, expandedVariadic = expandLastArgument,
                     panicState = panicState, deferredCall = deferredCall)
-                return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
+                val resultTypes = (target.type as? FunctionGoType)?.results
+                val exportedValues = if (target.owner !== this && resultTypes != null &&
+                    resultTypes.size == values.size) values.mapIndexed { index, value ->
+                    externalizeImportedResult(value, resultTypes[index], target.owner)
+                } else values
+                return if (exportedValues.isEmpty()) null else if (exportedValues.size == 1) exportedValues.single() else GoMultiValue(exportedValues)
             }
             is MethodValue -> {
                 val values = target.owner.invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument,
@@ -2113,6 +2126,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             type.results.map { externalizeRuntimeType(it, importPath) }
         )
         is QualifiedGoType -> type
+    }
+
+    private fun externalizeImportedResult(value: Any?, type: GoTypeSyntax, owner: Interpreter): Any? {
+        val importPath = owner.packageIdentity ?: return copyForType(value, type)
+        if (value is GoInterfaceValue) {
+            val dynamicType = owner.externalizeRuntimeType(value.dynamicType, importPath)
+            return GoInterfaceValue(dynamicType, copyForType(value.value, dynamicType))
+        }
+        return copyForType(value, type)
     }
 
     private fun resolveRuntimeType(type: GoTypeSyntax, env: Environment): GoTypeSyntax = when (type) {
