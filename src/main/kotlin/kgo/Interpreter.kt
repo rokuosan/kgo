@@ -1999,9 +1999,30 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             else -> type
         }
         is QualifiedGoType -> importedRuntimePackages[type.packageName]?.let { imported ->
-            imported.typeDefinitions[type.name]?.let(imported::underlying)
+            imported.typeDefinitions[type.name]?.let { definition ->
+                imported.externalizeRuntimeType(imported.underlying(definition), type.packageName)
+            }
         } ?: type
         else -> type
+    }
+
+    private fun externalizeRuntimeType(type: GoTypeSyntax, importPath: String): GoTypeSyntax = when (type) {
+        is NamedGoType -> if (typeDefinitions.containsKey(type.name)) QualifiedGoType(importPath, type.name) else type
+        is PointerGoType -> PointerGoType(externalizeRuntimeType(type.element, importPath))
+        is SliceGoType -> SliceGoType(externalizeRuntimeType(type.element, importPath))
+        is ArrayGoType -> ArrayGoType(type.length, externalizeRuntimeType(type.element, importPath))
+        is MapGoType -> MapGoType(externalizeRuntimeType(type.key, importPath), externalizeRuntimeType(type.value, importPath))
+        is ChannelGoType -> ChannelGoType(externalizeRuntimeType(type.element, importPath), type.direction)
+        is StructGoType -> StructGoType(type.fields.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) })
+        is InterfaceGoType -> InterfaceGoType(type.methods.map { method -> method.copy(
+            parameters = method.parameters.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) },
+            results = method.results.map { externalizeRuntimeType(it, importPath) }
+        ) }, type.embeddedTypes.map { externalizeRuntimeType(it, importPath) })
+        is FunctionGoType -> FunctionGoType(
+            type.parameters.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) },
+            type.results.map { externalizeRuntimeType(it, importPath) }
+        )
+        is QualifiedGoType -> type
     }
 
     private fun resolveRuntimeType(type: GoTypeSyntax, env: Environment): GoTypeSyntax = when (type) {

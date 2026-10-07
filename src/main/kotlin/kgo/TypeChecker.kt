@@ -2819,7 +2819,9 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 "error" -> errorInterfaceType
                 else -> type
             }
-        is QualifiedGoType -> importedPackages[type.packageName]?.underlying(NamedGoType(type.name)) ?: type
+        is QualifiedGoType -> importedPackages[type.packageName]?.let { imported ->
+            imported.externalizeType(imported.underlying(NamedGoType(type.name)), type.packageName)
+        } ?: type
         else -> type
     }
     private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType && !type.name.startsWith("#")
