@@ -2000,12 +2000,39 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         values.forEachIndexed { index, value ->
             if (index > 0 && (alwaysSpace || (!isStringOperand(values[index - 1]) && !isStringOperand(value))))
                 bytes += 0x20.toByte()
-            val actual = if (value is GoInterfaceValue) value.value else value
-            bytes += if (actual is GoString) actual.bytes.toList() else encodeGoUtf8Text(stringify(value)).toList()
+            bytes += formatValueBytes(value).toList()
         }
         if (newline) bytes += 0x0a.toByte()
         return bytes.toByteArray()
     }
+
+    private fun formatValueBytes(value: Any?): ByteArray = when (value) {
+        is GoString -> value.bytes.copyOf()
+        is GoInterfaceValue -> formatValueBytes(value.value)
+        is GoPointer -> if (value.isNil) encodeGoUtf8Text("<nil>")
+            else concatenateFormatted(encodeGoUtf8Text("&"), formatValueBytes(value.get()))
+        is GoSlice -> joinFormatted(value.toList().map(::formatValueBytes), "[", " ", "]")
+        is GoArray -> joinFormatted(value.values.map(::formatValueBytes), "[", " ", "]")
+        is GoMap -> joinFormatted(value.values.entries.map { (key, item) ->
+            concatenateFormatted(formatValueBytes(key.value), encodeGoUtf8Text(":"), formatValueBytes(item))
+        }, "map[", " ", "]")
+        is GoStruct -> joinFormatted(value.fields.values.map(::formatValueBytes), "{", " ", "}")
+        else -> encodeGoUtf8Text(stringify(value))
+    }
+
+    private fun joinFormatted(values: List<ByteArray>, prefix: String, separator: String, suffix: String): ByteArray {
+        val bytes = mutableListOf<Byte>()
+        bytes += encodeGoUtf8Text(prefix).toList()
+        values.forEachIndexed { index, value ->
+            if (index > 0) bytes += encodeGoUtf8Text(separator).toList()
+            bytes += value.toList()
+        }
+        bytes += encodeGoUtf8Text(suffix).toList()
+        return bytes.toByteArray()
+    }
+
+    private fun concatenateFormatted(vararg values: ByteArray): ByteArray =
+        values.flatMap(ByteArray::asIterable).toByteArray()
 
     private fun isStringOperand(value: Any?): Boolean {
         val actual = if (value is GoInterfaceValue) value.value else value
