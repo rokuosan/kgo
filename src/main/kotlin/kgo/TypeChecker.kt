@@ -2493,7 +2493,8 @@ class TypeChecker(
                         error("constant is not representable as $checkedTarget")
                     it.real
                 } ?: return
-            val overflows = if (targetName == "float32") !value.toFloat().isFinite() else !value.toDouble().isFinite()
+            val overflows = if (targetName in setOf("#predeclared-float32", "float32"))
+                !value.toFloat().isFinite() else !value.toDouble().isFinite()
             if (overflows)
                 error("constant overflows $checkedTarget")
             return
@@ -3211,6 +3212,7 @@ class TypeChecker(
         is NamedGoType -> when (type.name) {
             "#predeclared-error" -> errorInterfaceType
             "#predeclared-bool" -> boolType
+            "#predeclared-float32", "#predeclared-float64" -> type
             "#predeclared-int", "#predeclared-uint8" -> type
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
@@ -3295,6 +3297,8 @@ class TypeChecker(
         intType -> if ("int" !in typeDeclarations) predeclaredIntType else type
         NamedGoType("error") -> if ("error" !in typeDeclarations) predeclaredErrorType else type
         boolType -> if ("bool" !in typeDeclarations) predeclaredBoolType else type
+        NamedGoType("float32") -> if ("float32" !in typeDeclarations) predeclaredFloat32Type else type
+        NamedGoType("float64") -> if ("float64" !in typeDeclarations) predeclaredFloat64Type else type
         else -> type
     }
     private fun requireBoolean(type: GoTypeSyntax, context: String) { if (!isBoolean(type)) error("$context must be boolean") }
@@ -3423,13 +3427,15 @@ class TypeChecker(
         private val predeclaredUint8Type = NamedGoType("#predeclared-uint8")
         private val predeclaredErrorType = NamedGoType("#predeclared-error")
         private val predeclaredBoolType = NamedGoType("#predeclared-bool")
+        private val predeclaredFloat32Type = NamedGoType("#predeclared-float32")
+        private val predeclaredFloat64Type = NamedGoType("#predeclared-float64")
         private val byteType = NamedGoType("byte")
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(stringType))))
         private val integerNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
-        private val floatNames = setOf("float32", "float64")
+        private val floatNames = setOf("#predeclared-float32", "#predeclared-float64", "float32", "float64")
         private val complexNames = setOf("complex64", "complex128")
         private val builtinTypes = integerNames + floatNames + complexNames + setOf("bool", "string")
     }

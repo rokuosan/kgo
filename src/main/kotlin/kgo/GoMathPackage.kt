@@ -2,8 +2,8 @@ package kgo
 
 /** Go 1.0 math package declarations exposed by the JVM runtime. */
 internal object GoMathPackage {
-    private val float64 = NamedGoType("float64")
-    private val float32 = NamedGoType("float32")
+    private val float64 = NamedGoType("#predeclared-float64")
+    private val float32 = NamedGoType("#predeclared-float32")
     private val int = NamedGoType("#predeclared-int")
     private val bool = NamedGoType("#predeclared-bool")
     private val integerConstants = setOf(

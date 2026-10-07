@@ -1003,6 +1003,8 @@ class Interpreter(
         NamedGoType("int") -> if (!typeDefinitions.containsKey("int")) predeclaredIntRuntimeType else type
         NamedGoType("error") -> if (!typeDefinitions.containsKey("error")) predeclaredErrorRuntimeType else type
         NamedGoType("bool") -> if (!typeDefinitions.containsKey("bool")) predeclaredBoolRuntimeType else type
+        NamedGoType("float32") -> if (!typeDefinitions.containsKey("float32")) predeclaredFloat32RuntimeType else type
+        NamedGoType("float64") -> if (!typeDefinitions.containsKey("float64")) predeclaredFloat64RuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
         is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
@@ -2208,7 +2210,17 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         fmtWriteResult(rendered.size, null)
                     }
                 }
-                else -> if (target.name.startsWith("math.")) return mathCall(target.name.removePrefix("math."), args)
+                else -> if (target.name.startsWith("math.")) {
+                    val functionName = target.name.removePrefix("math.")
+                    val result = mathCall(functionName, args)
+                    val resultTypes = GoMathPackage.functionType(functionName)?.results.orEmpty()
+                    return when (result) {
+                        is GoMultiValue -> GoMultiValue(result.values.mapIndexed { index, value ->
+                            resultTypes.getOrNull(index)?.let { convert(it, value) } ?: value
+                        })
+                        else -> resultTypes.singleOrNull()?.let { convert(it, result) } ?: result
+                    }
+                }
             }
             is TypeValue -> return convert(target.type, args.singleOrNull() ?: throw RuntimeGoError("conversion requires one argument"))
         }
@@ -2413,6 +2425,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         is NamedGoType -> when (type.name) {
             "#predeclared-bool" -> NamedGoType("bool")
+            "#predeclared-float32" -> NamedGoType("float32")
+            "#predeclared-float64" -> NamedGoType("float64")
             else -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
@@ -4762,6 +4776,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         private val predeclaredErrorRuntimeType = NamedGoType("#predeclared-error")
         private val predeclaredIntRuntimeType = NamedGoType("#predeclared-int")
         private val predeclaredUInt8RuntimeType = NamedGoType("#predeclared-uint8")
+        private val predeclaredFloat32RuntimeType = NamedGoType("#predeclared-float32")
+        private val predeclaredFloat64RuntimeType = NamedGoType("#predeclared-float64")
         private val integerTypeNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")
