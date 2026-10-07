@@ -1601,7 +1601,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
             evaluate(expression.operand, env) as? GoPointer ?: throw RuntimeGoError("cannot take address through a non-pointer")
         } else throw RuntimeGoError("expression is not addressable")
-        is CompositeLiteral -> GoPointer.cell(composite(expression, env), expression.type)
+        is CompositeLiteral -> addressableCell(composite(expression, env), resolveRuntimeType(expression.type, env))
         else -> throw RuntimeGoError("expression is not addressable")
     }
 
@@ -1943,7 +1943,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 "make" -> return make(args)
                 "new" -> {
                     val type = (args.singleOrNull() as? TypeValue)?.type ?: throw RuntimeGoError("new requires a type")
-                    return GoPointer.cell(zeroValue(type), type)
+                    return addressableCell(zeroValue(type), type)
                 }
                 "close" -> {
                     when (val channel = args.singleOrNull()) {
@@ -2199,7 +2199,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         underlying(type) is PointerGoType -> {
             val pointerType = underlying(type) as PointerGoType
-            GoPointer.cell(composite(CompositeLiteral(pointerType.element, expression.elements), env), pointerType.element)
+            addressableCell(composite(CompositeLiteral(pointerType.element, expression.elements), env), pointerType.element)
         }
         else -> composite(CompositeLiteral(type, expression.elements), env)
     }
@@ -2837,7 +2837,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun setArrayElement(array: GoArray, rawIndex: Any?, value: Any?) {
         val index = collectionIndex(rawIndex, "index")
         if (index !in array.values.indices) throw RuntimeGoError("array index out of range")
-        array.values[index] = copyForType(value, array.elementType)
+        val assigned = copyForType(value, array.elementType)
+        array.values[index] = preserveAggregateStorage(array.values[index], assigned, array.elementType)
+    }
+
+    private fun addressableCell(value: Any?, type: GoTypeSyntax): GoPointer = GoPointer.cell(value, type) { previous, assigned ->
+        preserveAggregateStorage(previous, copyForType(assigned, type), type)
     }
 
     private fun sliceArray(array: GoArray, low: Int, high: Int, max: Int): GoSlice {
@@ -3943,7 +3948,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun elementPointer(values: MutableList<Any?>, index: Int, elementType: GoTypeSyntax): GoPointer =
         synchronized(elementPointers) {
             elementPointers.getOrPut(values) { mutableMapOf() }.getOrPut(index) {
-                GoPointer.reference({ values[index] }, { values[index] = copyForType(it, elementType) }, elementType)
+                GoPointer.reference({ values[index] }, { value ->
+                    val assigned = copyForType(value, elementType)
+                    values[index] = preserveAggregateStorage(values[index], assigned, elementType)
+                }, elementType)
             }
         }
 
@@ -4022,7 +4030,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         fun set(index: Int, value: Any?) {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
-            backing[start + index] = copyForType(value, elementType)
+            val absolute = start + index
+            val assigned = copyForType(value, elementType)
+            backing[absolute] = preserveAggregateStorage(backing[absolute], assigned, elementType)
         }
         fun pointerAt(index: Int): GoPointer {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
@@ -4039,7 +4049,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val required = length.toLong() + values.size
             if (required > Int.MAX_VALUE) throw RuntimeGoError("slice length out of range")
             if (required <= capacity) {
-                values.forEachIndexed { i, value -> backing[start + length + i] = copyForType(value, elementType) }
+                values.forEachIndexed { i, value ->
+                    val index = start + length + i
+                    val assigned = copyForType(value, elementType)
+                    backing[index] = preserveAggregateStorage(backing[index], assigned, elementType)
+                }
                 return GoSlice(elementType, backing, start, length + values.size, capacity, namedType, type, packagePath)
             }
             val grownCapacity = minOf(capacity.toLong() * 2, Int.MAX_VALUE.toLong())
@@ -4078,7 +4092,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     ) {
         private val addresses = mutableMapOf<String, GoPointer>()
         fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
-            GoPointer.reference({ fields[field] }, { fields[field] = copyForType(it, fieldTypes[field] ?: NamedGoType("<unknown>")) }, fieldTypes[field])
+            val fieldType = fieldTypes[field] ?: NamedGoType("<unknown>")
+            GoPointer.reference({ fields[field] }, { value ->
+                val assigned = copyForType(value, fieldType)
+                fields[field] = preserveAggregateStorage(fields[field], assigned, fieldType)
+            }, fieldTypes[field])
         }
         override fun equals(other: Any?): Boolean {
             if (other !is GoStruct || (namedType != null && other.namedType != null &&
@@ -4108,7 +4126,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         companion object {
             fun reference(get: () -> Any?, set: (Any?) -> Unit, pointeeType: GoTypeSyntax? = null) =
                 GoPointer(GoLocation(get, set), pointeeType)
-            fun cell(value: Any?, pointeeType: GoTypeSyntax? = null) = GoCell(value).let { cell -> reference({ cell.value }, { cell.value = it }, pointeeType) }
+            fun cell(
+                value: Any?,
+                pointeeType: GoTypeSyntax? = null,
+                assign: (previous: Any?, assigned: Any?) -> Any? = { _, assigned -> assigned }
+            ) = GoCell(value).let { cell ->
+                reference({ cell.value }, { cell.value = assign(cell.value, it) }, pointeeType)
+            }
             fun nil(pointeeType: GoTypeSyntax) = GoPointer(null, pointeeType)
         }
     }
