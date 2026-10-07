@@ -60,6 +60,7 @@ Empty and basic non-empty interface values use method-set checks for declared
 methods on named types, with value and pointer receiver dispatch. Embedded
 struct-field and interface-method promotion follow breadth-first selector
 lookup. Some interface assignment cases remain incomplete.
+Unexported interface methods are identified by their declaring package path.
 Interface type assertions and type switches are supported for the runtime
 types currently represented, including typed nil pointers, slices, maps,
 channels, and functions stored in interfaces. Nil slices and maps have their

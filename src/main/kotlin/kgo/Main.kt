@@ -34,11 +34,11 @@ fun main(args: Array<String>) {
             val packages = GoSourcePackageLoader(sourceDirectory).dependencies(files)
             val packageCheckers = linkedMapOf<String, TypeChecker>()
             packages.forEach { imported ->
-                val checker = TypeChecker(packageCheckers)
+                val checker = TypeChecker(packageCheckers, imported.importPath)
                 checker.checkFiles(imported.files)
                 packageCheckers[imported.importPath] = checker
             }
-            TypeChecker(packageCheckers).checkFiles(files)
+            TypeChecker(packageCheckers, sourceDirectory.canonicalPath).checkFiles(files)
             Interpreter().run(files, packages)
         }
     } catch (e: ScanError) {

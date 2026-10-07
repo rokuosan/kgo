@@ -100,6 +100,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private var exportedConstantNames: Set<String> = emptySet()
     private var exportedVariableNames: Set<String> = emptySet()
     private var exportedTypeNames: Set<String> = emptySet()
+    private var packageIdentity: String? = null
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) = run(listOf(file), emptyList())
@@ -121,6 +122,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val runtimes = linkedMapOf<String, Interpreter>()
                 sourcePackages.forEach { sourcePackage ->
                     val runtime = Interpreter(output)
+                    runtime.packageIdentity = sourcePackage.importPath
                     runtime.goroutines = goroutines
                     runtime.importedRuntimePackages = runtimes.toMap()
                     runtime.knownPackageNames = knownPackageNames
@@ -158,6 +160,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private suspend fun initializePackage(files: List<GoFile>) {
         val packageName = files.first().packageName
+        packageIdentity = packageIdentity ?: packageName
         val file = GoFile(packageName, files.flatMap { it.declarations })
         file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
             if (function.name != "_") {
@@ -241,7 +244,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         methods[methodKey(type, name)]?.let { return this to it }
         val base = (type as? PointerGoType)?.element ?: type
         if (base is QualifiedGoType) {
-            if (name.firstOrNull()?.isUpperCase() != true) return null
+            if (name.firstOrNull()?.isUpperCase() != true && packageIdentity != base.packageName) return null
             val owner = importedRuntimePackages[base.packageName] ?: return null
             owner.methods[owner.methodKey(NamedGoType(base.name), name)]?.let { return owner to it }
         }
@@ -1002,7 +1005,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val struct = receiverType?.let(::underlying).let { if (it is PointerGoType) underlying(it.element) else it }
                 when (struct) {
                     is StructGoType -> staticPromotedFieldType(struct, expression.field, env)
-                    is InterfaceGoType -> interfaceMethodsRuntime(struct)[expression.field]
+                    is InterfaceGoType -> interfaceMethodsRuntime(struct)[runtimePackageMethodKey(expression.field)]
                     else -> null
                 }
             }
@@ -2016,7 +2019,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is StructGoType -> StructGoType(type.fields.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) })
         is InterfaceGoType -> InterfaceGoType(type.methods.map { method -> method.copy(
             parameters = method.parameters.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) },
-            results = method.results.map { externalizeRuntimeType(it, importPath) }
+            results = method.results.map { externalizeRuntimeType(it, importPath) },
+            packagePath = method.packagePath ?: importPath.takeIf { method.name.firstOrNull()?.isLowerCase() == true }
         ) }, type.embeddedTypes.map { externalizeRuntimeType(it, importPath) })
         is FunctionGoType -> FunctionGoType(
             type.parameters.map { it.copy(type = externalizeRuntimeType(it.type, importPath)) },
@@ -2388,7 +2392,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
         }
         iface.methods.forEach { method ->
-            if (result.putIfAbsent(method.name, FunctionGoType(method.parameters, method.results)) != null)
+            val key = runtimeInterfaceMethodKey(method)
+            if (result.putIfAbsent(key, FunctionGoType(method.parameters, method.results)) != null)
                 throw RuntimeGoError("duplicate interface method ${method.name}")
         }
         return result
@@ -2402,7 +2407,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val owner = importedRuntimePackages[qualified.packageName]
             val foreignType = if (type is PointerGoType) PointerGoType(NamedGoType(qualified.name))
                 else NamedGoType(qualified.name)
-            if (owner != null) return owner.runtimeMethodSet(foreignType).filterKeys { it.firstOrNull()?.isUpperCase() == true }
+            if (owner != null) return owner.runtimeMethodSet(foreignType)
         }
         val actual = underlying(type)
         if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
@@ -2432,7 +2437,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                             val receiverType = method.receiver?.type ?: return@methodLoop
                             val receiverBase = if (receiverType is PointerGoType) receiverType.element else receiverType
                             if (receiverBase != NamedGoType(named) || receiverType is PointerGoType && !node.pointer) return@methodLoop
-                            candidates.getOrPut(method.name) { mutableListOf() } += FunctionGoType(
+                            candidates.getOrPut(runtimePackageMethodKey(method.name)) { mutableListOf() } += FunctionGoType(
                                 method.parameterTypes.mapIndexed { i, parameter ->
                                     ParameterSyntax(method.parameters.getOrNull(i), parameter, method.variadic && i == method.parameterTypes.lastIndex)
                                 },
@@ -2455,7 +2460,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                             val receiverType = method.receiver?.type ?: return@methodLoop
                             val receiverBase = if (receiverType is PointerGoType) receiverType.element else receiverType
                             if (receiverBase != NamedGoType(named) || receiverType is PointerGoType && !node.pointer) return@methodLoop
-                            candidates.getOrPut(method.name) { mutableListOf() } += FunctionGoType(
+                            candidates.getOrPut(runtimePackageMethodKey(method.name)) { mutableListOf() } += FunctionGoType(
                                 method.parameterTypes.mapIndexed { i, parameter ->
                                     ParameterSyntax(method.parameters.getOrNull(i), parameter, method.variadic && i == method.parameterTypes.lastIndex)
                                 },
@@ -2483,6 +2488,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val base = if (type is PointerGoType) type.element else type
         return "${(base as? NamedGoType)?.name ?: base}.$name"
     }
+
+    private fun runtimePackageMethodKey(name: String): String = if (name.firstOrNull()?.isUpperCase() == true) name
+        else "${packageIdentity ?: "<package>"}:$name"
+
+    private fun runtimeInterfaceMethodKey(method: InterfaceMethodSyntax): String =
+        if (method.name.firstOrNull()?.isUpperCase() == true) method.name
+        else "${method.packagePath ?: packageIdentity ?: "<package>"}:${method.name}"
 
     private fun dereference(value: Any?): Any? = if (value is GoPointer) value.get() else value
 

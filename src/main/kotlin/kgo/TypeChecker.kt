@@ -20,7 +20,10 @@ internal data class ExportedConstant(
 private data class TypeMethod(val signature: FunctionGoType, val pointerReceiver: Boolean)
 
 /** Static checks for the declaration and statement forms currently represented by the AST. */
-class TypeChecker(private val importedPackages: Map<String, TypeChecker> = emptyMap()) {
+class TypeChecker(
+    private val importedPackages: Map<String, TypeChecker> = emptyMap(),
+    private val sourceImportPath: String? = null
+) {
     private val typeDeclarations = linkedMapOf<String, GoTypeSyntax>()
     private val functions = linkedMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
@@ -43,6 +46,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     internal var packageName: String? = null
         private set
     private var packageLevelNames: Set<String> = emptySet()
+    private var packageIdentity: String? = sourceImportPath
 
     fun check(file: GoFile) = checkFiles(listOf(file))
 
@@ -52,6 +56,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
         if (files.isEmpty()) error("package has no source files")
         val packageName = files.first().packageName
         this.packageName = packageName
+        this.packageIdentity = sourceImportPath ?: packageName
         if (packageName == "_") error("package name cannot be _")
         if (files.any { it.packageName != packageName }) error("source files declare different package names")
         val declarations = files.flatMap { file -> file.declarations.map { file to it } }
@@ -301,7 +306,8 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
             is StructGoType -> StructGoType(current.fields.map { it.copy(type = visit(it.type)) })
             is InterfaceGoType -> InterfaceGoType(current.methods.map { method -> method.copy(
                 parameters = method.parameters.map { it.copy(type = visit(it.type)) },
-                results = method.results.map(::visit)
+                results = method.results.map(::visit),
+                packagePath = method.packagePath ?: importPath.takeIf { method.name.firstOrNull()?.isLowerCase() == true }
             ) }, current.embeddedTypes.map(::visit))
             is FunctionGoType -> FunctionGoType(current.parameters.map { it.copy(type = visit(it.type)) }, current.results.map(::visit))
             is QualifiedGoType -> current
@@ -1544,7 +1550,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
             val next = mutableListOf<SearchNode>()
             level.forEach { node ->
                 when (val actual = selectorBaseType(node.type)) {
-                    is InterfaceGoType -> interfaceMethods(actual)[expression.field]?.let {
+                    is InterfaceGoType -> interfaceMethods(actual)[packageMethodKey(expression.field)]?.let {
                         candidates += Candidate(it, isMethod = true)
                     }
                     is StructGoType -> {
@@ -2415,7 +2421,8 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
         }
         iface.methods.forEach { method ->
             val signature = FunctionGoType(method.parameters, method.results)
-            val previous = result.putIfAbsent(method.name, signature)
+            val key = interfaceMethodKey(method)
+            val previous = result.putIfAbsent(key, signature)
             if (previous != null) error("duplicate interface method ${method.name}")
         }
         return result
@@ -2441,8 +2448,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                     val imported = importedPackages[named.packageName]
                     val foreignType = if (node.pointer) PointerGoType(NamedGoType(named.name)) else NamedGoType(named.name)
                     imported?.methodSet(foreignType)?.forEach { (name, signature) ->
-                        if (isExportedIdentifier(name))
-                            candidates.getOrPut(name) { mutableListOf() } += imported.externalizeType(signature, named.packageName) as FunctionGoType
+                        candidates.getOrPut(name) { mutableListOf() } += imported.externalizeType(signature, named.packageName) as FunctionGoType
                     }
                 }
                 when (val nodeType = selectorBaseType(node.type)) {
@@ -2454,7 +2460,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                         if (baseName != null) methods.values.forEach { method ->
                             val receiverType = method.receiver?.type ?: return@forEach
                             if (namedType(receiverType) != baseName || receiverType is PointerGoType && !node.pointer) return@forEach
-                            candidates.getOrPut(method.name) { mutableListOf() } += functionType(method)
+                            candidates.getOrPut(packageMethodKey(method.name)) { mutableListOf() } += functionType(method)
                         }
                         nodeType.fields.filter { it.names.isEmpty() }.forEach { field ->
                             val embedded = field.type
@@ -2471,7 +2477,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                         if (baseName != null) methods.values.forEach methodLoop@{ method ->
                             val receiverType = method.receiver?.type ?: return@methodLoop
                             if (namedType(receiverType) != baseName || receiverType is PointerGoType && !node.pointer) return@methodLoop
-                            candidates.getOrPut(method.name) { mutableListOf() } += functionType(method)
+                            candidates.getOrPut(packageMethodKey(method.name)) { mutableListOf() } += functionType(method)
                         }
                     }
                 }
@@ -2489,6 +2495,13 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
         left.parameters.size == right.parameters.size && left.results.size == right.results.size &&
             left.parameters.zip(right.parameters).all { (a, b) -> sameType(a.type, b.type) && a.variadic == b.variadic } &&
             left.results.zip(right.results).all { (a, b) -> sameType(a, b) }
+
+    private fun interfaceMethodKey(method: InterfaceMethodSyntax): String =
+        if (isExportedIdentifier(method.name)) method.name
+        else "${method.packagePath ?: packageIdentity ?: packageName ?: "<package>"}:${method.name}"
+
+    private fun packageMethodKey(name: String): String = if (isExportedIdentifier(name)) name
+        else "${packageIdentity ?: packageName ?: "<package>"}:$name"
 
     private fun sameType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
         if (left == right) return true
