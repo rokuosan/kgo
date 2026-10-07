@@ -112,14 +112,6 @@ class TypeChecker(
                     if (underlying(baseName) is InterfaceGoType || underlying(baseName) is PointerGoType)
                         error("invalid method receiver type ${baseName.name}")
                     if (declaration.name != "_") {
-                        val pointerReceiver = receiver.type is PointerGoType
-                        val hasConflictingReceiver = methods.values.any { previous ->
-                            val previousReceiver = previous.receiver ?: return@any false
-                            val previousBase = (previousReceiver.type as? PointerGoType)?.element ?: previousReceiver.type
-                            previousBase == baseName && (previousReceiver.type is PointerGoType) != pointerReceiver
-                        }
-                        if (hasConflictingReceiver)
-                            error("all methods for ${baseName.name} must use the same receiver type")
                         val key = methodKey(receiver.type, declaration.name)
                         if (methods.putIfAbsent(key, declaration) != null)
                             error("method ${declaration.name} redeclared for ${baseName.name}")
