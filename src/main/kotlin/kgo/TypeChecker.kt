@@ -26,6 +26,7 @@ class TypeChecker(
 ) {
     private val typeDeclarations = linkedMapOf<String, GoTypeSyntax>()
     private val checkedRuntimeTypeDeclarations = linkedMapOf<String, GoTypeSyntax>()
+    private val checkedFunctionTypes = IdentityHashMap<FunctionDeclaration, FunctionGoType>()
     private val functions = linkedMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val methods = linkedMapOf<String, FunctionDeclaration>()
@@ -167,6 +168,14 @@ class TypeChecker(
                 )
             }
         }
+        checkedFunctionTypes.clear()
+        for ((sourceFile, declaration) in declarations) {
+            if (declaration is FunctionDeclaration) withFileImports(sourceFile) {
+                checkedFunctionTypes[declaration] = resolveFunctionType(declaration, globals)
+            }
+        }
+        functions.forEach { (name, function) -> globals.define(name, functionType(function), isFunction = true) }
+        methods.forEach { (key, function) -> globals.define(key, functionType(function)) }
         val variableFiles = IdentityHashMap<VariableDeclaration, GoFile>()
         declarations.forEach { (file, declaration) ->
             (declaration as? VariableDeclaration)?.let { variableFiles[it] = file }
@@ -477,29 +486,31 @@ class TypeChecker(
     }
 
     private fun checkFunction(function: FunctionDeclaration) {
+        val signature = functionType(function)
         val scope = globals.child()
         function.receiver?.let { receiver ->
-            validateType(receiver.type)
+            val receiverType = resolveLocalType(receiver.type, globals)
+            validateType(receiverType)
             receiver.name?.takeIf { it != "_" }?.let { name ->
                 if (scope.containsLocal(name)) error("$name redeclared in function signature")
-                scope.define(name, receiver.type)
+                scope.define(name, receiverType)
             }
         }
         function.parameters.forEachIndexed { i, name ->
-            val type = function.parameterTypes.getOrNull(i) ?: error("missing type for parameter ${name ?: i}")
+            val type = signature.parameters.getOrNull(i)?.type ?: error("missing type for parameter ${name ?: i}")
             validateType(type)
             if (name != null && name != "_") {
                 if (scope.containsLocal(name)) error("$name redeclared in function signature")
                 scope.define(name, type)
             }
         }
-        function.resultTypes.forEach(::validateType)
-        val names = function.resultNames.ifEmpty { List(function.resultTypes.size) { null } }
-        if (names.size != function.resultTypes.size) error("result name count does not match result type count")
+        signature.results.forEach(::validateType)
+        val names = function.resultNames.ifEmpty { List(signature.results.size) { null } }
+        if (names.size != signature.results.size) error("result name count does not match result type count")
         names.forEachIndexed { index, name ->
             if (name != null && name != "_") {
                 if (scope.containsLocal(name)) error("$name redeclared in function signature")
-                scope.define(name, function.resultTypes[index])
+                scope.define(name, signature.results[index])
             }
         }
         val body = function.body ?: return
@@ -509,7 +520,7 @@ class TypeChecker(
         val previousUsedLabels = usedLabels
         val previousBlockPath = labelBlockPath
         val previousBlockIndices = blockStatementIndices
-        resultTypes = function.resultTypes
+        resultTypes = signature.results
         resultNames = names
         functionLabels = collectLabels(body)
         usedLabels = mutableSetOf()
@@ -518,7 +529,7 @@ class TypeChecker(
         try {
             validateBranchTargets(body)
             checkBlock(body, scope, reuseScope = true)
-            if (function.resultTypes.isNotEmpty() && !endsWithGo10Exit(body))
+            if (signature.results.isNotEmpty() && !endsWithGo10Exit(body))
                 error("missing return at end of function ${function.name}")
             val unused = functionLabels.keys - usedLabels
             if (unused.isNotEmpty()) error("label ${unused.first()} declared and not used")
@@ -2544,9 +2555,19 @@ class TypeChecker(
             else -> null
         }
     }
-    private fun functionType(function: FunctionDeclaration) = FunctionGoType(function.parameterTypes.mapIndexed { i, t ->
-        ParameterSyntax(function.parameters.getOrNull(i), t, function.variadic && i == function.parameterTypes.lastIndex)
-    }, function.resultTypes)
+    private fun resolveFunctionType(function: FunctionDeclaration, scope: Scope) = FunctionGoType(
+        function.parameterTypes.mapIndexed { i, t ->
+            ParameterSyntax(
+                function.parameters.getOrNull(i), resolveLocalType(t, scope),
+                function.variadic && i == function.parameterTypes.lastIndex
+            )
+        },
+        function.resultTypes.map { resolveLocalType(it, scope) }
+    )
+    private fun functionType(function: FunctionDeclaration) = checkedFunctionTypes[function]
+        ?: FunctionGoType(function.parameterTypes.mapIndexed { i, t ->
+            ParameterSyntax(function.parameters.getOrNull(i), t, function.variadic && i == function.parameterTypes.lastIndex)
+        }, function.resultTypes)
     private fun namedType(type: GoTypeSyntax): String? = when (type) {
         is NamedGoType -> type.name
         is QualifiedGoType -> "${type.packageName}.${type.name}"
