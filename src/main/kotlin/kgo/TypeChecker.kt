@@ -1967,7 +1967,7 @@ class TypeChecker(
     }
 
     private fun callResults(call: CallExpression, scope: Scope): List<GoTypeSyntax> {
-        val target = call.function
+        val target = call.function.unparenthesized()
         if (target is SelectorExpression) {
             val importedType = importedPackageType(target)
             if (importedType != null) {
@@ -2011,8 +2011,8 @@ class TypeChecker(
                 }
             }
         }
-        val targetType = if (target is SelectorExpression) selectorType(target, scope, allowBoundMethod = true)
-            else expressionType(target, scope)
+        val targetType = if (call.function is SelectorExpression) selectorType(call.function, scope, allowBoundMethod = true)
+            else expressionType(call.function, scope)
         val functionType = underlying(targetType) as? FunctionGoType ?: error("called value is not a function")
         val variadic = functionType.parameters.lastOrNull()?.variadic == true
         val fixedCount = if (variadic) functionType.parameters.size - 1 else functionType.parameters.size

@@ -1806,10 +1806,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private suspend fun call(call: CallExpression, env: Environment): Any? {
-        if (call.function is TypeExpression && call.arguments.size == 1 && !call.expandLastArgument) {
+        val parenthesizedType = call.function.unparenthesized() as? TypeExpression
+        if (parenthesizedType != null && call.arguments.size == 1 && !call.expandLastArgument) {
             val value = evaluate(call.arguments.single(), env)
             val source = call.arguments.single()
-            return convert(resolveRuntimeType(call.function.type, env), defaultRuneValue(value, source, env))
+            return convert(resolveRuntimeType(parenthesizedType.type, env), defaultRuneValue(value, source, env))
         }
         val builtinName = (call.function as? NameExpression)?.name
         if (builtinName in setOf("len", "cap") && builtinName?.let {
@@ -1820,7 +1821,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         val target = evaluate(call.function, env)
         val rawArgs = evaluateCallArguments(call, env)
-        val args = adaptCallArguments(call, target, rawArgs, env)
+        val args = adaptCallArguments(call, target, rawArgs, env).let { arguments ->
+            if (target is TypeValue && arguments.size == 1 && call.arguments.size == 1 && !call.expandLastArgument)
+                listOf(defaultRuneValue(arguments.single(), call.arguments.single(), env))
+            else arguments
+        }
         return call(target, args, call.expandLastArgument, env.panicState, environment = env)
     }
 
@@ -1887,7 +1892,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         return call.arguments.map { copyValue(evaluate(it, env)) }
     }
 
-    private fun runtimeTypeConversion(call: CallExpression, env: Environment): GoTypeSyntax? = when (val target = call.function) {
+    private fun runtimeTypeConversion(call: CallExpression, env: Environment): GoTypeSyntax? = when (val target = call.function.unparenthesized()) {
         is TypeExpression -> resolveRuntimeType(target.type, env)
         is NameExpression -> {
             val binding = env.binding(target.name)
