@@ -2759,6 +2759,10 @@ class TypeChecker(
         is UnaryExpression -> constantRational(expression.operand, scope)?.let { value -> when (expression.operator) {
             TokenKind.ADD -> value
             TokenKind.SUB -> value.negate()
+            TokenKind.XOR -> if (!value.isInteger()) null else {
+                val operandType = expressionType(expression.operand, scope)
+                GoRational.of(complementIntegerConstant(value.numerator, operandType))
+            }
             else -> null
         } }
         is BinaryExpression -> {
@@ -2812,13 +2816,7 @@ class TypeChecker(
         is UnaryExpression -> constantInteger(expression.operand, scope)?.let { value -> when (expression.operator) {
             TokenKind.ADD -> value
             TokenKind.SUB -> value.negate()
-            TokenKind.XOR -> {
-                val operandType = expressionType(expression.operand, scope)
-                if (isUnsignedInteger(operandType)) {
-                    val mask = BigInteger.ONE.shiftLeft(integerBitWidth(operandType)).subtract(BigInteger.ONE)
-                    value.not().and(mask)
-                } else value.not()
-            }
+            TokenKind.XOR -> complementIntegerConstant(value, expressionType(expression.operand, scope))
             else -> null
         } }
         is CallExpression -> {
@@ -3097,6 +3095,11 @@ class TypeChecker(
     }
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean =
         (underlying(type) as? NamedGoType)?.name in setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+    private fun complementIntegerConstant(value: BigInteger, type: GoTypeSyntax): BigInteger {
+        if (!isUnsignedInteger(type)) return value.not()
+        val mask = BigInteger.ONE.shiftLeft(integerBitWidth(type)).subtract(BigInteger.ONE)
+        return value.not().and(mask)
+    }
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
         "int8", "uint8", "byte" -> 8
         "int16", "uint16" -> 16
