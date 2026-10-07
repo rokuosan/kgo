@@ -1063,9 +1063,9 @@ class Interpreter(
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
             }
             is GoMap -> {
-                // Go 1 requires map iteration order to vary unpredictably; snapshot keys,
-                // then recheck membership and read values as each entry is reached.
-                // Deleting a not-yet-reached entry must suppress that iteration value.
+                // Go 1 leaves map iteration order unspecified. Snapshot keys, then
+                // recheck membership and read values as each entry is reached so
+                // deleting an unreached entry suppresses that iteration value.
                 for (key in value.values.keys.toList().shuffled()) {
                     yield()
                     if (!value.values.containsKey(key)) continue
