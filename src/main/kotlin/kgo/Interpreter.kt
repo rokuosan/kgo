@@ -551,18 +551,25 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         sourceExpressions: List<Expression>?,
         env: Environment
     ): List<Any?> = values.mapIndexed { index, value ->
+        val sharedExpression = sourceExpressions?.singleOrNull()?.takeIf { values.size > 1 }
         locations[index].type?.let { type ->
-            boxInterfaceAssignment(value, type, sourceExpressions?.getOrNull(index), env)
+            boxInterfaceAssignment(
+                value, type, sourceExpressions?.getOrNull(index) ?: sharedExpression, env,
+                if (sharedExpression != null) index else 0
+            )
         } ?: value
     }
 
     private fun boxInterfaceAssignment(
-        value: Any?, targetType: GoTypeSyntax, expression: Expression?, env: Environment
+        value: Any?, targetType: GoTypeSyntax, expression: Expression?, env: Environment, resultIndex: Int = 0
     ): Any? {
         if (underlying(targetType) !is InterfaceGoType) return value
         val normalized = defaultRuneValue(value, expression, env)
         if (normalized == null || normalized is GoInterfaceValue) return normalized
-        val sourceType = expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) }
+        val sourceType = expression?.let {
+            (staticExpressionResultType(it, resultIndex, env) ?: staticExpressionType(it, env))
+                .let { type -> type?.let { resolveRuntimeType(it, env) } }
+        }
         val dynamicType = sourceType?.takeUnless { it is NamedGoType && it.name.startsWith("#untyped-") }
             ?: runtimeType(normalized) ?: return normalized
         return GoInterfaceValue(canonicalAliasType(dynamicType), copyForType(normalized, dynamicType), this)
@@ -1742,6 +1749,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 .let { it as? MapGoType }?.key
         } else null
         return rawArgs.mapIndexed { index, value ->
+            val sharedExpression = call.arguments.singleOrNull()?.takeIf { rawArgs.size > 1 }
+            val argumentExpression = call.arguments.getOrNull(index) ?: sharedExpression
+            val resultIndex = if (sharedExpression != null) index else 0
             val declaredType = when {
                 !call.expandLastArgument && variadicParameterIndex != null && index >= variadicParameterIndex ->
                     variadicElementType
@@ -1749,7 +1759,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             when {
                 declaredType != null && underlying(declaredType) is InterfaceGoType ->
-                    boxInterfaceAssignment(value, declaredType, call.arguments.getOrNull(index), env)
+                    boxInterfaceAssignment(value, declaredType, argumentExpression, env, resultIndex)
                 target == BuiltinValue("panic") && index == 0 ->
                     defaultRuneValue(value, call.arguments.getOrNull(index), env)
                 index > 0 && appendElementType?.let { underlying(it) is InterfaceGoType } == true ->
