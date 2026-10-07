@@ -305,6 +305,9 @@ class TypeChecker(
     internal fun runtimeTypeDefinitions(): Map<String, GoTypeSyntax> =
         checkedRuntimeTypeDeclarations.toMap()
 
+    internal fun runtimeFunctionTypes(): Map<FunctionDeclaration, FunctionGoType> =
+        IdentityHashMap<FunctionDeclaration, FunctionGoType>().also { it.putAll(checkedFunctionTypes) }
+
     internal fun exportedFunctionType(name: String, importPath: String? = null): FunctionGoType? =
         if (isExportedIdentifier(name)) functions[name]?.let(::functionType)
             ?.let { externalizeType(it, importPath) as FunctionGoType } else null

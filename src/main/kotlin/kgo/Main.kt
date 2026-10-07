@@ -47,7 +47,9 @@ fun main(args: Array<String>) {
                 sourceGraph.rootFiles,
                 sourceGraph.packages,
                 rootChecker.runtimeTypeDefinitions(),
-                packageCheckers.mapValues { (_, checker) -> checker.runtimeTypeDefinitions() }
+                packageCheckers.mapValues { (_, checker) -> checker.runtimeTypeDefinitions() },
+                rootChecker.runtimeFunctionTypes(),
+                packageCheckers.mapValues { (_, checker) -> checker.runtimeFunctionTypes() }
             )
         }
     } catch (e: ScanError) {

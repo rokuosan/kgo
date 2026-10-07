@@ -134,6 +134,7 @@ class Interpreter(
     private var importedRuntimePackages: Map<String, Interpreter> = emptyMap()
     private var knownPackageNames: Map<String, String> = emptyMap()
     private var checkedTypeDefinitions: Map<String, GoTypeSyntax> = emptyMap()
+    private var checkedFunctionTypes: Map<FunctionDeclaration, FunctionGoType> = emptyMap()
     private var exportedConstantNames: Set<String> = emptySet()
     private var exportedVariableNames: Set<String> = emptySet()
     private var exportedTypeNames: Set<String> = emptySet()
@@ -149,7 +150,9 @@ class Interpreter(
         files: List<GoFile>,
         sourcePackages: List<GoSourcePackage>,
         rootTypeDefinitions: Map<String, GoTypeSyntax> = emptyMap(),
-        importedTypeDefinitions: Map<String, Map<String, GoTypeSyntax>> = emptyMap()
+        importedTypeDefinitions: Map<String, Map<String, GoTypeSyntax>> = emptyMap(),
+        rootFunctionTypes: Map<FunctionDeclaration, FunctionGoType> = emptyMap(),
+        importedFunctionTypes: Map<String, Map<FunctionDeclaration, FunctionGoType>> = emptyMap()
     ) {
         if (files.isEmpty()) throw RuntimeGoError("no Go source files")
         val packageName = files.first().packageName
@@ -170,12 +173,14 @@ class Interpreter(
                     runtime.importedRuntimePackages = runtimes.toMap()
                     runtime.knownPackageNames = knownPackageNames
                     runtime.checkedTypeDefinitions = importedTypeDefinitions[sourcePackage.importPath].orEmpty()
+                    runtime.checkedFunctionTypes = importedFunctionTypes[sourcePackage.importPath].orEmpty()
                     runtime.preparePackage(sourcePackage.files)
                     runtime.initializePackage(sourcePackage.files)
                     runtimes[sourcePackage.importPath] = runtime
                 }
                 importedRuntimePackages = runtimes
                 checkedTypeDefinitions = rootTypeDefinitions
+                checkedFunctionTypes = rootFunctionTypes
                 preparePackage(files)
                 initializePackage(files)
                 val main = functions["main"] ?: throw RuntimeGoError("main function not found")
@@ -279,15 +284,15 @@ class Interpreter(
         if (!GoUnicode6.isExportedIdentifier(name)) return null
         val function = functions[name]?.takeIf { it.receiver == null } ?: return null
         val importPath = packageIdentity ?: return FunctionValue(function, globals, owner = this)
-        val signature = FunctionGoType(
-            function.parameterTypes.mapIndexed { index, type ->
-                ParameterSyntax(function.parameters.getOrNull(index), externalizeRuntimeType(type, importPath),
-                    function.variadic && index == function.parameterTypes.lastIndex)
-            },
-            function.resultTypes.map { externalizeRuntimeType(it, importPath) }
-        )
+        val signature = externalizeRuntimeType(checkedFunctionType(function), importPath) as FunctionGoType
         return FunctionValue(function, globals, signature, this)
     }
+
+    private fun checkedFunctionType(function: FunctionDeclaration): FunctionGoType = checkedFunctionTypes[function]
+        ?: FunctionGoType(function.parameterTypes.mapIndexed { index, type ->
+            ParameterSyntax(function.parameters.getOrNull(index), type,
+                function.variadic && index == function.parameterTypes.lastIndex)
+        }, function.resultTypes)
 
     private fun exportedConstant(name: String): Any? =
         if (name in exportedConstantNames) globals.getOrNull(name) else null
@@ -342,13 +347,14 @@ class Interpreter(
         panicState: PanicState = parent.panicState,
         deferredCall: Boolean = false
     ): List<Any?> {
+        val signature = checkedFunctionType(function)
         val fixedCount = if (function.variadic) function.parameters.size - 1 else function.parameters.size
         if ((!function.variadic && arguments.size != fixedCount) ||
             (function.variadic && (arguments.size < fixedCount || (expandedVariadic && arguments.size != function.parameters.size)))) {
             throw RuntimeGoError("${function.name} has incompatible argument count: ${arguments.size}")
         }
         val boundArguments = if (!function.variadic || expandedVariadic) arguments else {
-            val sliceType = function.parameterTypes.lastOrNull() as? SliceGoType
+            val sliceType = signature.parameters.lastOrNull()?.type as? SliceGoType
                 ?: throw RuntimeGoError("invalid variadic function signature")
             val extras = arguments.drop(fixedCount)
             arguments.take(fixedCount) + GoSlice(sliceType.element, extras.mapTo(mutableListOf(), ::copyValue), 0, extras.size, extras.size,
@@ -363,13 +369,13 @@ class Interpreter(
         function.receiver?.let { env.define(it.name ?: "", copyForType(receiver, it.type), it.type) }
         function.parameters.zip(boundArguments).forEachIndexed { i, (name, value) ->
             name?.let { parameterName ->
-                val type = function.parameterTypes.getOrNull(i)
+                val type = signature.parameters.getOrNull(i)?.type
                 env.define(parameterName, type?.let { copyForType(value, it) } ?: value, type)
             }
         }
-        val resultNames = function.resultNames.ifEmpty { List(function.resultTypes.size) { null } }
+        val resultNames = function.resultNames.ifEmpty { List(signature.results.size) { null } }
         resultNames.forEachIndexed { index, name ->
-            if (name != null && name != "_") env.define(name, zeroValue(function.resultTypes[index]), function.resultTypes[index])
+            if (name != null && name != "_") env.define(name, zeroValue(signature.results[index]), signature.results[index])
         }
         val priorRecoverAllowed = panicState.recoverAllowed
         panicState.recoverAllowed = deferredCall
@@ -378,11 +384,11 @@ class Interpreter(
             executeBlock(body, env, createScope = false)
             emptyList()
         } catch (returned: ReturnSignal) {
-            if (returned.values.size == function.resultTypes.size) {
+            if (returned.values.size == signature.results.size) {
                 returned.values.forEachIndexed { i, value ->
                     val name = resultNames.getOrNull(i)
                     val normalized = if (returned.runeConstants.getOrNull(i) == true &&
-                        underlying(function.resultTypes[i]) is InterfaceGoType) asRuneValue(value) else value
+                        underlying(signature.results[i]) is InterfaceGoType) asRuneValue(value) else value
                     if (name != null && name != "_") env.set(name, normalized)
                 }
             }
@@ -391,18 +397,18 @@ class Interpreter(
             val values = when {
                 returned.values.isEmpty() && resultNames.isNotEmpty() && resultNames.all { it != null } ->
                     resultNames.mapIndexed { i, name ->
-                        if (name == "_") zeroValue(function.resultTypes[i]) else env.get(name!!)
+                        if (name == "_") zeroValue(signature.results[i]) else env.get(name!!)
                     }
-                returned.values.size == function.resultTypes.size -> returned.values.mapIndexed { i, value ->
+                returned.values.size == signature.results.size -> returned.values.mapIndexed { i, value ->
                     val name = resultNames.getOrNull(i)
                     val normalized = if (returned.runeConstants.getOrNull(i) == true &&
-                        underlying(function.resultTypes[i]) is InterfaceGoType) asRuneValue(value) else value
+                        underlying(signature.results[i]) is InterfaceGoType) asRuneValue(value) else value
                     if (name != null && name != "_") env.get(name)
-                    else copyForType(normalized, function.resultTypes[i])
+                    else copyForType(normalized, signature.results[i])
                 }
                 else -> returned.values
             }
-            values.mapIndexed { i, value -> function.resultTypes.getOrNull(i)?.let { type ->
+            values.mapIndexed { i, value -> signature.results.getOrNull(i)?.let { type ->
                 val normalized = if (returned.runeConstants.getOrNull(i) == true && underlying(type) is InterfaceGoType)
                     asRuneValue(value) else value
                 copyForType(normalized, type)
@@ -429,7 +435,7 @@ class Interpreter(
         function: FunctionDeclaration,
         resultNames: List<String?>,
         env: Environment
-    ): List<Any?> = function.resultTypes.mapIndexed { index, type ->
+    ): List<Any?> = checkedFunctionType(function).results.mapIndexed { index, type ->
         val name = resultNames.getOrNull(index)
         val value = if (name != null && name != "_") env.get(name) else zeroValue(type)
         copyForType(value, type)
@@ -1163,12 +1169,8 @@ class Interpreter(
     }
 
     private fun staticExpressionType(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
-        is NameExpression -> env.typeOf(expression.name) ?: functions[expression.name]?.let { function ->
-            FunctionGoType(function.parameterTypes.mapIndexed { index, type ->
-                ParameterSyntax(function.parameters.getOrNull(index), type,
-                    function.variadic && index == function.parameterTypes.lastIndex)
-            }, function.resultTypes)
-        } ?: env.imports.dotPackages.firstNotNullOfOrNull { path ->
+        is NameExpression -> env.typeOf(expression.name) ?: functions[expression.name]?.let(::checkedFunctionType)
+            ?: env.imports.dotPackages.firstNotNullOfOrNull { path ->
             importedRuntimePackages[path]?.exportedFunction(expression.name)?.function?.let { importedFunctionType(path, it) }
         }
         is ParenthesizedExpression -> staticExpressionType(expression.expression, env)
@@ -1184,11 +1186,13 @@ class Interpreter(
             }
             val receiverType = staticExpressionType(expression.receiver, env)?.let { resolveRuntimeType(it, env) }
             val method = receiverType?.let { methodDeclaration(it, expression.field) }
-            if (method != null) FunctionGoType(method.second.parameterTypes.mapIndexed { index, type ->
-                ParameterSyntax(method.second.parameters.getOrNull(index), type,
-                    method.second.variadic && index == method.second.parameterTypes.lastIndex)
-            }, method.second.resultTypes)
-            else {
+            if (method != null) {
+                val signature = method.first.checkedFunctionType(method.second)
+                val importPath = method.first.packageIdentity
+                if (method.first !== this && importPath != null)
+                    method.first.externalizeRuntimeType(signature, importPath) as FunctionGoType
+                else signature
+            } else {
                 val struct = receiverType?.let(::underlying).let { if (it is PointerGoType) underlying(it.element) else it }
                 when (struct) {
                     is StructGoType -> staticPromotedFieldType(struct, expression.field, env)
@@ -1219,10 +1223,7 @@ class Interpreter(
 
     private fun importedFunctionType(path: String, function: FunctionDeclaration): FunctionGoType {
         val owner = importedRuntimePackages[path] ?: this
-        return FunctionGoType(function.parameterTypes.mapIndexed { index, type ->
-            ParameterSyntax(function.parameters.getOrNull(index), owner.externalizeRuntimeType(type, path),
-                function.variadic && index == function.parameterTypes.lastIndex)
-        }, function.resultTypes.map { owner.externalizeRuntimeType(it, path) })
+        return owner.externalizeRuntimeType(owner.checkedFunctionType(function), path) as FunctionGoType
     }
 
     private fun staticExpressionResultType(expression: Expression, resultIndex: Int, env: Environment): GoTypeSyntax? = when (expression) {
@@ -1918,14 +1919,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         env: Environment
     ): List<Any?> {
         val parameterTypes = when (target) {
-            is FunctionValue -> target.function.parameterTypes
-            is MethodValue -> target.function.parameterTypes
+            is FunctionValue -> target.owner.checkedFunctionType(target.function).parameters.map { it.type }
+            is MethodValue -> target.owner.checkedFunctionType(target.function).parameters.map { it.type }
             is MethodExpressionValue -> (target.type as? FunctionGoType)?.parameters?.map { it.type }.orEmpty()
             else -> emptyList()
         }
         val variadicParameterIndex = when (target) {
-            is FunctionValue -> target.function.parameterTypes.lastIndex.takeIf { target.function.variadic }
-            is MethodValue -> target.function.parameterTypes.lastIndex.takeIf { target.function.variadic }
+            is FunctionValue -> target.owner.checkedFunctionType(target.function).parameters.lastIndex.takeIf { target.function.variadic }
+            is MethodValue -> target.owner.checkedFunctionType(target.function).parameters.lastIndex.takeIf { target.function.variadic }
             is MethodExpressionValue -> (target.type as? FunctionGoType)?.parameters?.let { parameters ->
                 parameters.lastIndex.takeIf { parameters[it].variadic }
             }
@@ -2053,8 +2054,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     panicState = panicState, deferredCall = deferredCall)
                 val importPath = target.owner.packageIdentity
                 val exportedValues = if (target.owner !== this && importPath != null &&
-                    target.function.resultTypes.size == values.size) values.mapIndexed { index, value ->
-                    val resultType = target.owner.externalizeRuntimeType(target.function.resultTypes[index], importPath)
+                    target.owner.checkedFunctionType(target.function).results.size == values.size) values.mapIndexed { index, value ->
+                    val resultType = target.owner.externalizeRuntimeType(
+                        target.owner.checkedFunctionType(target.function).results[index], importPath
+                    )
                     externalizeImportedResult(value, resultType, target.owner)
                 } else values
                 return if (exportedValues.isEmpty()) null else if (exportedValues.size == 1) exportedValues.single() else GoMultiValue(exportedValues)
@@ -2533,9 +2536,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoExactComplex -> NamedGoType("complex128")
         is BigInteger -> NamedGoType("int")
         is GoMap -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: MapGoType(value.keyType, value.valueType)
-        is FunctionValue -> value.type ?: FunctionGoType(value.function.parameterTypes.mapIndexed { i, type ->
-            ParameterSyntax(value.function.parameters.getOrNull(i), type, value.function.variadic && i == value.function.parameterTypes.lastIndex)
-        }, value.function.resultTypes)
+        is FunctionValue -> value.type ?: value.owner.checkedFunctionType(value.function)
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> NamedGoType("int")
@@ -2874,12 +2875,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                             val receiverType = method.receiver?.type ?: return@methodLoop
                             val receiverBase = if (receiverType is PointerGoType) receiverType.element else receiverType
                             if (receiverBase != NamedGoType(named) || receiverType is PointerGoType && !node.pointer) return@methodLoop
-                            candidates.getOrPut(runtimePackageMethodKey(method.name)) { mutableListOf() } += FunctionGoType(
-                                method.parameterTypes.mapIndexed { i, parameter ->
-                                    ParameterSyntax(method.parameters.getOrNull(i), parameter, method.variadic && i == method.parameterTypes.lastIndex)
-                                },
-                                method.resultTypes
-                            )
+                            candidates.getOrPut(runtimePackageMethodKey(method.name)) { mutableListOf() } += checkedFunctionType(method)
                         }
                         nodeUnderlying.fields.filter { it.names.isEmpty() }.forEach { field ->
                             val embedded = field.type
@@ -2897,12 +2893,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                             val receiverType = method.receiver?.type ?: return@methodLoop
                             val receiverBase = if (receiverType is PointerGoType) receiverType.element else receiverType
                             if (receiverBase != NamedGoType(named) || receiverType is PointerGoType && !node.pointer) return@methodLoop
-                            candidates.getOrPut(runtimePackageMethodKey(method.name)) { mutableListOf() } += FunctionGoType(
-                                method.parameterTypes.mapIndexed { i, parameter ->
-                                    ParameterSyntax(method.parameters.getOrNull(i), parameter, method.variadic && i == method.parameterTypes.lastIndex)
-                                },
-                                method.resultTypes
-                            )
+                            candidates.getOrPut(runtimePackageMethodKey(method.name)) { mutableListOf() } += checkedFunctionType(method)
                         }
                     }
                 }
