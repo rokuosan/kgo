@@ -3299,9 +3299,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         (underlying(type) as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
-        canonicalAliasType(type) == predeclaredIntRuntimeType
+        canonicalAliasType(type) == predeclaredInt32RuntimeType
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
-        canonicalAliasType(type) == predeclaredIntRuntimeType
+        canonicalAliasType(type) == predeclaredInt32RuntimeType
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
         setOf("#predeclared-uint8", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
