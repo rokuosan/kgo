@@ -615,7 +615,7 @@ class Interpreter(
                 importedRuntimePackages[path]?.exportedVariableTarget(target.name)
             } ?: RuntimeTarget({ env.get(target.name) }, { env.set(target.name, it) }, env.typeOf(target.name))
         is IndexExpression -> {
-            val receiver = evaluate(target.receiver, env)
+            val receiver = evaluateAssignmentReceiver(target.receiver, env)
             val key = evaluate(target.index, env)
             when (receiver) {
                 is GoSlice -> {
@@ -629,12 +629,12 @@ class Interpreter(
                 is GoPointer -> {
                     fun index() = collectionIndex(key, "index").toLong()
                     RuntimeTarget({
-                        val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
+                        val array = pointedArray(receiver)
                         arrayElement(array, index())
                     }, {
-                        val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index assignment requires pointer to array")
+                        val array = pointedArray(receiver)
                         setArrayElement(array, index(), it)
-                    }, (receiver.pointeeType?.let { underlying(it) as? ArrayGoType })?.element)
+                    }, (receiver.pointeeType?.let { underlying(it) as? ArrayGoType })?.element ?: staticExpressionType(target, env))
                 }
                 is GoMap -> {
                     RuntimeTarget(
@@ -669,7 +669,7 @@ class Interpreter(
                 val path = env.imports.packages[target.receiver.name]
                 if (path != null) importedRuntimePackages[path]?.exportedVariableTarget(target.field)?.let { return it }
             }
-            val receiver = evaluate(target.receiver, env)
+            val receiver = evaluateAssignmentReceiver(target.receiver, env)
             val type = staticExpressionType(target, env)
             RuntimeTarget(
                 { pointerToStructField(receiver, target.field).get() },
@@ -691,6 +691,18 @@ class Interpreter(
             }, type)
         }
         else -> throw RuntimeGoError("invalid assignment target")
+    }
+
+    private suspend fun evaluateAssignmentReceiver(expression: Expression, env: Environment): Any? {
+        val dereference = expression.unparenthesized() as? UnaryExpression
+        return if (dereference?.operator == TokenKind.MUL) evaluate(dereference.operand, env)
+        else evaluate(expression, env)
+    }
+
+    private fun pointedArray(pointer: GoPointer): GoArray {
+        var value: Any? = pointer
+        while (value is GoPointer) value = value.get()
+        return value as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
     }
 
     private suspend fun executeSelect(statement: SelectStatement, env: Environment, labels: Set<String>) {
@@ -1656,9 +1668,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val matches = mutableListOf<GoPointer>()
             val next = mutableListOf<Node>()
             level.forEach { node ->
-                if (node.value is GoPointer && node.value.isNil)
-                    throw RuntimeGoError("invalid memory address or nil pointer dereference")
-                val struct = dereference(node.value) as? GoStruct ?: return@forEach
+                var receiver = node.value
+                while (receiver is GoPointer) receiver = receiver.get()
+                val struct = receiver as? GoStruct ?: return@forEach
                 if (name in struct.fields) matches += struct.pointer(name)
                 struct.embeddedFields.forEach { embeddedName ->
                     val embeddedValue = struct.fields[embeddedName] ?: return@forEach
