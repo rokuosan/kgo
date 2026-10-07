@@ -192,7 +192,7 @@ class TypeChecker(
                 else {
                     validateType(NamedGoType(declaration.name))
                     checkedRuntimeTypeDeclarations[declaration.name] =
-                        externalizeType(typeDeclarations.getValue(declaration.name), null)
+                        resolveLocalType(typeDeclarations.getValue(declaration.name), globals)
                 }
             }
         }
