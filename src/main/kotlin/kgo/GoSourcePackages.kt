@@ -11,6 +11,7 @@ internal data class GoSourcePackage(
     val packageName: String,
     val files: List<GoFile>
 )
+internal data class GoSourceGraph(val rootFiles: List<GoFile>, val packages: List<GoSourcePackage>)
 
 /** Loads local Go source dependencies using relative paths, a go.mod module path, or GOPATH. */
 internal class GoSourcePackageLoader(entryDirectory: File) {
@@ -18,32 +19,46 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
     private val module = findModule(this.entryDirectory)
     private val states = mutableMapOf<String, Int>()
 
-    fun dependencies(files: List<GoFile>): List<GoSourcePackage> {
+    fun load(files: List<GoFile>): GoSourceGraph {
         val order = mutableListOf<GoSourcePackage>()
-        files.flatMap { it.importBindings() }.forEach { binding ->
-            visit(binding.path, entryDirectory, order)
-        }
-        return order
+        val rootFiles = resolveImports(files, entryDirectory, order)
+        return GoSourceGraph(rootFiles, order)
     }
 
-    private fun visit(path: String, importerDirectory: File, order: MutableList<GoSourcePackage>) {
-        if (path == "fmt" || path == "math") return
-        when (states[path]) {
-            2 -> return
-            1 -> throw GoTypeError("import cycle involving $path")
-        }
-        states[path] = 1
+    private fun visit(path: String, importerDirectory: File, order: MutableList<GoSourcePackage>): String {
+        if (path == "fmt" || path == "math") return path
         val directory = resolve(path, importerDirectory)
             ?: throw GoTypeError("cannot locate imported package $path")
+        val identity = if (path.startsWith("./") || path.startsWith("../")) directory.path else path
+        when (states[identity]) {
+            2 -> return identity
+            1 -> throw GoTypeError("import cycle involving $path")
+        }
+        states[identity] = 1
         val files = parseGoFiles(directory)
         if (files.isEmpty()) throw GoTypeError("no Go source files in imported package $path")
         val packageName = files.first().packageName
         if (files.any { it.packageName != packageName })
             throw GoTypeError("source files in imported package $path declare different package names")
-        val loaded = GoSourcePackage(path, directory, packageName, files)
-        files.flatMap { it.importBindings() }.forEach { binding -> visit(binding.path, directory, order) }
-        states[path] = 2
+        val resolvedFiles = resolveImports(files, directory, order)
+        val loaded = GoSourcePackage(identity, directory, packageName, resolvedFiles)
+        states[identity] = 2
         order += loaded
+        return identity
+    }
+
+    private fun resolveImports(
+        files: List<GoFile>,
+        importerDirectory: File,
+        order: MutableList<GoSourcePackage>
+    ): List<GoFile> = files.map { file ->
+        file.copy(declarations = file.declarations.map { declaration ->
+            if (declaration !is ImportDeclaration) declaration else declaration.copy(imports = declaration.imports.map { spec ->
+                val path = spec.decodedPath()
+                if (path == "fmt" || path == "math") spec.copy(resolvedPath = path)
+                else spec.copy(resolvedPath = visit(path, importerDirectory, order))
+            })
+        })
     }
 
     private fun resolve(path: String, importerDirectory: File): File? {

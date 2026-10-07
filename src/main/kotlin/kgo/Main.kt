@@ -31,18 +31,18 @@ fun main(args: Array<String>) {
         if (mode == "--parse") println("package ${file.packageName}: ${file.declarations.size} declaration(s)")
         else {
             val sourceDirectory = if (source.isDirectory) source else source.parentFile ?: File(".")
-            val packages = GoSourcePackageLoader(sourceDirectory).dependencies(files)
+            val sourceGraph = GoSourcePackageLoader(sourceDirectory).load(files)
             val packageCheckers = linkedMapOf<String, TypeChecker>()
-            packages.forEach { imported ->
+            sourceGraph.packages.forEach { imported ->
                 val checker = TypeChecker(packageCheckers, imported.importPath)
                 checker.checkFiles(imported.files)
                 packageCheckers[imported.importPath] = checker
             }
-            TypeChecker(packageCheckers, sourceDirectory.canonicalPath).checkFiles(files)
+            TypeChecker(packageCheckers, sourceDirectory.canonicalPath).checkFiles(sourceGraph.rootFiles)
             Interpreter(outputBytes = { bytes ->
                 System.out.write(bytes)
                 System.out.flush()
-            }).run(files, packages)
+            }).run(sourceGraph.rootFiles, sourceGraph.packages)
         }
     } catch (e: ScanError) {
         System.err.println(e.message)
