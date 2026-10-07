@@ -634,7 +634,7 @@ class Interpreter(
         }
         val dynamicType = sourceType?.takeUnless { it is NamedGoType && it.name.startsWith("#untyped-") }
             ?: runtimeType(normalized) ?: return normalized
-        return GoInterfaceValue(canonicalAliasType(dynamicType), copyForType(normalized, dynamicType), this)
+        return boxInterfaceValue(normalized, dynamicType)
     }
 
     private fun assignToLocations(
@@ -2489,8 +2489,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun boxInterface(value: Any?, targetType: GoTypeSyntax): Any? {
         if ((underlying(targetType) as? InterfaceGoType) == null || value == null || value is GoInterfaceValue) return value
         val dynamicType = canonicalAliasType(runtimeType(value) ?: return value)
-        return GoInterfaceValue(dynamicType, value, this)
+        return boxInterfaceValue(value, dynamicType)
     }
+
+    private fun boxInterfaceValue(value: Any?, dynamicType: GoTypeSyntax): GoInterfaceValue =
+        GoInterfaceValue(canonicalAliasType(dynamicType), copyForType(value, dynamicType), this)
 
     private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
         is GoRuntimeErrorValue -> runtimeErrorValueType
