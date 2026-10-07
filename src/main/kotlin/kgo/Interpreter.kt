@@ -714,9 +714,12 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             selectUnbiased<SelectSelection> {
                 operations.forEach { operation ->
                     when (operation) {
-                        is SelectSend -> operation.channel.queue.onSend(operation.value) {
-                            operation.channel.recordSelectSend()
-                            SelectSelection(operation.caseIndex, null)
+                        is SelectSend -> {
+                            val element = operation.channel.newSelectElement(operation.value)
+                            operation.channel.queue.onSend(element) {
+                                operation.channel.recordSelectSend(element)
+                                SelectSelection(operation.caseIndex, null)
+                            }
                         }
                         is SelectReceive -> operation.channel.queue.onReceiveCatching { result ->
                             SelectSelection(operation.caseIndex, operation.channel.decode(result))
@@ -4055,7 +4058,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val namedType: String? = null,
         val type: GoTypeSyntax? = null,
         val direction: ChannelDirection = ChannelDirection.SEND_RECEIVE,
-        val queue: Channel<Any?> = Channel(capacity),
+        val queue: Channel<GoChannelElement> = Channel(capacity),
         private val buffered: AtomicInteger = AtomicInteger(0),
         private val identity: Any = Any(),
         val packagePath: String? = packageIdentity
@@ -4067,34 +4070,38 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         override fun equals(other: Any?) = other is GoChannel && identity === other.identity
         override fun hashCode() = System.identityHashCode(identity)
         suspend fun send(value: Any?) {
+            val element = GoChannelElement(copyForType(value, elementType))
             try {
-                queue.send(copyForType(value, elementType))
+                queue.send(element)
             } catch (_: kotlinx.coroutines.channels.ClosedSendChannelException) {
                 throw RuntimeGoError("send on closed channel")
             }
-            if (capacity > 0) buffered.incrementAndGet()
+            element.recordSent(buffered, capacity > 0)
         }
         suspend fun receive(): GoReceiveResult {
             val result = queue.receiveCatching()
             return decode(result)
         }
         fun trySend(value: Any?): GoTrySendResult {
-            val result = queue.trySend(copyForType(value, elementType))
+            val element = GoChannelElement(copyForType(value, elementType))
+            val result = queue.trySend(element)
             if (result.isClosed) return GoTrySendResult.CLOSED
             if (!result.isSuccess) return GoTrySendResult.NOT_READY
-            if (capacity > 0) buffered.incrementAndGet()
+            element.recordSent(buffered, capacity > 0)
             return GoTrySendResult.SENT
         }
-        fun recordSelectSend() { if (capacity > 0) buffered.incrementAndGet() }
+        fun newSelectElement(value: Any?) = GoChannelElement(copyForType(value, elementType))
+        fun recordSelectSend(element: GoChannelElement) = element.recordSent(buffered, capacity > 0)
         fun tryReceive(): GoReceiveResult? {
             val result = queue.tryReceive()
             if (result.isFailure && !result.isClosed) return null
             return decode(result)
         }
-        fun decode(result: kotlinx.coroutines.channels.ChannelResult<Any?>): GoReceiveResult {
+        fun decode(result: kotlinx.coroutines.channels.ChannelResult<GoChannelElement>): GoReceiveResult {
             if (result.isSuccess) {
-                if (capacity > 0) buffered.decrementAndGet()
-                return GoReceiveResult(copyForType(result.getOrThrow(), elementType), true)
+                val element = result.getOrThrow()
+                element.recordReceived(buffered, capacity > 0)
+                return GoReceiveResult(copyForType(element.value, elementType), true)
             }
             return GoReceiveResult(zeroValue(elementType), false)
         }
@@ -4102,6 +4109,35 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             if (!queue.close()) throw RuntimeGoError("close of closed channel")
         }
         fun len() = if (capacity == 0) 0L else buffered.get().coerceIn(0, capacity).toLong()
+    }
+    private class GoChannelElement(val value: Any?) {
+        private var state = PENDING
+
+        @Synchronized
+        fun recordSent(buffered: AtomicInteger, countable: Boolean) {
+            if (state == PENDING) {
+                state = BUFFERED
+                if (countable) buffered.incrementAndGet()
+            }
+        }
+
+        @Synchronized
+        fun recordReceived(buffered: AtomicInteger, countable: Boolean) {
+            when (state) {
+                PENDING -> state = RECEIVED_DIRECTLY
+                BUFFERED -> {
+                    state = RECEIVED_FROM_BUFFER
+                    if (countable) buffered.decrementAndGet()
+                }
+            }
+        }
+
+        private companion object {
+            const val PENDING = 0
+            const val BUFFERED = 1
+            const val RECEIVED_DIRECTLY = 2
+            const val RECEIVED_FROM_BUFFER = 3
+        }
     }
     private class ReturnSignal(val values: List<Any?>, val runeConstants: List<Boolean> = emptyList()) : RuntimeException(null, null, false, false)
     private class BreakSignal(val label: String?) : RuntimeException(null, null, false, false)
