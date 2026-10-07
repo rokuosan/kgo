@@ -54,6 +54,8 @@ interpreter-managed addresses.
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
 an incomplete subset of the Go 1.0 type system.
+Constant comparisons retain the untyped boolean result, and comparison results
+can be assigned to any boolean type.
 
 ```sh
 ./gradlew run --args='hello.go'          # execute package main
