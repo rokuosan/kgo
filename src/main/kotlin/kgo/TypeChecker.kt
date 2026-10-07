@@ -2508,7 +2508,7 @@ class TypeChecker(
         }
         if (targetName in complexNames) {
             val value = constantComplex(expression, scope) ?: return
-            val overflows = if (targetName == "complex64") {
+            val overflows = if (targetName in setOf("#predeclared-complex64", "complex64")) {
                 !value.real.toFloat().isFinite() || !value.imaginary.toFloat().isFinite()
             } else !value.real.toDouble().isFinite() || !value.imaginary.toDouble().isFinite()
             if (overflows)
@@ -2528,10 +2528,13 @@ class TypeChecker(
         val bits = when (name) {
             "#predeclared-uint8", "int8", "uint8", "byte" -> 8
             "int16", "uint16" -> 16
-            "#predeclared-int32", "int32", "uint32" -> 32
+            "#predeclared-int32", "#predeclared-uint32", "int32", "uint32" -> 32
             else -> 64
         }
-        val unsigned = name in setOf("#predeclared-uint8", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+        val unsigned = name in setOf(
+            "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
+            "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
+        )
         val minimum = if (unsigned) BigInteger.ZERO else BigInteger.ONE.shiftLeft(bits - 1).negate()
         val maximum = if (unsigned) BigInteger.ONE.shiftLeft(bits).subtract(BigInteger.ONE)
             else BigInteger.ONE.shiftLeft(bits - 1).subtract(BigInteger.ONE)
