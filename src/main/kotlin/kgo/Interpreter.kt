@@ -619,21 +619,21 @@ class Interpreter(
             val key = evaluate(target.index, env)
             when (receiver) {
                 is GoSlice -> {
-                    val index = collectionIndex(key, "index")
-                    RuntimeTarget({ receiver.get(index) }, { receiver.set(index, it) }, receiver.elementType)
+                    fun index() = collectionIndex(key, "index")
+                    RuntimeTarget({ receiver.get(index()) }, { receiver.set(index(), it) }, receiver.elementType)
                 }
                 is GoArray -> {
-                    val index = collectionIndex(key, "index")
-                    RuntimeTarget({ arrayElement(receiver, index.toLong()) }, { setArrayElement(receiver, index.toLong(), it) }, receiver.elementType)
+                    fun index() = collectionIndex(key, "index").toLong()
+                    RuntimeTarget({ arrayElement(receiver, index()) }, { setArrayElement(receiver, index(), it) }, receiver.elementType)
                 }
                 is GoPointer -> {
-                    val index = collectionIndex(key, "index")
+                    fun index() = collectionIndex(key, "index").toLong()
                     RuntimeTarget({
                         val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
-                        arrayElement(array, index.toLong())
+                        arrayElement(array, index())
                     }, {
                         val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index assignment requires pointer to array")
-                        setArrayElement(array, index.toLong(), it)
+                        setArrayElement(array, index(), it)
                     }, (receiver.pointeeType?.let { underlying(it) as? ArrayGoType })?.element)
                 }
                 is GoMap -> {
