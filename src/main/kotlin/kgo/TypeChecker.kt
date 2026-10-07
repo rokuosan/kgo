@@ -279,12 +279,14 @@ class TypeChecker(
                 val alias = when (spec.alias) {
                     "." -> {
                         dotImportPaths += path
-                        importedNames += when (standardPackageName(path)) {
+                        val dotImportedNames = when (standardPackageName(path)) {
                             "fmt" -> GoFmtPackage.exportedNames
                             "math" -> GoMathPackage.exportedNames
                             "unsafe" -> GoUnsafePackage.exportedNames
                             else -> emptySet()
                         } + importedPackages[path]?.exportedNames().orEmpty()
+                        val collision = dotImportedNames.firstOrNull { !importedNames.add(it) }
+                        if (collision != null) error("dot-imported identifier $collision redeclared")
                         null
                     }
                     "_" -> null
