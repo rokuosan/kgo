@@ -14,6 +14,7 @@ enum class TokenKind {
     SEMICOLON, COLON, EOF
 }
 
+/** Source offset and column use UTF-8 byte counts, matching Go source positions. */
 data class Position(val offset: Int, val line: Int, val column: Int)
 
 data class Token(val kind: TokenKind, val lexeme: String, val position: Position)

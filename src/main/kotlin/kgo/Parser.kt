@@ -158,12 +158,13 @@ class Parser(private val tokens: List<Token>) {
             val names = parseNameList()
             var type: GoTypeSyntax? = null
             if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) type = parseType()
-            val values = if (match(TokenKind.ASSIGN)) expressionList() else {
+            val repeatsPrevious = !match(TokenKind.ASSIGN)
+            val values = if (!repeatsPrevious) expressionList() else {
                 if (!grouped || declarations.isEmpty() || previousValues.isEmpty())
                     fail("missing initializer in const declaration")
                 previousValues
             }
-            if (type == null) type = previousType
+            if (repeatsPrevious) type = previousType
             declarations += ConstantDeclaration(names, values, type, declarations.size)
             previousType = type
             previousValues = values
@@ -599,14 +600,19 @@ class Parser(private val tokens: List<Token>) {
                 type = parseType()
             } else {
                 val first = expect(TokenKind.IDENT).lexeme
-                val fieldNames = mutableListOf(first)
-                while (match(TokenKind.COMMA)) fieldNames += expect(TokenKind.IDENT).lexeme
-                if (typeStart(current().kind)) {
-                    names = fieldNames
-                    type = parseType()
-                } else {
+                if (match(TokenKind.PERIOD)) {
                     names = emptyList()
-                    type = NamedGoType(first)
+                    type = QualifiedGoType(first, expect(TokenKind.IDENT).lexeme)
+                } else {
+                    val fieldNames = mutableListOf(first)
+                    while (match(TokenKind.COMMA)) fieldNames += expect(TokenKind.IDENT).lexeme
+                    if (typeStart(current().kind)) {
+                        names = fieldNames
+                        type = parseType()
+                    } else {
+                        names = emptyList()
+                        type = NamedGoType(first)
+                    }
                 }
             }
             val tag = if (at(TokenKind.STRING)) canonicalGoStringLiteral(take().lexeme) else null
@@ -624,11 +630,13 @@ class Parser(private val tokens: List<Token>) {
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
             if (match(TokenKind.SEMICOLON)) continue
             val name = expect(TokenKind.IDENT).lexeme
-            if (at(TokenKind.LPAREN)) {
+            val typeName = if (match(TokenKind.PERIOD)) QualifiedGoType(name, expect(TokenKind.IDENT).lexeme)
+                else NamedGoType(name)
+            if (typeName is NamedGoType && at(TokenKind.LPAREN)) {
                 val parameters = parseParameters()
-                methods += InterfaceMethodSyntax(name, parameters, parseResults().map { it.type })
+                methods += InterfaceMethodSyntax(typeName.name, parameters, parseResults().map { it.type })
             } else {
-                embedded += NamedGoType(name)
+                embedded += typeName
             }
             if (!match(TokenKind.SEMICOLON) && !at(TokenKind.RBRACE)) fail("expected semicolon or '}' in interface type")
         }

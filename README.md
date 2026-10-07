@@ -37,10 +37,11 @@ declarations.
 Goroutines use `kotlinx.coroutines`; channel operations suspend through Kotlin
 channels. The `fmt` calls are a small runtime shim, not the Go standard library;
 its `Print`, `Println`, `Fprint`, and `Fprintln` functions can also be dot-imported.
+The `Print` variants follow Go's adjacent-string spacing rule, and the `Fprint`
+variants call the writer's `Write([]byte)` method.
 The `math` import exposes the Go 1.0 constants and function signatures. JVM math
 operations handle the elementary functions, while Apache Commons Math provides
 error and gamma functions; Bessel Y functions use an in-runtime approximation.
-These package shims do not provide general imported-package resolution.
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
 an incomplete subset of the Go 1.0 type system.
@@ -66,9 +67,13 @@ specified zero-length behavior; nil channel operations block and are disabled
 as `select` cases.
 The command-line runner accepts a source file or a directory of `.go` files;
 directory input combines files declaring the same package and ignores test files.
-Import aliases are scoped to their source file during static checking. Full
-imported-package resolution and standard-library/runtime support are also
-missing. Bodyless function and method declarations are parsed and type-checked,
+Import aliases are scoped to their source file during static checking and
+execution. Local source packages can be loaded from relative paths, a `go.mod`
+module path, or `GOPATH/src`; exported functions and constants can be accessed
+through named or dot imports, and dependencies initialize before their
+importers. Exported package variables and types, and general
+standard-library/runtime support, are still missing.
+Bodyless function and method declarations are parsed and type-checked,
 but their external implementations cannot be linked by the interpreter.
 Go features added after Go 1.0, such as generics and later literal syntax, are
 out of scope. The project builds and runs on JDK 27 with Gradle

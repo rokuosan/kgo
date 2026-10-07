@@ -7,10 +7,19 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class GoTypeError(message: String) : RuntimeException(message)
 
-private data class ConstantComplexValue(val real: GoRational, val imaginary: GoRational)
+internal data class ConstantComplexValue(val real: GoRational, val imaginary: GoRational)
+internal data class ExportedConstant(
+    val type: GoTypeSyntax,
+    val integer: BigInteger?,
+    val rational: GoRational?,
+    val stringLength: BigInteger?,
+    val stringIdentity: String?,
+    val boolean: Boolean?,
+    val complex: ConstantComplexValue?
+)
 
 /** Static checks for the declaration and statement forms currently represented by the AST. */
-class TypeChecker {
+class TypeChecker(private val importedPackages: Map<String, TypeChecker> = emptyMap()) {
     private val typeDeclarations = linkedMapOf<String, GoTypeSyntax>()
     private val functions = linkedMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
@@ -30,6 +39,9 @@ class TypeChecker {
     private var usedLabels: MutableSet<String> = mutableSetOf()
     private var labelBlockPath: List<Any> = emptyList()
     private var blockStatementIndices: Map<BlockStatement, Int> = emptyMap()
+    internal var packageName: String? = null
+        private set
+    private var packageLevelNames: Set<String> = emptySet()
 
     fun check(file: GoFile) = checkFiles(listOf(file))
 
@@ -38,9 +50,18 @@ class TypeChecker {
         usedDotImportsByFile.clear()
         if (files.isEmpty()) error("package has no source files")
         val packageName = files.first().packageName
+        this.packageName = packageName
         if (packageName == "_") error("package name cannot be _")
         if (files.any { it.packageName != packageName }) error("source files declare different package names")
         val declarations = files.flatMap { file -> file.declarations.map { file to it } }
+        packageLevelNames = declarations.flatMap { (_, declaration) -> when (declaration) {
+            is VariableDeclaration -> declaration.names
+            is ConstantDeclaration -> declaration.names
+            is TypeDeclaration -> listOf(declaration.name)
+            is FunctionDeclaration -> if (declaration.receiver == null && declaration.name != "init")
+                listOf(declaration.name) else emptyList()
+            else -> emptyList()
+        } }.filter { it != "_" }.toSet()
         val packageIdentifiers = linkedSetOf<String>()
         declarations.forEach { (_, declaration) ->
             if (declaration !is FunctionDeclaration && "init" in when (declaration) {
@@ -64,6 +85,7 @@ class TypeChecker {
         declarations.mapNotNull { (file, declaration) ->
             (declaration as? TypeDeclaration)?.let { file to it }
         }.forEach { (_, declaration) ->
+            if (declaration.name == "_") return@forEach
             if (typeDeclarations.putIfAbsent(declaration.name, declaration.type) != null) error("type ${declaration.name} redeclared")
         }
         for ((_, declaration) in declarations) when (declaration) {
@@ -72,15 +94,19 @@ class TypeChecker {
                 val receiver = declaration.receiver
                 if (receiver == null) {
                     if (declaration.name == "init") initFunctions += declaration
-                    else if (functions.putIfAbsent(declaration.name, declaration) != null) error("function ${declaration.name} redeclared")
+                    else if (declaration.name != "_" && functions.putIfAbsent(declaration.name, declaration) != null)
+                        error("function ${declaration.name} redeclared")
                 } else {
                     val base = (receiver.type as? PointerGoType)?.element ?: receiver.type
                     val baseName = base as? NamedGoType ?: error("method receiver must be a defined type")
                     if (baseName.name !in typeDeclarations) error("method receiver type ${baseName.name} must be defined in this package")
                     if (underlying(baseName) is InterfaceGoType || underlying(baseName) is PointerGoType)
                         error("invalid method receiver type ${baseName.name}")
-                    val key = methodKey(receiver.type, declaration.name)
-                    if (methods.putIfAbsent(key, declaration) != null) error("method ${declaration.name} redeclared for ${baseName.name}")
+                    if (declaration.name != "_") {
+                        val key = methodKey(receiver.type, declaration.name)
+                        if (methods.putIfAbsent(key, declaration) != null)
+                            error("method ${declaration.name} redeclared for ${baseName.name}")
+                    }
                 }
             }
             else -> Unit
@@ -150,7 +176,8 @@ class TypeChecker {
         }
         for ((sourceFile, declaration) in declarations) {
             if (declaration is TypeDeclaration) withFileImports(sourceFile) {
-                validateType(NamedGoType(declaration.name))
+                if (declaration.name == "_") validateType(declaration.type)
+                else validateType(NamedGoType(declaration.name))
             }
         }
         for ((sourceFile, declaration) in declarations) {
@@ -159,17 +186,14 @@ class TypeChecker {
         files.forEach { file ->
             val usedAliases = usedPackageAliasesByFile[file].orEmpty()
             val usedDotImports = usedDotImportsByFile[file].orEmpty()
-            file.declarations.filterIsInstance<ImportDeclaration>().flatMap { it.imports }.forEach { spec ->
-                val path = runCatching { decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8) }.getOrNull()
+            file.importBindings().forEach { binding ->
+                val spec = binding.specification
                 if (spec.alias == ".") {
-                    if (path != null && path !in usedDotImports) error("dot-imported package $path is not used")
+                    if (binding.path !in usedDotImports) error("dot-imported package ${binding.path} is not used")
                     return@forEach
                 }
-                val alias = when (spec.alias) {
-                    null -> runCatching { decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8).substringAfterLast('/') }.getOrNull()
-                    else -> spec.alias
-                }
-                if (alias != null && alias != "_" && alias !in usedAliases)
+                val alias = binding.alias
+                if (alias != "_" && alias !in usedAliases)
                     error("imported package $alias is not used")
             }
         }
@@ -188,33 +212,39 @@ class TypeChecker {
             packagePaths.clear()
             dotImportPaths = mutableSetOf()
             val importedNames = mutableSetOf<String>()
-            val imports = file.declarations.filterIsInstance<ImportDeclaration>().flatMap { it.imports }
+            val packageNames = importedPackages.mapValues { (_, checker) ->
+                checker.packageName ?: error("imported package was not checked")
+            }
+            val imports = try {
+                file.importBindings(packageNames)
+            } catch (failure: RuntimeGoError) {
+                error("invalid import path: ${failure.message}")
+            }
             val importedPaths = mutableSetOf<String>()
-            imports.forEach { spec ->
-                val path = try {
-                    decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8)
-                } catch (failure: RuntimeGoError) {
-                    error("invalid import path: ${failure.message}")
-                }
+            imports.forEach { binding ->
+                val spec = binding.specification
+                val path = binding.path
                 if (path.isEmpty()) error("import path cannot be empty")
-                if (!importedPaths.add(canonicalGoStringLiteral(spec.path)))
+                // Import identity is the decoded path, not its source spelling. For example,
+                // "fmt" and "f\\x6dt" name the same package and cannot both be imported.
+                if (!importedPaths.add(path))
                     error("package $path imported more than once in this file")
                 val alias = when (spec.alias) {
                     "." -> {
                         dotImportPaths += path
                         importedNames += when (standardPackageName(path)) {
-                            "fmt" -> listOf("Print", "Println", "Fprint", "Fprintln")
+                            "fmt" -> GoFmtPackage.exportedNames
                             "math" -> GoMathPackage.exportedNames
                             else -> emptySet()
-                        }
+                        } + importedPackages[path]?.exportedNames().orEmpty()
                         null
                     }
                     "_" -> null
-                    null -> standardPackageName(path) ?: path.substringAfterLast('/')
+                    null -> binding.alias
                     else -> spec.alias
                 } ?: return@forEach
                 if (!importedNames.add(alias)) error("package name $alias imported more than once in a file")
-                packagePaths[alias] = spec.path
+                packagePaths[alias] = path
             }
             val collision = importedNames.firstOrNull { it in typeDeclarations || globals.containsLocal(it) }
             if (collision != null) error("package import name $collision conflicts with a package declaration")
@@ -235,28 +265,42 @@ class TypeChecker {
         usedPackageAliases += alias
     }
 
-    private fun dotImportedFmtFunctionType(name: String): FunctionGoType? {
-        val any = InterfaceGoType(emptyList())
-        val variadic = ParameterSyntax(null, SliceGoType(any), variadic = true)
-        val writer = ParameterSyntax(null, any)
-        return when (name) {
-            "Print", "Println" -> FunctionGoType(listOf(variadic), listOf(intType, NamedGoType("error")))
-            "Fprint", "Fprintln" -> FunctionGoType(listOf(writer, variadic), listOf(intType, NamedGoType("error")))
-            else -> null
-        }
+    internal fun exportedNames(): Set<String> =
+        packageLevelNames.filterTo(linkedSetOf(), ::isExportedIdentifier)
+
+    internal fun exportedFunctionType(name: String): FunctionGoType? =
+        if (isExportedIdentifier(name)) functions[name]?.let(::functionType) else null
+
+    internal fun exportedConstant(name: String): ExportedConstant? {
+        if (!isExportedIdentifier(name) || !globals.isConstant(name)) return null
+        return ExportedConstant(
+            globals.get(name), globals.constantInteger(name), globals.constantRational(name),
+            globals.constantStringLength(name), globals.constantStringIdentity(name),
+            globals.constantBoolean(name), globals.constantComplex(name)
+        )
     }
+
+    private fun isExportedIdentifier(name: String): Boolean = name.firstOrNull()?.isUpperCase() == true
 
     private fun dotImportedIdentifierType(name: String): Pair<String, GoTypeSyntax>? {
         dotImportPaths.forEach { path ->
             val type = when (standardPackageName(path)) {
-                "fmt" -> dotImportedFmtFunctionType(name)
+                "fmt" -> GoFmtPackage.functionType(name)
                 "math" -> GoMathPackage.memberType(name)
                 else -> null
+            } ?: importedPackages[path]?.let { imported ->
+                imported.exportedFunctionType(name) ?: imported.exportedConstant(name)?.type
             }
             if (type != null) return path to type
         }
         return null
     }
+
+    private fun importedConstant(path: String, name: String): ExportedConstant? =
+        importedPackages[path]?.exportedConstant(name)
+
+    private fun dotImportedConstant(name: String): Pair<String, ExportedConstant>? =
+        dotImportPaths.firstNotNullOfOrNull { path -> importedConstant(path, name)?.let { path to it } }
 
     private fun checkMain() {
         val main = functions["main"] ?: error("main function not found")
@@ -563,6 +607,7 @@ class TypeChecker {
         fun visit(statement: Statement, path: List<Any>, ownerBlock: BlockStatement?, statementIndex: Int?) {
             when (statement) {
                 is LabeledStatement -> {
+                    if (statement.label == "_") error("label cannot be blank")
                     if (labels.putIfAbsent(statement.label, LabelInfo(statement.statement, path, ownerBlock, statementIndex)) != null)
                         error("label ${statement.label} redeclared")
                     visit(statement.statement, path, ownerBlock, statementIndex)
@@ -675,9 +720,10 @@ class TypeChecker {
                         } }
                     }
                     is TypeDeclaration -> {
-                        if (scope.containsLocal(declaration.name)) error("${declaration.name} redeclared in this block")
+                        if (declaration.name != "_" && scope.containsLocal(declaration.name))
+                            error("${declaration.name} redeclared in this block")
                         val identity = "<local:${nextLocalTypeIdentity.incrementAndGet()}:${declaration.name}>"
-                        scope.defineType(declaration.name, identity)
+                        if (declaration.name != "_") scope.defineType(declaration.name, identity)
                         typeDeclarations[identity] = resolveLocalType(declaration.type, scope)
                         validateType(NamedGoType(identity))
                     }
@@ -927,6 +973,7 @@ class TypeChecker {
         val switchScope = scope.child()
         statement.init?.let { checkStatement(it, switchScope) }
         val tagType = statement.tag?.let { expressionType(it, switchScope) }
+        if (tagType == nilType) error("switch expression cannot be nil")
         if (tagType != null && !isComparable(tagType)) error("switch expression must be comparable")
         var sawDefault = false
         val seenCases = mutableSetOf<String>()
@@ -946,6 +993,7 @@ class TypeChecker {
             }
             clause.expressions?.forEach { case ->
                 val caseType = expressionType(case, caseScope)
+                if (caseType != nilType && !isComparable(caseType)) error("switch case expression must be comparable")
                 if (tagType != null) {
                     if (!assignable(caseType, tagType) && !assignable(tagType, caseType))
                         error("case type does not match switch expression")
@@ -1012,6 +1060,11 @@ class TypeChecker {
 
     private fun constantComplex(expression: Expression, scope: Scope = globals): ConstantComplexValue? = when (expression) {
         is NameExpression -> scope.constantComplex(expression.name)
+            ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.complex else null
+        is SelectorExpression -> {
+            val alias = (expression.receiver as? NameExpression)?.name
+            alias?.let(packagePaths::get)?.let { importedConstant(it, expression.field)?.complex }
+        }
         is LiteralExpression -> if (expression.token.kind == TokenKind.IMAG) {
             runCatching { GoRational.decimal(expression.token.lexeme.removeSuffix("i")) }.getOrNull()
                 ?.let { ConstantComplexValue(GoRational.ZERO, it) }
@@ -1050,8 +1103,8 @@ class TypeChecker {
         is CallExpression -> {
             val target = when (val function = expression.function) {
                 is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null &&
-                    (isBuiltinType(function.name) || function.name in typeDeclarations)) NamedGoType(function.name) else null
+                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
+                    NamedGoType(function.name) else null
                 else -> null
             }
             when {
@@ -1076,11 +1129,14 @@ class TypeChecker {
         constantRational(expression, scope) ?: constantInteger(expression, scope)?.let(GoRational::of)
 
     private fun constantBoolean(expression: Expression, scope: Scope = globals): Boolean? = when (expression) {
-        is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.constantBoolean(expression.name) else when (expression.name) {
-            "true" -> true
-            "false" -> false
-            else -> null
-        }
+        is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.constantBoolean(expression.name)
+            else when (expression.name) {
+                "true" -> true
+                "false" -> false
+                else -> dotImportedConstant(expression.name)?.second?.boolean
+            }
+        is SelectorExpression -> (expression.receiver as? NameExpression)?.name?.let(packagePaths::get)
+            ?.let { importedConstant(it, expression.field)?.boolean }
         is ParenthesizedExpression -> constantBoolean(expression.expression, scope)
         is UnaryExpression -> if (expression.operator == TokenKind.NOT) constantBoolean(expression.operand, scope)?.not() else null
         is BinaryExpression -> {
@@ -1122,8 +1178,8 @@ class TypeChecker {
         is CallExpression -> {
             val target = when (val function = expression.function) {
                 is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null &&
-                    (isBuiltinType(function.name) || function.name in typeDeclarations)) NamedGoType(function.name) else null
+                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
+                    NamedGoType(function.name) else null
                 else -> null
             }
             if (target != null && underlying(target) == boolType && expression.arguments.size == 1 && !expression.expandLastArgument)
@@ -1134,6 +1190,9 @@ class TypeChecker {
 
     private fun constantStringIdentity(expression: Expression, scope: Scope = globals): String? = when (expression) {
         is NameExpression -> scope.constantStringIdentity(expression.name)
+            ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.stringIdentity else null
+        is SelectorExpression -> (expression.receiver as? NameExpression)?.name?.let(packagePaths::get)
+            ?.let { importedConstant(it, expression.field)?.stringIdentity }
         is LiteralExpression -> if (expression.token.kind == TokenKind.STRING)
             canonicalGoStringLiteral(expression.token.lexeme) else null
         is ParenthesizedExpression -> constantStringIdentity(expression.expression, scope)
@@ -1145,8 +1204,8 @@ class TypeChecker {
         is CallExpression -> {
             val target = when (val function = expression.function) {
                 is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null &&
-                    (isBuiltinType(function.name) || function.name in typeDeclarations)) NamedGoType(function.name) else null
+                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
+                    NamedGoType(function.name) else null
                 else -> null
             }
             if (target == null || underlying(target) != stringType || expression.arguments.size != 1 || expression.expandLastArgument) null
@@ -1255,16 +1314,16 @@ class TypeChecker {
     }
 
     private fun expressionType(expression: Expression, scope: Scope): GoTypeSyntax = when (expression) {
-        is NameExpression -> scope.getOrNull(expression.name) ?: when (expression.name) {
-            "true", "false" -> untypedBool
-            "nil" -> nilType
-            "iota" -> error("undefined: iota")
-            else -> scope.typeBinding(expression.name)?.let(::NamedGoType)
-                ?: if (typeDeclarations.containsKey(expression.name)) NamedGoType(expression.name)
-                else if (isBuiltinType(expression.name)) NamedGoType(expression.name)
-                else if (functions.containsKey(expression.name)) functionType(functions.getValue(expression.name))
-                else dotImportedIdentifierType(expression.name)?.also { usedDotImportPaths += it.first }?.second
-                    ?: error("undefined: ${expression.name}")
+        is NameExpression -> scope.getOrNull(expression.name) ?: when {
+            scope.typeBinding(expression.name) != null || typeDeclarations.containsKey(expression.name) ||
+                isBuiltinType(expression.name) -> error("type ${expression.name} is not an expression")
+            expression.name in packagePaths -> error("package ${expression.name} cannot be used as a value")
+            expression.name == "true" || expression.name == "false" -> untypedBool
+            expression.name == "nil" -> nilType
+            expression.name == "iota" -> error("undefined: iota")
+            functions.containsKey(expression.name) -> functionType(functions.getValue(expression.name))
+            else -> dotImportedIdentifierType(expression.name)?.also { usedDotImportPaths += it.first }?.second
+                ?: error("undefined: ${expression.name}")
         }
         is LiteralExpression -> when (expression.token.kind) {
             TokenKind.INT -> untypedInt
@@ -1412,12 +1471,16 @@ class TypeChecker {
     ): GoTypeSyntax {
         if (expression.field == "_") error("cannot refer to blank struct field")
         if (expression.receiver is NameExpression && expression.receiver.name in packagePaths &&
-            scope.getOrNull(expression.receiver.name) == null) {
+            scope.getOrNull(expression.receiver.name) == null &&
+            scope.typeBinding(expression.receiver.name) == null) {
             val path = importedPackagePath(expression.receiver.name)!!
             return when (standardPackageName(path)) {
-                "fmt" -> dotImportedFmtFunctionType(expression.field) ?: error("undefined fmt identifier ${expression.field}")
+                "fmt" -> GoFmtPackage.functionType(expression.field) ?: error("undefined fmt identifier ${expression.field}")
                 "math" -> GoMathPackage.memberType(expression.field) ?: error("undefined math identifier ${expression.field}")
-                else -> error("unknown imported package ${expression.receiver.name}")
+                else -> importedPackages[path]?.let { imported ->
+                    imported.exportedFunctionType(expression.field) ?: imported.exportedConstant(expression.field)?.type
+                }
+                    ?: error("undefined imported identifier ${expression.field}")
             }
         }
         methodExpressionReceiver(expression.receiver, scope)?.let { receiverType ->
@@ -1487,10 +1550,8 @@ class TypeChecker {
     }
 
     private fun methodExpressionReceiver(expression: Expression, scope: Scope): GoTypeSyntax? = when (expression) {
-        is NameExpression -> if (scope.getOrNull(expression.name) != null) null else {
-            scope.typeBinding(expression.name)?.let { resolveLocalType(NamedGoType(it), scope) }
-                ?: if (expression.name in typeDeclarations || isBuiltinType(expression.name)) NamedGoType(expression.name)
-                else null
+        is NameExpression -> if (scope.getOrNull(expression.name) != null || !isTypeName(expression.name, scope)) null else {
+            resolveLocalType(scope.typeBinding(expression.name)?.let(::NamedGoType) ?: NamedGoType(expression.name), scope)
         }
         is ParenthesizedExpression -> methodExpressionReceiver(expression.expression, scope)
         is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
@@ -1561,8 +1622,9 @@ class TypeChecker {
 
     private fun checkComposite(literal: CompositeLiteral, scope: Scope): GoTypeSyntax {
         val literalType = resolveLocalType(literal.type, scope)
-        checkCompositeElements(literalType, literal.elements, scope)
         val type = underlying(literalType)
+        if (type !is ArrayGoType || type.length != null) validateType(literalType)
+        checkCompositeElements(literalType, literal.elements, scope)
         if (type is ArrayGoType && type.length == null) {
             var nextIndex = BigInteger.ZERO
             var maxIndex = BigInteger.valueOf(-1L)
@@ -1574,7 +1636,7 @@ class TypeChecker {
             val length = maxIndex + BigInteger.ONE
             val lengthExpression = LiteralExpression(Token(TokenKind.INT, length.toString(), Position(0, 1, 1)))
             requireIntegerConstantRepresentable(lengthExpression, intType, scope)
-            return ArrayGoType(lengthExpression, type.element)
+            return ArrayGoType(lengthExpression, type.element).also(::validateType)
         }
         return literalType
     }
@@ -1654,6 +1716,7 @@ class TypeChecker {
                 }
             }
             is StructGoType -> {
+                if (elements.isEmpty()) return
                 val fieldList = type.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { it to field.type }
                 }.filter { it.first.isNotEmpty() }
@@ -1732,26 +1795,31 @@ class TypeChecker {
         val target = call.function
         if (target is TypeExpression) {
             if (call.arguments.size != 1) error("conversion requires one argument")
+            val to = resolveLocalType(target.type, scope)
+            validateType(to)
             val from = expressionType(call.arguments.single(), scope)
-            if (!convertible(from, target.type)) error("cannot convert $from to ${target.type}")
-            requireIntegerConstantRepresentable(call.arguments.single(), target.type, scope)
-            return listOf(target.type)
+            if (!convertible(from, to, isConstantExpression(call.arguments.single(), scope))) error("cannot convert $from to $to")
+            requireIntegerConstantRepresentable(call.arguments.single(), to, scope)
+            return listOf(to)
         }
         val typeNameTarget = target.unparenthesized() as? NameExpression
         if (typeNameTarget != null && scope.getOrNull(typeNameTarget.name) == null) {
-            val localType = scope.typeBinding(typeNameTarget.name)?.let(::NamedGoType)
-            if (localType != null || isBuiltinType(typeNameTarget.name) || typeDeclarations.containsKey(typeNameTarget.name)) {
+            if (isTypeName(typeNameTarget.name, scope)) {
+                val localType = scope.typeBinding(typeNameTarget.name)?.let(::NamedGoType)
                 if (call.arguments.size != 1) error("conversion requires one argument")
                 val from = expressionType(call.arguments.single(), scope)
-                val to = localType ?: NamedGoType(typeNameTarget.name)
-                if (!convertible(from, to)) error("cannot convert $from to $to")
+                val to = resolveLocalType(localType ?: NamedGoType(typeNameTarget.name), scope)
+                validateType(to)
+                if (!convertible(from, to, isConstantExpression(call.arguments.single(), scope))) error("cannot convert $from to $to")
                 requireIntegerConstantRepresentable(call.arguments.single(), to, scope)
                 return listOf(to)
             }
-            val builtin = builtinCall(typeNameTarget.name, call.arguments, scope, call.expandLastArgument)
-            if (builtin != null) {
-                if (typeNameTarget.name == "panic") terminatingPanicCalls += call
-                return builtin
+            if (typeNameTarget.name !in packagePaths) {
+                val builtin = builtinCall(typeNameTarget.name, call.arguments, scope, call.expandLastArgument)
+                if (builtin != null) {
+                    if (typeNameTarget.name == "panic") terminatingPanicCalls += call
+                    return builtin
+                }
             }
         }
         val targetType = if (target is SelectorExpression) selectorType(target, scope, allowBoundMethod = true)
@@ -1789,13 +1857,15 @@ class TypeChecker {
             "make" -> {
                 if (expandLastArgument) error("make does not accept ...")
                 if (types.isEmpty()) error("make requires a type argument")
-                val type = when (val argument = args.first()) {
+                val requestedType = when (val argument = args.first()) {
                     is TypeExpression -> argument.type
                     is NameExpression -> scope.typeBinding(argument.name)?.let(::NamedGoType)
                         ?: if (isBuiltinType(argument.name) || typeDeclarations.containsKey(argument.name)) NamedGoType(argument.name)
                         else error("make requires a type argument")
                     else -> error("make requires a type argument")
                 }
+                val type = resolveLocalType(requestedType, scope)
+                validateType(type)
                 when (underlying(type)) {
                     is SliceGoType -> {
                         if (args.size !in 2..3) error("make slice requires length and optional capacity")
@@ -1930,7 +2000,9 @@ class TypeChecker {
             } else if (!isUnsignedInteger(right)) {
                 error("shift count must have unsigned integer type")
             }
-            return if (isUntyped(left)) untypedInt else left
+            return if (isUntyped(left)) {
+                if (rightExpression?.let { isConstantExpression(it, scope) } == false) defaultType(left) else untypedInt
+            } else left
         }
         val l = underlying(left); val r = underlying(right)
         if (operator in setOf(TokenKind.LAND, TokenKind.LOR)) {
@@ -2011,18 +2083,38 @@ class TypeChecker {
         if (values.size != expressions.size) return
         values.zip(expressions).forEach { (from, expression) ->
             if (isUntyped(from)) requireIntegerConstantRepresentable(expression, defaultType(from), scope)
+            nonConstantUntypedShift(expression, scope)?.let { shift ->
+                val defaulted = defaultType(expressionType(shift.left, scope))
+                if (!isInteger(defaulted)) error("left operand of shift must be integer")
+                requireIntegerConstantRepresentable(shift.left, defaulted, scope)
+            }
         }
     }
 
     private fun requireAssignable(
         from: GoTypeSyntax, to: GoTypeSyntax, context: String, expression: Expression? = null, scope: Scope = globals
     ) {
+        if (expression != null && nonConstantUntypedShift(expression, scope) != null) {
+            if (isInteger(to)) {
+                requireIntegerConstantRepresentable(expression, to, scope)
+                return
+            }
+            if (underlying(to) is InterfaceGoType) {
+                requireIntegerConstantRepresentable(expression, defaultType(untypedInt), scope)
+            } else error("left operand of shift must be integer in this context")
+        }
         val integralFloatConstant = constantIntegerAssignable(from, to, expression, scope)
         val comparisonResultAssignable = (expression?.unparenthesized() as? BinaryExpression)?.operator in
             setOf(TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ) && isBoolean(to)
         if (!assignable(from, to) && !integralFloatConstant && !comparisonResultAssignable)
             error("cannot use $from as $to in $context")
         expression?.let { requireIntegerConstantRepresentable(it, to, scope) }
+    }
+
+    private fun nonConstantUntypedShift(expression: Expression, scope: Scope): BinaryExpression? {
+        val shift = expression.unparenthesized() as? BinaryExpression ?: return null
+        if (shift.operator !in setOf(TokenKind.SHL, TokenKind.SHR) || !isUntyped(expressionType(shift.left, scope))) return null
+        return shift.takeUnless { isConstantExpression(it.right, scope) }
     }
 
     private fun requireIntegerConstantRepresentable(expression: Expression, target: GoTypeSyntax, scope: Scope = globals) {
@@ -2040,7 +2132,11 @@ class TypeChecker {
         } else target
         val targetName = (underlying(checkedTarget) as? NamedGoType)?.name ?: return
         if (targetName in floatNames) {
-            val value = constantRational(expression, scope) ?: return
+            val value = constantRational(expression, scope) ?: constantComplex(expression, scope)?.let {
+                if (it.imaginary.numerator.signum() != 0)
+                    error("constant is not representable as $checkedTarget")
+                it.real
+            } ?: return
             val converted = value.toDouble()
             if (!converted.isFinite() || targetName == "float32" && !converted.toFloat().isFinite())
                 error("constant overflows $checkedTarget")
@@ -2054,7 +2150,11 @@ class TypeChecker {
             return
         }
         if (!isInteger(checkedTarget)) return
-        val value = constantInteger(expression, scope) ?: run {
+        val value = constantInteger(expression, scope) ?: constantComplex(expression, scope)?.let {
+            if (it.imaginary.numerator.signum() != 0 || !it.real.isInteger())
+                error("constant is not representable as $checkedTarget")
+            it.real.numerator
+        } ?: run {
             if (isConstantExpression(expression, scope)) error("constant is not representable as $checkedTarget")
             return
         }
@@ -2100,14 +2200,20 @@ class TypeChecker {
         return sameType(underlying(from), underlying(to)) && (!isNamed(from) || !isNamed(to))
     }
 
-    private fun convertible(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
+    private fun convertible(from: GoTypeSyntax, to: GoTypeSyntax, constant: Boolean = false): Boolean {
         if (assignable(from, to)) return true
         val source = underlying(from)
         val destination = underlying(to)
         if (sameType(source, destination)) return true
         if (from is PointerGoType && to is PointerGoType &&
             sameType(underlying(from.element), underlying(to.element))) return true
-        return (isNumeric(from) && isNumeric(to)) ||
+        val numericConversion = when {
+            constant -> isNumeric(from) && isNumeric(to)
+            isComplex(from) && isComplex(to) -> true
+            (isInteger(from) || isFloatArgument(from)) && (isInteger(to) || isFloatArgument(to)) -> true
+            else -> false
+        }
+        return numericConversion ||
             (isString(from) && (isString(to) || isByteOrRuneSlice(to))) ||
             (isInteger(from) && isString(to)) ||
             (isByteOrRuneSlice(from) && isString(to))
@@ -2115,17 +2221,21 @@ class TypeChecker {
 
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean {
         val slice = underlying(type) as? SliceGoType ?: return false
-        val element = underlying(slice.element)
-        return element == NamedGoType("uint8") || element == NamedGoType("int32")
+        return isPredeclaredByteType(slice.element) || isPredeclaredRuneType(slice.element)
     }
 
     private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
         type == NamedGoType("byte") && "byte" !in typeDeclarations ||
             type == NamedGoType("uint8") && "uint8" !in typeDeclarations
 
+    private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
+        type == NamedGoType("rune") && "rune" !in typeDeclarations ||
+            type == NamedGoType("int32") && "int32" !in typeDeclarations
+
     private fun validateType(type: GoTypeSyntax, active: Set<String> = emptySet(), indirect: Boolean = false) {
         when (type) {
             is NamedGoType -> {
+                if (type.name in packagePaths) error("package ${type.name} is not a type")
                 if (!isBuiltinType(type.name) && type.name !in typeDeclarations) error("undefined type ${type.name}")
                 if (type.name in active) {
                     if (indirect) return
@@ -2184,10 +2294,9 @@ class TypeChecker {
     }
 
     private fun standardPackageName(path: String): String? {
-        val decodedPath = runCatching { decodeGoStringLiteralBytes(path).toString(Charsets.UTF_8) }.getOrDefault(path)
-        return when (decodedPath) {
-        "fmt", "math" -> decodedPath
-        else -> null
+        return when (path) {
+            "fmt", "math" -> path
+            else -> null
         }
     }
     private fun functionType(function: FunctionDeclaration) = FunctionGoType(function.parameterTypes.mapIndexed { i, t ->
@@ -2324,10 +2433,12 @@ class TypeChecker {
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING
         )
         is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.isConstant(expression.name)
-            else expression.name in setOf("true", "false") || dotImportedConstantRational(expression.name) != null
+            else expression.name in setOf("true", "false") || dotImportedConstant(expression.name) != null ||
+                dotImportedConstantRational(expression.name) != null
         is SelectorExpression -> expression.receiver is NameExpression &&
-            packagePaths[expression.receiver.name]?.let { standardPackageName(it) == "math" } == true &&
-            GoMathPackage.constant(expression.field) != null
+            (packagePaths[expression.receiver.name]?.let { standardPackageName(it) == "math" &&
+                GoMathPackage.constant(expression.field) != null } == true ||
+                packagePaths[expression.receiver.name]?.let { importedConstant(it, expression.field) != null } == true)
         is ParenthesizedExpression -> isConstantExpression(expression.expression, scope)
         is UnaryExpression -> expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR) &&
             isConstantExpression(expression.operand, scope)
@@ -2335,8 +2446,8 @@ class TypeChecker {
         is CallExpression -> {
             val target = when (val function = expression.function) {
                 is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null &&
-                    (isBuiltinType(function.name) || function.name in typeDeclarations)) NamedGoType(function.name) else null
+                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
+                    NamedGoType(function.name) else null
                 else -> null
             }
             when {
@@ -2359,7 +2470,7 @@ class TypeChecker {
             val path = alias?.let(::importedPackagePath)
             if (path != null && standardPackageName(path) == "math")
                 GoMathPackage.constant(expression.field)?.let(GoRational::decimal)
-            else null
+            else path?.let { importedConstant(it, expression.field)?.rational }
         }
         is LiteralExpression -> when (expression.token.kind) {
             TokenKind.INT -> parseIntegerConstant(expression.token.lexeme)?.let(GoRational::of)
@@ -2395,8 +2506,8 @@ class TypeChecker {
         is CallExpression -> {
             val target = when (val function = expression.function) {
                 is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null &&
-                    (isBuiltinType(function.name) || function.name in typeDeclarations)) NamedGoType(function.name) else null
+                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
+                    NamedGoType(function.name) else null
                 else -> null
             }
             if (target == null || !isNumeric(target) || expression.arguments.size != 1 || expression.expandLastArgument) null
@@ -2406,7 +2517,8 @@ class TypeChecker {
     }
 
     private fun dotImportedConstantRational(name: String): GoRational? = dotImportPaths.firstNotNullOfOrNull { path ->
-        if (standardPackageName(path) == "math") GoMathPackage.constant(name)?.let(GoRational::decimal) else null
+        if (standardPackageName(path) == "math") GoMathPackage.constant(name)?.let(GoRational::decimal)
+        else importedConstant(path, name)?.rational
     }
 
     private fun constantInteger(expression: Expression, scope: Scope = globals): BigInteger? {
@@ -2445,8 +2557,7 @@ class TypeChecker {
             if (lengthConstant != null) lengthConstant else {
                 val target = when (val function = expression.function) {
                     is TypeExpression -> function.type
-                    is NameExpression -> if (scope.getOrNull(function.name) == null &&
-                        (isBuiltinType(function.name) || function.name in typeDeclarations))
+                    is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
                         NamedGoType(function.name) else null
                     else -> null
                 }
@@ -2480,6 +2591,9 @@ class TypeChecker {
         is LiteralExpression -> if (expression.token.kind == TokenKind.STRING)
             stringLiteralByteLength(expression.token.lexeme)?.let(BigInteger::valueOf) else null
         is NameExpression -> scope.constantStringLength(expression.name)
+            ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.stringLength else null
+        is SelectorExpression -> (expression.receiver as? NameExpression)?.name?.let(packagePaths::get)
+            ?.let { importedConstant(it, expression.field)?.stringLength }
         is ParenthesizedExpression -> constantStringLength(expression.expression, scope)
         is BinaryExpression -> if (expression.operator == TokenKind.ADD) {
             val left = constantStringLength(expression.left, scope)
@@ -2489,8 +2603,8 @@ class TypeChecker {
         is CallExpression -> {
             val target = when (val function = expression.function) {
                 is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null &&
-                    (isBuiltinType(function.name) || function.name in typeDeclarations)) NamedGoType(function.name) else null
+                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
+                    NamedGoType(function.name) else null
                 else -> null
             }
             if (target == null || underlying(target) != stringType || expression.arguments.size != 1 || expression.expandLastArgument) null
@@ -2551,8 +2665,7 @@ class TypeChecker {
         is CallExpression -> {
             val conversion = when (val target = expression.function) {
                 is TypeExpression -> true
-                is NameExpression -> scope.getOrNull(target.name) == null &&
-                    (scope.typeBinding(target.name) != null || isBuiltinType(target.name) || target.name in typeDeclarations)
+                is NameExpression -> scope.getOrNull(target.name) == null && isTypeName(target.name, scope)
                 else -> false
             }
             !conversion || expression.arguments.any { containsCallOrReceive(it, scope) }
@@ -2663,10 +2776,11 @@ class TypeChecker {
 
     private fun isTypeConversion(expression: Expression, scope: Scope): Boolean = when (val target = expression.unparenthesized()) {
         is TypeExpression -> true
-        is NameExpression -> scope.getOrNull(target.name) == null &&
-            (scope.typeBinding(target.name) != null || isBuiltinType(target.name) || target.name in typeDeclarations)
+        is NameExpression -> scope.getOrNull(target.name) == null && isTypeName(target.name, scope)
         else -> false
     }
+    private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
+        (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
     private fun requireCount(name: String, args: List<Expression>, count: Int, actualCount: Int = args.size) {
         if (actualCount != count) error("$name expects $count arguments")
     }

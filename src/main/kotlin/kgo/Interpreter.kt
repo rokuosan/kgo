@@ -80,6 +80,7 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
 }
 
 private data class GoExactComplex(val real: GoRational, val imaginary: GoRational)
+private data class RuntimeImports(val packages: Map<String, String> = emptyMap(), val dotPackages: Set<String> = emptySet())
 private val untypedRuneRuntimeType = NamedGoType("#untyped-rune")
 
 /** Runtime for the currently implemented Go 1.0 execution subset. */
@@ -91,54 +92,43 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private val elementPointers = IdentityHashMap<MutableList<Any?>, MutableMap<Int, GoPointer>>()
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
+    private val functionImports = IdentityHashMap<FunctionDeclaration, RuntimeImports>()
+    private val declarationImports = IdentityHashMap<Declaration, RuntimeImports>()
     private val nextLocalTypeIdentity = AtomicInteger()
-    private val fmtAliases = mutableSetOf("fmt")
-    private val mathAliases = mutableSetOf("math")
-    private var fmtDotImported = false
-    private var mathDotImported = false
+    private var importedRuntimePackages: Map<String, Interpreter> = emptyMap()
+    private var knownPackageNames: Map<String, String> = emptyMap()
+    private var exportedConstantNames: Set<String> = emptySet()
     private lateinit var goroutines: CoroutineScope
 
-    fun run(file: GoFile) {
+    fun run(file: GoFile) = run(listOf(file), emptyList())
+
+    fun run(files: List<GoFile>) = run(files, emptyList())
+
+    internal fun run(files: List<GoFile>, sourcePackages: List<GoSourcePackage>) {
+        if (files.isEmpty()) throw RuntimeGoError("no Go source files")
+        val packageName = files.first().packageName
+        if (files.any { it.packageName != packageName })
+            throw RuntimeGoError("source files declare different package names")
+        if (packageName != "main") throw RuntimeGoError("cannot run package $packageName: package name must be main")
         runBlocking {
             val goroutineFailure = CompletableDeferred<Throwable>()
             val failureHandler = CoroutineExceptionHandler { _, failure -> goroutineFailure.complete(failure) }
             goroutines = CoroutineScope(SupervisorJob() + Dispatchers.Default + failureHandler)
             try {
-                file.declarations.filterIsInstance<ImportDeclaration>().flatMap { it.imports }.forEach { spec ->
-                    val importPath = decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8)
-                    val alias = when (spec.alias) {
-                        "." -> {
-                            if (importPath == "fmt") fmtDotImported = true
-                            if (importPath == "math") mathDotImported = true
-                            null
-                        }
-                        "_" -> null
-                        null -> importPath.substringAfterLast('/')
-                        else -> spec.alias
-                    }
-                    if (alias != null && importPath == "fmt") fmtAliases += alias
-                    if (alias != null && importPath == "math") mathAliases += alias
+                knownPackageNames = sourcePackages.associate { it.importPath to it.packageName }
+                val runtimes = linkedMapOf<String, Interpreter>()
+                sourcePackages.forEach { sourcePackage ->
+                    val runtime = Interpreter(output)
+                    runtime.goroutines = goroutines
+                    runtime.importedRuntimePackages = runtimes.toMap()
+                    runtime.knownPackageNames = knownPackageNames
+                    runtime.preparePackage(sourcePackage.files)
+                    runtime.initializePackage(sourcePackage.files)
+                    runtimes[sourcePackage.importPath] = runtime
                 }
-        file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
-                    if (function.receiver != null) methods[methodKey(function.receiver.type, function.name)] = function
-                    else if (function.name == "init") initFunctions += function
-                    else functions[function.name] = function
-                }
-                file.declarations.filterIsInstance<TypeDeclaration>().forEach {
-                    typeDefinitions[it.name] = it.type
-                    globals.defineType(it.name, NamedGoType(it.name))
-                }
-                val packageConstants = file.declarations.filterIsInstance<ConstantDeclaration>()
-                val packageVariables = file.declarations.filterIsInstance<VariableDeclaration>()
-                packageConstants.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name -> globals.define(name, null, declaration.type) } }
-                packageVariables.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name ->
-                    globals.define(name, declaration.type?.let(::zeroValue), declaration.type)
-                } }
-                orderPackageDeclarations(packageConstants, { it.names }, { it.values }, includeFunctionDependencies = false)
-                    .forEach { initializeConstant(it) }
-                orderPackageDeclarations(packageVariables, { it.names }, { it.values }, includeFunctionDependencies = true)
-                    .forEach { initialize(it.names, it.values, globals, it.type) }
-                initFunctions.forEach { invoke(it, emptyList()) }
+                importedRuntimePackages = runtimes
+                preparePackage(files)
+                initializePackage(files)
                 val main = functions["main"] ?: throw RuntimeGoError("main function not found")
                 val mainExecution = async { invoke(main, emptyList()) }
                 selectUnbiased<Unit> {
@@ -151,6 +141,82 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
         }
     }
+
+    private fun preparePackage(files: List<GoFile>) {
+        functionImports.clear()
+        declarationImports.clear()
+        files.forEach { sourceFile ->
+            val imports = runtimeImports(sourceFile)
+            sourceFile.declarations.forEach { declaration ->
+                declarationImports[declaration] = imports
+                if (declaration is FunctionDeclaration) functionImports[declaration] = imports
+            }
+        }
+    }
+
+    private suspend fun initializePackage(files: List<GoFile>) {
+        val packageName = files.first().packageName
+        val file = GoFile(packageName, files.flatMap { it.declarations })
+        file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
+            if (function.name != "_") {
+                if (function.receiver != null) methods[methodKey(function.receiver.type, function.name)] = function
+                else if (function.name == "init") initFunctions += function
+                else functions[function.name] = function
+            }
+        }
+        file.declarations.filterIsInstance<TypeDeclaration>().forEach {
+            if (it.name != "_") {
+                typeDefinitions[it.name] = it.type
+                globals.defineType(it.name, NamedGoType(it.name))
+            }
+        }
+        val packageConstants = file.declarations.filterIsInstance<ConstantDeclaration>()
+        val packageVariables = file.declarations.filterIsInstance<VariableDeclaration>()
+        exportedConstantNames = packageConstants.flatMap { it.names }.filterTo(mutableSetOf()) {
+            it != "_" && it.firstOrNull()?.isUpperCase() == true
+        }
+        packageConstants.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name -> globals.define(name, null, declaration.type) } }
+        packageVariables.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name ->
+            globals.define(name, declaration.type?.let(::zeroValue), declaration.type)
+        } }
+        orderPackageDeclarations(packageConstants, { it.names }, { it.values }, includeFunctionDependencies = false)
+            .forEach { declaration ->
+                globals.imports = declarationImports[declaration] ?: RuntimeImports()
+                initializeConstant(declaration)
+            }
+        orderPackageDeclarations(packageVariables, { it.names }, { it.values }, includeFunctionDependencies = true)
+            .forEach { declaration ->
+                globals.imports = declarationImports[declaration] ?: RuntimeImports()
+                initialize(declaration.names, declaration.values, globals, declaration.type)
+            }
+        initFunctions.forEach { invoke(it, emptyList()) }
+    }
+
+    private fun runtimeImports(file: GoFile): RuntimeImports {
+        val packages = linkedMapOf<String, String>()
+        val dotPackages = linkedSetOf<String>()
+        file.importBindings(knownPackageNames).forEach { binding ->
+            val spec = binding.specification
+            val path = binding.path
+            when (spec.alias) {
+                "." -> dotPackages += path
+                "_" -> Unit
+                else -> {
+                    packages[binding.alias] = path
+                }
+            }
+        }
+        return RuntimeImports(packages, dotPackages)
+    }
+
+    private fun exportedFunction(name: String): FunctionValue? {
+        if (name.firstOrNull()?.isUpperCase() != true) return null
+        val function = functions[name]?.takeIf { it.receiver == null } ?: return null
+        return FunctionValue(function, globals, owner = this)
+    }
+
+    private fun exportedConstant(name: String): Any? =
+        if (name in exportedConstantNames) globals.getOrNull(name) else null
 
     private suspend fun invoke(
         function: FunctionDeclaration,
@@ -174,7 +240,11 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 type = sliceType)
         }
         val body = function.body ?: throw RuntimeGoError("function ${function.name} has no Go body")
-        val env = Environment(parent, panicState = panicState)
+        val env = Environment(
+            parent,
+            panicState = panicState,
+            imports = functionImports[function] ?: parent.imports
+        )
         function.receiver?.let { env.define(it.name ?: "", copyForType(receiver, it.type), it.type) }
         function.parameters.zip(boundArguments).forEachIndexed { i, (name, value) ->
             name?.let { parameterName ->
@@ -228,7 +298,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             env.runDefers()
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } catch (failure: RuntimeGoError) {
-            val panic = PanicSignal(failure.message ?: "runtime panic", failure.message ?: "runtime panic")
+            val message = failure.message ?: "runtime panic"
+            val panic = PanicSignal(GoRuntimeErrorValue(message), message)
             panicState.activePanic = panic
             defersRun = true
             env.runDefers()
@@ -667,8 +738,47 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         return if (interfaceType != null) implementsInterface(dynamicType, interfaceType) else sameRuntimeType(dynamicType, target)
     }
 
-    private fun sameRuntimeType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean =
-        canonicalAliasType(left) == canonicalAliasType(right)
+    private fun sameRuntimeType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
+        val a = canonicalAliasType(left)
+        val b = canonicalAliasType(right)
+        if (a == b) return true
+        return when {
+            a is PointerGoType && b is PointerGoType -> sameRuntimeType(a.element, b.element)
+            a is SliceGoType && b is SliceGoType -> sameRuntimeType(a.element, b.element)
+            a is ArrayGoType && b is ArrayGoType ->
+                sameRuntimeArrayLength(a.length, b.length) && sameRuntimeType(a.element, b.element)
+            a is MapGoType && b is MapGoType ->
+                sameRuntimeType(a.key, b.key) && sameRuntimeType(a.value, b.value)
+            a is ChannelGoType && b is ChannelGoType ->
+                a.direction == b.direction && sameRuntimeType(a.element, b.element)
+            a is StructGoType && b is StructGoType -> {
+                val leftFields = a.fields.flatMap { field ->
+                    (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag.orEmpty()) }
+                }
+                val rightFields = b.fields.flatMap { field ->
+                    (field.names.ifEmpty { listOf("") }).map { Triple(it, field.type, field.tag.orEmpty()) }
+                }
+                leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (leftField, rightField) ->
+                    leftField.first == rightField.first && leftField.third == rightField.third &&
+                        sameRuntimeType(leftField.second, rightField.second)
+                }
+            }
+            a is InterfaceGoType && b is InterfaceGoType -> {
+                val leftMethods = interfaceMethodsRuntime(a)
+                val rightMethods = interfaceMethodsRuntime(b)
+                leftMethods.keys == rightMethods.keys && leftMethods.all { (name, signature) ->
+                    rightMethods[name]?.let { sameFunctionType(signature, it) } == true
+                }
+            }
+            a is FunctionGoType && b is FunctionGoType -> sameFunctionType(a, b)
+            else -> false
+        }
+    }
+
+    private fun sameRuntimeArrayLength(left: Expression?, right: Expression?): Boolean {
+        if (left == null || right == null) return left == right
+        return runCatching { integerLiteral(left) == integerLiteral(right) }.getOrDefault(false)
+    }
 
     private fun canonicalAliasType(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         NamedGoType("byte") -> if (!typeDefinitions.containsKey("byte")) NamedGoType("uint8") else type
@@ -701,7 +811,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
         val onlyIndexIsUsed = range.targets.size <= 1 || range.targets.getOrNull(1).isBlankIdentifier()
-        if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
+        if (onlyIndexIsUsed) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
                 rangeIndexed(arrayLength, range, body, env, labels) { index -> listOf(index.toLong()) }
@@ -1111,13 +1221,21 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 private suspend fun evaluate(expression: Expression, env: Environment): Any? = when (expression) {
         is NameExpression -> {
             val binding = env.binding(expression.name)
+            val dotImportedFunction = env.imports.dotPackages.firstNotNullOfOrNull { path ->
+                importedRuntimePackages[path]?.exportedFunction(expression.name)
+            }
+            val dotImportedConstant = env.imports.dotPackages.firstNotNullOfOrNull { path ->
+                importedRuntimePackages[path]?.exportedConstant(expression.name)
+            }
             if (binding != null) binding.value
             else typeDefinitions[expression.name]?.let { TypeValue(NamedGoType(expression.name)) }
-                ?: functions[expression.name]?.let { FunctionValue(it, globals) }
+                ?: functions[expression.name]?.let { FunctionValue(it, globals, owner = this) }
+                ?: dotImportedFunction
+                ?: dotImportedConstant
                 ?: when {
-                    fmtDotImported && expression.name in setOf("Print", "Println", "Fprint", "Fprintln") ->
-                        BuiltinValue(expression.name, dotImportedFmtFunctionType(expression.name))
-                    mathDotImported && expression.name in GoMathPackage.exportedNames -> evaluateMathPackageMember(expression.name)
+                    "fmt" in env.imports.dotPackages && expression.name in GoFmtPackage.exportedNames ->
+                        BuiltinValue(expression.name, GoFmtPackage.functionType(expression.name))
+                    "math" in env.imports.dotPackages && expression.name in GoMathPackage.exportedNames -> evaluateMathPackageMember(expression.name)
                     else -> when (expression.name) {
                     "true" -> true
                     "false" -> false
@@ -1175,9 +1293,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     FunctionGoType(listOf(ParameterSyntax(null, methodReceiverType)) + method.parameters, method.results)
                 )
             } else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
-                expression.receiver.name in fmtAliases) BuiltinValue(expression.field)
+                env.imports.packages[expression.receiver.name] == "fmt") BuiltinValue(expression.field)
             else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
-                expression.receiver.name in mathAliases) evaluateMathPackageMember(expression.field)
+                env.imports.packages[expression.receiver.name] == "math") evaluateMathPackageMember(expression.field)
+            else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+                env.imports.packages[expression.receiver.name]?.let(importedRuntimePackages::containsKey) == true) {
+                val path = env.imports.packages.getValue(expression.receiver.name)
+                importedRuntimePackages.getValue(path).exportedFunction(expression.field)
+                    ?: importedRuntimePackages.getValue(path).exportedConstant(expression.field)
+                    ?: throw RuntimeGoError("undefined imported identifier ${expression.field}")
+            }
             else {
                 val receiver = evaluate(expression.receiver, env)
                 if (receiver is GoPointer && receiver.isNil) {
@@ -1225,13 +1350,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 "<function literal>", parameters.map { it.name }, expression.body,
                 parameters.map { it.type }, results, null, expression.variadic, expression.resultNames
             )
-            FunctionValue(declaration, env, FunctionGoType(parameters, results))
+            FunctionValue(declaration, env, FunctionGoType(parameters, results), this)
         }
     }
 
     private fun methodExpressionReceiver(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
         is NameExpression -> if (env.contains(expression.name)) null else {
-            env.typeBinding(expression.name) ?: typeDefinitions[expression.name]?.let { NamedGoType(expression.name) }
+            env.typeBinding(expression.name) ?: if (expression.name in env.imports.packages) null
+            else typeDefinitions[expression.name]?.let { NamedGoType(expression.name) }
                 ?: if (expression.name in builtinTypes) NamedGoType(expression.name) else null
         }
         is ParenthesizedExpression -> methodExpressionReceiver(expression.expression, env)
@@ -1293,7 +1419,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private suspend fun selectStructMember(receiver: Any?, name: String, receiverExpression: Expression, env: Environment): Any? {
         data class Node(val value: Any?, val ancestors: Set<String>)
-        data class Candidate(val owner: GoStruct?, val method: FunctionDeclaration?, val receiver: Any?)
+        data class Candidate(
+            val owner: GoStruct?,
+            val method: FunctionDeclaration?,
+            val receiver: Any?,
+            val runtimeError: GoRuntimeErrorValue? = null
+        )
         var level = listOf(Node(receiver, emptySet()))
         while (level.isNotEmpty()) {
             val candidates = mutableListOf<Candidate>()
@@ -1308,11 +1439,17 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 }
                 val current = dereference(node.value)
                 if (current is GoInterfaceValue) {
-                    methods[methodKey(current.dynamicType, name)]?.let { candidates += Candidate(null, it, current) }
+                    if (current.value is GoRuntimeErrorValue && name == "Error")
+                        candidates += Candidate(null, null, current, current.value)
+                    else methods[methodKey(current.dynamicType, name)]?.let { candidates += Candidate(null, it, current) }
                     return@forEach
                 }
                 val struct = current as? GoStruct
                 if (struct == null) {
+                    if (current is GoRuntimeErrorValue && name == "Error") {
+                        candidates += Candidate(null, null, current, current)
+                        return@forEach
+                    }
                     val valueType = (node.value as? GoPointer)?.pointeeType ?: runtimeType(current) ?: return@forEach
                     methods[methodKey(valueType, name)]?.let { candidates += Candidate(null, it, node.value) }
                     return@forEach
@@ -1334,6 +1471,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (candidates.size != 1) throw RuntimeGoError("ambiguous selector $name")
                 val candidate = candidates.single()
                 candidate.owner?.let { owner -> return owner.fields[name] }
+                candidate.runtimeError?.let { return RuntimeErrorMethodValue(it) }
                 val method = candidate.method ?: throw RuntimeGoError("unknown selector $name")
                 val pointerReceiver = method.receiver?.type is PointerGoType
                 val methodReceiver = when {
@@ -1492,7 +1630,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         } else args.map(::copyValue)
         when (target) {
             is FunctionValue -> {
-                val values = invoke(target.function, args, parent = target.closure, expandedVariadic = expandLastArgument,
+                val values = target.owner.invoke(target.function, args, parent = target.closure, expandedVariadic = expandLastArgument,
                     panicState = panicState, deferredCall = deferredCall)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
             }
@@ -1500,6 +1638,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 val values = invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument,
                     panicState = panicState, deferredCall = deferredCall)
                 return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
+            }
+            is RuntimeErrorMethodValue -> {
+                if (args.isNotEmpty()) throw RuntimeGoError("Error expects no arguments")
+                return GoString(target.receiver.message.toByteArray(Charsets.UTF_8), NamedGoType("string"))
             }
             is MethodExpressionValue -> {
                 val receiver = args.firstOrNull() ?: throw RuntimeGoError("method expression requires a receiver")
@@ -1593,14 +1735,26 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 "copy" -> return copy(args)
                 "delete" -> { delete(args); return null }
                 "Print", "Fprint" -> {
-                    val rendered = effectiveArgs.drop(if (target.name == "Fprint") 1 else 0).joinToString("") { stringify(it) }
-                    output(rendered)
-                    return GoMultiValue(listOf(GoInteger(rendered.toByteArray(Charsets.UTF_8).size.toLong(), NamedGoType("int")), null))
+                    val values = effectiveArgs.drop(if (target.name == "Fprint") 1 else 0)
+                    val rendered = formatPrintArguments(values, alwaysSpace = false, newline = false)
+                    return if (target.name == "Fprint") {
+                        writeFmtOutput(effectiveArgs.firstOrNull()
+                            ?: throw RuntimeGoError("Fprint requires an io.Writer"), rendered, environment)
+                    } else {
+                        output(rendered)
+                        fmtWriteResult(rendered.toByteArray(Charsets.UTF_8).size, null)
+                    }
                 }
                 "Println", "Fprintln" -> {
-                    val rendered = effectiveArgs.drop(if (target.name == "Fprintln") 1 else 0).joinToString(" ") { stringify(it) } + "\n"
-                    output(rendered)
-                    return GoMultiValue(listOf(GoInteger(rendered.toByteArray(Charsets.UTF_8).size.toLong(), NamedGoType("int")), null))
+                    val values = effectiveArgs.drop(if (target.name == "Fprintln") 1 else 0)
+                    val rendered = formatPrintArguments(values, alwaysSpace = true, newline = true)
+                    return if (target.name == "Fprintln") {
+                        writeFmtOutput(effectiveArgs.firstOrNull()
+                            ?: throw RuntimeGoError("Fprintln requires an io.Writer"), rendered, environment)
+                    } else {
+                        output(rendered)
+                        fmtWriteResult(rendered.toByteArray(Charsets.UTF_8).size, null)
+                    }
                 }
                 else -> if (target.name.startsWith("math.")) return mathCall(target.name.removePrefix("math."), args)
             }
@@ -1608,6 +1762,53 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         throw RuntimeGoError("cannot call value")
     }
+
+    private fun formatPrintArguments(values: List<Any?>, alwaysSpace: Boolean, newline: Boolean): String = buildString {
+        values.forEachIndexed { index, value ->
+            if (index > 0 && (alwaysSpace || (!isStringOperand(values[index - 1]) && !isStringOperand(value)))) append(' ')
+            append(stringify(value))
+        }
+        if (newline) append('\n')
+    }
+
+    private fun isStringOperand(value: Any?): Boolean {
+        val actual = if (value is GoInterfaceValue) value.value else value
+        val type = runtimeType(actual) ?: return actual is GoString
+        return underlying(type) == NamedGoType("string")
+    }
+
+    private suspend fun writeFmtOutput(writer: Any?, text: String, environment: Environment?): Any {
+        val scope = environment ?: globals
+        val method = selectStructMember(writer, "Write", NameExpression("<fmt writer>"), scope)
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        val byteType = NamedGoType("byte")
+        val slice = GoSlice(
+            byteType,
+            bytes.mapTo(mutableListOf()) { GoInteger((it.toInt() and 0xff).toLong(), byteType) },
+            0,
+            bytes.size,
+            bytes.size,
+            type = SliceGoType(byteType)
+        )
+        val result = call(method, listOf(slice), environment = scope)
+        val values = when (result) {
+            is GoMultiValue -> result.values
+            null -> emptyList()
+            else -> listOf(result)
+        }
+        val written = values.firstOrNull() ?: GoInteger(0, NamedGoType("int"))
+        val failure = values.getOrNull(1)
+        return fmtWriteResult(written, failure)
+    }
+
+    private fun fmtWriteResult(written: Any?, failure: Any?): GoMultiValue = GoMultiValue(listOf(
+        when (written) {
+            is GoInteger -> written
+            is Number -> GoInteger(written.toLong(), NamedGoType("int"))
+            else -> GoInteger(0, NamedGoType("int"))
+        },
+        failure
+    ))
 
     private suspend fun composite(literal: CompositeLiteral, env: Environment): Any? {
         val type = underlying(literal.type)
@@ -1669,7 +1870,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 }
                 val keyed = literal.elements.map { it.key != null }.toSet()
                 if (keyed.size > 1) throw RuntimeGoError("mixture of keyed and unkeyed struct literal elements")
-                if (keyed.singleOrNull() != true && literal.elements.size != fieldList.size)
+                if (literal.elements.isNotEmpty() && keyed.singleOrNull() != true && literal.elements.size != fieldList.size)
                     throw RuntimeGoError("struct literal has ${literal.elements.size} values for ${fieldList.size} fields")
                 val usedFields = mutableSetOf<String>()
                 literal.elements.forEachIndexed { i, element ->
@@ -1760,7 +1961,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
         }
         val namedType = NamedGoType(identity)
-        env.defineType(declaration.name, namedType)
+        if (declaration.name != "_") env.defineType(declaration.name, namedType)
         if (resolveDefinition) typeDefinitions[identity] = resolveRuntimeType(declaration.type, env)
     }
 
@@ -1771,6 +1972,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
+        is GoRuntimeErrorValue -> runtimeErrorValueType
         is GoInterfaceValue -> value.dynamicType
         is GoStruct -> value.namedType?.let(::NamedGoType) ?: value.staticType
         is GoArray -> value.namedType?.let(::NamedGoType) ?: value.type
@@ -1800,17 +2002,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoString -> value.type
         is Boolean -> NamedGoType("bool")
         else -> null
-    }
-
-    private fun dotImportedFmtFunctionType(name: String): FunctionGoType {
-        val any = InterfaceGoType(emptyList())
-        val variadic = ParameterSyntax(null, SliceGoType(any), variadic = true)
-        val writer = ParameterSyntax(null, any)
-        return when (name) {
-            "Print", "Println" -> FunctionGoType(listOf(variadic), listOf(NamedGoType("int"), NamedGoType("error")))
-            "Fprint", "Fprintln" -> FunctionGoType(listOf(writer, variadic), listOf(NamedGoType("int"), NamedGoType("error")))
-            else -> throw RuntimeGoError("undefined fmt function $name")
-        }
     }
 
     private fun evaluateMathPackageMember(name: String): Any? = when {
@@ -2099,6 +2290,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         if (type is PointerGoType && underlying(type.element) is InterfaceGoType) return emptyMap()
         val actual = underlying(type)
         if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
+        if (type == runtimeErrorValueType) return mapOf(
+            "Error" to FunctionGoType(emptyList(), listOf(NamedGoType("string")))
+        )
         val result = linkedMapOf<String, FunctionGoType>()
         data class SearchNode(val type: GoTypeSyntax, val pointer: Boolean, val ancestors: Set<String>)
         fun baseType(nodeType: GoTypeSyntax): GoTypeSyntax = underlying((nodeType as? PointerGoType)?.element ?: nodeType)
@@ -2166,8 +2360,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun sameFunctionType(left: FunctionGoType, right: FunctionGoType): Boolean =
         left.parameters.size == right.parameters.size && left.results.size == right.results.size &&
-            left.parameters.zip(right.parameters).all { (a, b) -> a.type == b.type && a.variadic == b.variadic } &&
-            left.results.zip(right.results).all { (a, b) -> a == b }
+            left.parameters.zip(right.parameters).all { (a, b) -> sameRuntimeType(a.type, b.type) && a.variadic == b.variadic } &&
+            left.results.zip(right.results).all { (a, b) -> sameRuntimeType(a, b) }
 
     private fun methodKey(type: GoTypeSyntax, name: String): String {
         val base = if (type is PointerGoType) type.element else type
@@ -2317,10 +2511,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 (type as? NamedGoType)?.name, type)
         }
         is SliceGoType -> {
-            if (value is GoString && isByteOrRuneType(target.element)) {
+            if (value is GoString && (isPredeclaredByteType(target.element) || isPredeclaredRuneType(target.element))) {
                 if (value.bytes.isEmpty()) GoNilValue(type)
                 else {
-                    val converted = if (isByteType(target.element))
+                    val converted = if (isPredeclaredByteType(target.element))
                         value.bytes.map { (it.toInt() and 0xff).toLong() }
                     else decodeUtf8Runes(value.bytes).map(Int::toLong)
                     val backing = converted.mapTo(mutableListOf()) { copyForType(it, target.element) }
@@ -2359,8 +2553,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 is BigInteger -> GoString(codePointString(value).toByteArray(Charsets.UTF_8), type)
                 is GoInteger -> GoString(codePointString(value.value).toByteArray(Charsets.UTF_8), type)
                 is GoSlice -> when {
-                    isByteType(value.elementType) -> GoString(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), type)
-                    isRuneType(value.elementType) -> GoString(value.toList().joinToString("") { codePointString(number(it, "string conversion")) }.toByteArray(Charsets.UTF_8), type)
+                    isPredeclaredByteType(value.elementType) -> GoString(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), type)
+                    isPredeclaredRuneType(value.elementType) -> GoString(value.toList().joinToString("") { codePointString(number(it, "string conversion")) }.toByteArray(Charsets.UTF_8), type)
                     else -> throw RuntimeGoError("cannot convert slice to string")
                 }
                 is GoNilValue -> if (isByteOrRuneSlice(value.type)) GoString(byteArrayOf(), type) else throw RuntimeGoError("cannot convert to string")
@@ -2375,7 +2569,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 is GoInteger -> integerAsDouble(value).let { GoFloat(if (target.name == "float32") it.toFloat().toDouble() else it, type) }
                 is Double -> GoFloat(if (target.name == "float32") value.toFloat().toDouble() else value, type)
                 is GoFloat -> GoFloat(if (target.name == "float32") value.value.toFloat().toDouble() else value.value, type)
-                is GoComplex -> GoFloat(if (target.name == "float32") value.real.toFloat().toDouble() else value.real, type)
                 else -> throw RuntimeGoError("cannot convert to float")
             }
             "complex64", "complex128" -> {
@@ -2397,7 +2590,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     is GoRational -> value.integerValue("integer conversion").toLong()
                     is Double -> value.toLong()
                     is GoFloat -> value.value.toLong()
-                    is GoComplex -> value.real.toLong()
                     else -> throw RuntimeGoError("cannot convert to integer")
                 }
                 GoInteger(wrapInteger(converted, type), type)
@@ -2407,14 +2599,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else -> value
     }
 
-    private fun isByteType(type: GoTypeSyntax): Boolean = underlying(type) == NamedGoType("uint8")
-    private fun isRuneType(type: GoTypeSyntax): Boolean = underlying(type) == NamedGoType("int32")
     private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
         type == NamedGoType("byte") && !typeDefinitions.containsKey("byte") ||
             type == NamedGoType("uint8") && !typeDefinitions.containsKey("uint8")
-    private fun isByteOrRuneType(type: GoTypeSyntax): Boolean = isByteType(type) || isRuneType(type)
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? SliceGoType)?.element?.let(::isByteOrRuneType) == true
+        (underlying(type) as? SliceGoType)?.element?.let { isPredeclaredByteType(it) || isPredeclaredRuneType(it) } == true
+
+    private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
+        type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") ||
+            type == NamedGoType("int32") && !typeDefinitions.containsKey("int32")
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
         setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
@@ -2501,6 +2694,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun delete(args: List<Any?>) {
         val map = args.getOrNull(0) as? GoMap ?: when (val nilMap = args.getOrNull(0)) {
+            // Go 1.0 specifies a run-time panic here; later Go versions made this a no-op.
             is GoNilValue -> if (underlying(nilMap.type) is MapGoType)
                 throw RuntimeGoError("delete from nil map") else throw RuntimeGoError("delete requires a map")
             else -> throw RuntimeGoError("delete requires a map")
@@ -2665,6 +2859,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun embeddedFieldName(type: GoTypeSyntax): String = when (type) {
         is NamedGoType -> type.name
+        is QualifiedGoType -> type.name
         is PointerGoType -> embeddedFieldName(type.element)
         else -> ""
     }
@@ -3188,6 +3383,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun stringify(value: Any?): String = when (value) {
         null -> "<nil>"
         is GoNilValue -> "<nil>"
+        is GoRuntimeErrorValue -> value.message
         is GoInterfaceValue -> stringify(value.value)
         is GoComplex -> "(${value.real}${if (value.imaginary < 0) "" else "+"}${value.imaginary}i)"
         is GoFloat -> value.value.toString()
@@ -3257,13 +3453,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private inner class Environment(
         private val parent: Environment? = null,
         private val deferredCalls: MutableList<suspend () -> Unit> = mutableListOf(),
-        val panicState: PanicState = parent?.panicState ?: PanicState()
+        val panicState: PanicState = parent?.panicState ?: PanicState(),
+        var imports: RuntimeImports = parent?.imports ?: RuntimeImports()
     ) {
         private val values = mutableMapOf<String, Any?>()
         private val types = mutableMapOf<String, GoTypeSyntax>()
         private val namedTypes = mutableMapOf<String, NamedGoType>()
         private val addresses = mutableMapOf<String, GoPointer>()
-        fun child() = Environment(this, deferredCalls, panicState)
+        fun child() = Environment(this, deferredCalls, panicState, imports)
         fun containsLocal(name: String) = values.containsKey(name)
         fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
             values[name] = type?.let { copyForType(value, it) } ?: copyValue(value)
@@ -3302,7 +3499,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     panicFromDefer = panic
                     panicState.activePanic = panic
                 } catch (failure: RuntimeGoError) {
-                    val panic = PanicSignal(failure.message ?: "runtime panic", failure.message ?: "runtime panic")
+                    val message = failure.message ?: "runtime panic"
+                    val panic = PanicSignal(GoRuntimeErrorValue(message), message)
                     panicFromDefer = panic
                     panicState.activePanic = panic
                 } finally {
@@ -3360,7 +3558,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
 
     private data class Lookup(val value: Any?)
-    private data class FunctionValue(val function: FunctionDeclaration, val closure: Environment, val type: GoTypeSyntax? = null)
+    private data class FunctionValue(
+        val function: FunctionDeclaration,
+        val closure: Environment,
+        val type: GoTypeSyntax? = null,
+        val owner: Interpreter
+    )
     private data class BuiltinValue(val name: String, val type: GoTypeSyntax? = null)
     private data class TypeValue(val type: GoTypeSyntax)
     private data class MethodValue(val function: FunctionDeclaration, val receiver: Any?)
@@ -3384,6 +3587,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val embedded: Boolean
     )
     private class PanicState(var activePanic: PanicSignal? = null, var recoverAllowed: Boolean = false)
+    private data class GoRuntimeErrorValue(val message: String)
+    private data class RuntimeErrorMethodValue(val receiver: GoRuntimeErrorValue)
     private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
         var recovered: Boolean = false
     }
@@ -3569,6 +3774,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     companion object {
         private val integerTypeNames = setOf("int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
+        private val runtimeErrorValueType = NamedGoType("#runtime.Error")
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")
     }
 }

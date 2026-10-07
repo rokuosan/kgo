@@ -198,13 +198,14 @@ class Lexer(private val source: String) {
         val cp = source.codePointAt(offset)
         val count = Character.charCount(cp)
         offset += count
-        byteOffset += when {
+        val byteCount = when {
             cp <= 0x7f -> 1
             cp <= 0x7ff -> 2
             cp <= 0xffff -> 3
             else -> 4
         }
-        if (cp == '\n'.code) { line++; column = 1 } else column++
+        byteOffset += byteCount
+        if (cp == '\n'.code) { line++; column = 1 } else column += byteCount
     }
 
     private fun codePointAtOffset() = if (offset < source.length) source.codePointAt(offset) else 0
