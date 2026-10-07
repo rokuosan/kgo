@@ -2228,6 +2228,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is StructGoType -> StructGoType(type.fields.map { field ->
             field.copy(
                 type = externalizeRuntimeType(field.type, importPath),
+                declaringPackagePath = field.declaringPackagePath ?: importPath,
                 packagePath = field.packagePath ?: importPath.takeIf { path ->
                     field.names.any(GoUnicode6::isUnexportedIdentifier) ||
                         field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))
@@ -2278,6 +2279,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is StructGoType -> StructGoType(type.fields.map { field ->
             field.copy(
                 type = resolveRuntimeType(field.type, env),
+                declaringPackagePath = field.declaringPackagePath ?: packageIdentity,
                 packagePath = field.packagePath ?: packageIdentity.takeIf { path ->
                     field.names.any(GoUnicode6::isUnexportedIdentifier) ||
                         field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))

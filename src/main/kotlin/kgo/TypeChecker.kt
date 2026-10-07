@@ -311,6 +311,7 @@ class TypeChecker(
             is StructGoType -> StructGoType(current.fields.map { field ->
                 field.copy(
                     type = visit(field.type),
+                    declaringPackagePath = field.declaringPackagePath ?: importPath,
                     packagePath = field.packagePath ?: importPath.takeIf { path ->
                         field.names.any(GoUnicode6::isUnexportedIdentifier) ||
                             field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))
@@ -1723,6 +1724,7 @@ class TypeChecker(
         is StructGoType -> StructGoType(type.fields.map { field ->
             field.copy(
                 type = resolveLocalType(field.type, scope),
+                declaringPackagePath = field.declaringPackagePath ?: packageIdentity ?: packageName,
                 packagePath = field.packagePath ?: packageIdentity.takeIf { path ->
                     field.names.any(GoUnicode6::isUnexportedIdentifier) ||
                         field.names.isEmpty() && GoUnicode6.isUnexportedIdentifier(embeddedFieldName(field.type))
@@ -1788,7 +1790,7 @@ class TypeChecker(
                 data class LiteralField(val name: String, val type: GoTypeSyntax, val packagePath: String?)
                 val fieldList = type.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { name ->
-                        LiteralField(name, field.type, unexportedFieldPackagePath(field, name))
+                        LiteralField(name, field.type, field.declaringPackagePath ?: unexportedFieldPackagePath(field, name))
                     }
                 }.filter { it.name.isNotEmpty() }
                 val fields = fieldList.associateBy { it.name }

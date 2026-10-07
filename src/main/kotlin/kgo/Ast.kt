@@ -101,7 +101,8 @@ data class StructFieldSyntax(
     val names: List<String>,
     val type: GoTypeSyntax,
     val tag: String? = null,
-    val packagePath: String? = null
+    val packagePath: String? = null,
+    val declaringPackagePath: String? = null
 )
 data class InterfaceMethodSyntax(
     val name: String,
