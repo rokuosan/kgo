@@ -120,3 +120,51 @@ internal fun encodeGoCodePoint(value: Long): ByteArray =
 
 internal fun encodeGoCodePoint(value: BigInteger): ByteArray =
     encodeGoCodePoint(if (value >= BigInteger.ZERO && value <= BigInteger.valueOf(0x10ffff)) value.toInt() else -1)
+
+internal fun encodeGoUtf8Text(text: String): ByteArray {
+    val bytes = mutableListOf<Byte>()
+    var offset = 0
+    while (offset < text.length) {
+        val first = text[offset++]
+        val codePoint = if (Character.isHighSurrogate(first) && offset < text.length && Character.isLowSurrogate(text[offset]))
+            Character.toCodePoint(first, text[offset++]) else first.code
+        bytes += encodeGoCodePoint(codePoint).toList()
+    }
+    return bytes.toByteArray()
+}
+
+internal fun decodeGoUtf8Rune(bytes: ByteArray, offset: Int): Pair<Int, Int> {
+    val first = bytes[offset].toInt() and 0xff
+    if (first < 0x80) return first to 1
+    fun continuation(index: Int) = index < bytes.size && (bytes[index].toInt() and 0xc0) == 0x80
+    if (first in 0xc2..0xdf && continuation(offset + 1)) {
+        val codePoint = ((first and 0x1f) shl 6) or (bytes[offset + 1].toInt() and 0x3f)
+        return codePoint to 2
+    }
+    if (first in 0xe0..0xef && continuation(offset + 1) && continuation(offset + 2)) {
+        val second = bytes[offset + 1].toInt() and 0xff
+        if (first != 0xe0 || second >= 0xa0) {
+            val codePoint = ((first and 0x0f) shl 12) or ((second and 0x3f) shl 6) or
+                (bytes[offset + 2].toInt() and 0x3f)
+            return codePoint to 3
+        }
+    }
+    if (first in 0xf0..0xf4 && continuation(offset + 1) && continuation(offset + 2) && continuation(offset + 3)) {
+        val second = bytes[offset + 1].toInt() and 0xff
+        if ((first != 0xf0 || second >= 0x90) && (first != 0xf4 || second <= 0x8f)) {
+            val codePoint = ((first and 0x07) shl 18) or ((second and 0x3f) shl 12) or
+                ((bytes[offset + 2].toInt() and 0x3f) shl 6) or (bytes[offset + 3].toInt() and 0x3f)
+            return codePoint to 4
+        }
+    }
+    return 0xfffd to 1
+}
+
+internal fun decodeGoUtf8Text(bytes: ByteArray): String = buildString {
+    var offset = 0
+    while (offset < bytes.size) {
+        val (codePoint, width) = decodeGoUtf8Rune(bytes, offset)
+        appendCodePoint(codePoint)
+        offset += width
+    }
+}

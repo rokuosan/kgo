@@ -40,7 +40,7 @@ open class RuntimeGoError(message: String) : RuntimeException(message)
 private class GoString(val bytes: ByteArray, val type: GoTypeSyntax = NamedGoType("string")) {
     override fun equals(other: Any?) = other is GoString && bytes.contentEquals(other.bytes)
     override fun hashCode() = bytes.contentHashCode()
-    override fun toString() = String(bytes, Charsets.UTF_8)
+    override fun toString() = decodeGoUtf8Text(bytes)
 }
 
 internal class GoRational private constructor(val numerator: BigInteger, val denominator: BigInteger) : Comparable<GoRational> {
@@ -1971,7 +1971,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                             ?: throw RuntimeGoError("Fprint requires an io.Writer"), rendered, environment)
                     } else {
                         output(rendered)
-                        fmtWriteResult(rendered.toByteArray(Charsets.UTF_8).size, null)
+                        fmtWriteResult(encodeGoUtf8Text(rendered).size, null)
                     }
                 }
                 "Println", "Fprintln" -> {
@@ -1982,7 +1982,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                             ?: throw RuntimeGoError("Fprintln requires an io.Writer"), rendered, environment)
                     } else {
                         output(rendered)
-                        fmtWriteResult(rendered.toByteArray(Charsets.UTF_8).size, null)
+                        fmtWriteResult(encodeGoUtf8Text(rendered).size, null)
                     }
                 }
                 else -> if (target.name.startsWith("math.")) return mathCall(target.name.removePrefix("math."), args)
@@ -2009,7 +2009,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private suspend fun writeFmtOutput(writer: Any?, text: String, environment: Environment?): Any {
         val scope = environment ?: globals
         val method = selectStructMember(writer, "Write", NameExpression("<fmt writer>"), scope)
-        val bytes = text.toByteArray(Charsets.UTF_8)
+        val bytes = encodeGoUtf8Text(text)
         val byteType = NamedGoType("byte")
         val slice = GoSlice(
             byteType,
@@ -3772,29 +3772,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun decodeUtf8Rune(bytes: ByteArray, offset: Int): Pair<Int, Int> {
-        val first = bytes[offset].toInt() and 0xff
-        if (first < 0x80) return first to 1
-        fun continuation(i: Int) = i < bytes.size && (bytes[i].toInt() and 0xc0) == 0x80
-        if (first in 0xc2..0xdf && continuation(offset + 1)) {
-            val cp = ((first and 0x1f) shl 6) or (bytes[offset + 1].toInt() and 0x3f)
-            return cp to 2
-        }
-        if (first in 0xe0..0xef && continuation(offset + 1) && continuation(offset + 2)) {
-            val second = bytes[offset + 1].toInt() and 0xff
-            if (first != 0xe0 || second >= 0xa0) {
-                val cp = ((first and 0x0f) shl 12) or ((second and 0x3f) shl 6) or (bytes[offset + 2].toInt() and 0x3f)
-                return cp to 3
-            }
-        }
-        if (first in 0xf0..0xf4 && continuation(offset + 1) && continuation(offset + 2) && continuation(offset + 3)) {
-            val second = bytes[offset + 1].toInt() and 0xff
-            if ((first != 0xf0 || second >= 0x90) && (first != 0xf4 || second <= 0x8f)) {
-                val cp = ((first and 0x07) shl 18) or ((second and 0x3f) shl 12) or
-                    ((bytes[offset + 2].toInt() and 0x3f) shl 6) or (bytes[offset + 3].toInt() and 0x3f)
-                return cp to 4
-            }
-        }
-        return 0xfffd to 1
+        return decodeGoUtf8Rune(bytes, offset)
     }
 
     private inner class Environment(
