@@ -2654,7 +2654,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoFloat -> if (value.value == 0.0) 0 else value.value.hashCode()
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
         is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
-        is GoStruct -> value.fields.entries.fold(value.namedType?.hashCode() ?: 0) { hash, (name, element) ->
+        is GoStruct -> value.fields.entries.filterNot { isBlankStorageKey(it.key) }
+            .fold(value.namedType?.hashCode() ?: 0) { hash, (name, element) ->
             31 * (31 * hash + name.hashCode()) + goHash(element)
         }
         is GoInterfaceValue -> 31 * value.dynamicType.hashCode() + goHash(value.value)
