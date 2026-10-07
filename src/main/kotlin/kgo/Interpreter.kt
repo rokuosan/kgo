@@ -3318,12 +3318,20 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun copy(args: List<Any?>): Long {
         val destinationValue = args.getOrNull(0)
         val destination = destinationValue as? GoSlice
+        val sourceValue = args.getOrNull(1)
+        val inferredDestinationType = when (sourceValue) {
+            is GoSlice -> SliceGoType(sourceValue.elementType)
+            is GoNilValue -> underlying(sourceValue.type).takeIf { it is SliceGoType }
+            is GoString -> SliceGoType(NamedGoType("uint8"))
+            else -> null
+        }
         val destinationType = when (destinationValue) {
             is GoSlice -> SliceGoType(destinationValue.elementType)
             is GoNilValue -> underlying(destinationValue.type).takeIf { it is SliceGoType }
+            null -> inferredDestinationType
             else -> throw RuntimeGoError("copy destination must be a slice")
         } as? SliceGoType ?: throw RuntimeGoError("copy destination must be a slice")
-        val values = when (val source = args.getOrNull(1)) {
+        val values = when (val source = sourceValue) {
             is GoSlice -> {
                 if (!sameRuntimeType(destinationType.element, source.elementType)) throw RuntimeGoError("copy slice element types do not match")
                 source.toList()
@@ -3334,6 +3342,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (!sameRuntimeType(destinationType.element, sourceType.element)) throw RuntimeGoError("copy slice element types do not match")
                 emptyList()
             }
+            null -> emptyList()
             is GoString -> {
                 if (!isPredeclaredByteType(destinationType.element)) throw RuntimeGoError("copy from string requires a byte slice")
                 source.bytes.map { (it.toInt() and 0xff).toLong() }
