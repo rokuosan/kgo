@@ -1483,19 +1483,48 @@ class TypeChecker(
     }
 
     private fun indexType(expression: IndexExpression, scope: Scope): GoTypeSyntax {
-        val receiver = underlying(expressionType(expression.receiver, scope))
+        val receiverExpressionType = expressionType(expression.receiver, scope)
+        val receiver = underlying(receiverExpressionType)
         val index = expressionType(expression.index, scope)
         return when (receiver) {
-            is ArrayGoType -> { requireInteger(index, "array index"); receiver.element }
+            is ArrayGoType -> {
+                requireInteger(index, "array index")
+                requireValidConstantIndex(expression.index, receiver.length?.let { constantInteger(it, scope) }, "array", scope)
+                receiver.element
+            }
             is PointerGoType -> when (val pointed = underlying(receiver.element)) {
-                is ArrayGoType -> { requireInteger(index, "array index"); pointed.element }
+                is ArrayGoType -> {
+                    requireInteger(index, "array index")
+                    requireValidConstantIndex(expression.index, pointed.length?.let { constantInteger(it, scope) }, "array", scope)
+                    pointed.element
+                }
                 else -> error("cannot index through this pointer")
             }
-            is SliceGoType -> { requireInteger(index, "slice index"); receiver.element }
+            is SliceGoType -> {
+                requireInteger(index, "slice index")
+                requireValidConstantIndex(expression.index, null, "slice", scope)
+                receiver.element
+            }
             is MapGoType -> { requireAssignable(index, receiver.key, "map index", expression.index, scope); receiver.value }
-            is NamedGoType -> if (receiver.name == "string") { requireInteger(index, "string index"); NamedGoType("uint8") } else error("cannot index ${receiver.name}")
+            is NamedGoType -> if (receiver.name == "string") {
+                requireInteger(index, "string index")
+                requireValidConstantIndex(expression.index, constantStringLength(expression.receiver, scope), "string", scope)
+                NamedGoType("uint8")
+            } else error("cannot index ${receiver.name}")
             else -> error("cannot index this value")
         }
+    }
+
+    private fun requireValidConstantIndex(
+        expression: Expression,
+        length: BigInteger?,
+        context: String,
+        scope: Scope
+    ) {
+        requireIntegerConstantRepresentable(expression, intType, scope)
+        val index = constantInteger(expression, scope) ?: return
+        if (index.signum() < 0) error("$context index must be non-negative")
+        if (length != null && index >= length) error("$context index $index is out of bounds")
     }
 
     private fun selectorType(
