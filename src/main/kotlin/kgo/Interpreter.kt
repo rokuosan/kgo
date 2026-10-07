@@ -14,6 +14,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -770,50 +771,61 @@ class Interpreter(
             }
         }
         val defaultIndex = statement.cases.indexOfFirst { it.communication == null }
-        for (operation in operations.shuffled()) {
-            when (operation) {
-                is SelectSend -> when (operation.channel.trySend(operation.value)) {
-                    GoTrySendResult.CLOSED -> throw RuntimeGoError("send on closed channel")
-                    GoTrySendResult.SENT -> {
-                        executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
+        val mixedChannels = operations.filterIsInstance<SelectSend>().mapTo(mutableSetOf()) { it.channel }
+            .filterTo(mutableSetOf()) { channel -> operations.any { it is SelectReceive && it.channel == channel } }
+        // A native channel may pair clauses belonging to this same select. Poll the whole
+        // select when it has mixed directions on one channel so every ready case competes.
+        suspend fun awaitSelection(cases: List<SelectOperation>): SelectSelection = selectUnbiased {
+            cases.forEach { operation ->
+                when (operation) {
+                    is SelectSend -> {
+                        val element = operation.channel.newSelectElement(operation.value)
+                        operation.channel.queue.onSend(element) {
+                            operation.channel.recordSelectSend(element)
+                            SelectSelection(operation.caseIndex, null)
+                        }
+                    }
+                    is SelectReceive -> operation.channel.queue.onReceiveCatching { result ->
+                        SelectSelection(operation.caseIndex, operation.channel.decode(result))
+                    }
+                }
+            }
+        }
+        while (true) {
+            for (operation in operations.shuffled()) {
+                when (operation) {
+                    is SelectSend -> when (operation.channel.trySend(operation.value)) {
+                        GoTrySendResult.CLOSED -> throw RuntimeGoError("send on closed channel")
+                        GoTrySendResult.SENT -> {
+                            executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
+                            return
+                        }
+                        GoTrySendResult.NOT_READY -> Unit
+                    }
+                    is SelectReceive -> operation.channel.tryReceive()?.let { received ->
+                        executeSelectedCase(statement.cases[operation.caseIndex], env, labels, operation.assignment, received)
                         return
                     }
-                    GoTrySendResult.NOT_READY -> Unit
-                }
-                is SelectReceive -> operation.channel.tryReceive()?.let { received ->
-                    executeSelectedCase(statement.cases[operation.caseIndex], env, labels, operation.assignment, received)
-                    return
                 }
             }
-        }
-        if (defaultIndex >= 0) {
-            executeSelectedCase(statement.cases[defaultIndex], env, labels)
-            return
-        }
-        if (operations.isEmpty()) awaitCancellation()
-        val selected = try {
-            selectUnbiased<SelectSelection> {
-                operations.forEach { operation ->
-                    when (operation) {
-                        is SelectSend -> {
-                            val element = operation.channel.newSelectElement(operation.value)
-                            operation.channel.queue.onSend(element) {
-                                operation.channel.recordSelectSend(element)
-                                SelectSelection(operation.caseIndex, null)
-                            }
-                        }
-                        is SelectReceive -> operation.channel.queue.onReceiveCatching { result ->
-                            SelectSelection(operation.caseIndex, operation.channel.decode(result))
-                        }
-                    }
-                }
+            if (defaultIndex >= 0) {
+                executeSelectedCase(statement.cases[defaultIndex], env, labels)
+                return
             }
-        } catch (_: kotlinx.coroutines.channels.ClosedSendChannelException) {
-            throw RuntimeGoError("send on closed channel")
+            if (operations.isEmpty()) awaitCancellation()
+            val selected = try {
+                if (mixedChannels.isEmpty()) awaitSelection(operations)
+                else { delay(1); null }
+            } catch (_: kotlinx.coroutines.channels.ClosedSendChannelException) {
+                throw RuntimeGoError("send on closed channel")
+            }
+            if (selected != null) {
+                val clause = statement.cases[selected.caseIndex]
+                val receive = operations.filterIsInstance<SelectReceive>().firstOrNull { it.caseIndex == selected.caseIndex }
+                executeSelectedCase(clause, env, labels, receive?.assignment, selected.received)
+                return
+            }
         }
-        val clause = statement.cases[selected.caseIndex]
-        val receive = operations.filterIsInstance<SelectReceive>().firstOrNull { it.caseIndex == selected.caseIndex }
-        executeSelectedCase(clause, env, labels, receive?.assignment, selected.received)
     }
 
     private fun selectChannelOrNull(value: Any?): GoChannel? = when (value) {
@@ -4152,9 +4164,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         var recovered: Boolean = false
     }
     private data class SelectSelection(val caseIndex: Int, val received: GoReceiveResult?)
-    private sealed interface SelectOperation { val caseIndex: Int }
-    private data class SelectSend(override val caseIndex: Int, val channel: GoChannel, val value: Any?) : SelectOperation
-    private data class SelectReceive(override val caseIndex: Int, val channel: GoChannel, val assignment: AssignmentStatement?) : SelectOperation
+    private sealed interface SelectOperation { val caseIndex: Int; val channel: GoChannel }
+    private data class SelectSend(override val caseIndex: Int, override val channel: GoChannel, val value: Any?) : SelectOperation
+    private data class SelectReceive(override val caseIndex: Int, override val channel: GoChannel, val assignment: AssignmentStatement?) : SelectOperation
     private inner class GoArray(
         val elementType: GoTypeSyntax,
         val values: MutableList<Any?>,

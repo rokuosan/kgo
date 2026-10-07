@@ -37,6 +37,8 @@ declarations.
 Goroutines use `kotlinx.coroutines`; channel operations suspend through Kotlin
 channels. The `fmt` calls are a small runtime shim, not the Go standard library;
 its `Print`, `Println`, `Fprint`, and `Fprintln` functions can also be dot-imported.
+Selects that send to and receive from the same channel poll cooperatively to
+prevent a Kotlin channel from matching two cases from the same Go select.
 The `Print` variants follow Go's adjacent-string spacing rule, and the `Fprint`
 variants call the writer's `Write([]byte)` method.
 The `math` import exposes the Go 1.0 constants and function signatures. JVM math
