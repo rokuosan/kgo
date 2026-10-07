@@ -511,7 +511,8 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val initialized = defaultConstantValue(value, sourceExpressions?.getOrNull(index), env)
                 if (env.containsLocal(name)) env.set(name, initialized)
                 else env.define(name, initialized, inferredStorageType(
-                    initialized, sourceExpressions?.getOrNull(index), env
+                    initialized, sourceExpressions?.getOrNull(index), env,
+                    if (sourceExpressions?.size == 1) index else 0
                 ))
             }
             return
@@ -995,11 +996,20 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 ParameterSyntax(function.parameters.getOrNull(index), type,
                     function.variadic && index == function.parameterTypes.lastIndex)
             }, function.resultTypes)
+        } ?: env.imports.dotPackages.firstNotNullOfOrNull { path ->
+            importedRuntimePackages[path]?.exportedFunction(expression.name)?.function?.let { importedFunctionType(path, it) }
         }
         is ParenthesizedExpression -> staticExpressionType(expression.expression, env)
         is CompositeLiteral -> resolveRuntimeType(expression.type, env)
         is TypeAssertionExpression -> resolveRuntimeType(expression.type, env)
         is SelectorExpression -> {
+            val packageAlias = (expression.receiver as? NameExpression)?.name
+            val importedPath = packageAlias?.let(env.imports.packages::get)
+            if (importedPath != null) {
+                importedRuntimePackages[importedPath]?.exportedFunction(expression.field)?.function?.let {
+                    return importedFunctionType(importedPath, it)
+                }
+            }
             val receiverType = staticExpressionType(expression.receiver, env)?.let { resolveRuntimeType(it, env) }
             val method = receiverType?.let { methodDeclaration(it, expression.field) }
             if (method != null) FunctionGoType(method.second.parameterTypes.mapIndexed { index, type ->
@@ -1020,14 +1030,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             TokenKind.MUL -> (staticExpressionType(expression.operand, env)?.let(::underlying) as? PointerGoType)?.element
             else -> null
         }
-        is CallExpression -> {
-            runtimeTypeConversion(expression, env)?.let { return it }
-            val functionType = when (val target = expression.function) {
-                is FunctionLiteralExpression -> FunctionGoType(target.parameters, target.results)
-                else -> staticExpressionType(target, env)?.let(::underlying) as? FunctionGoType
-            }
-            functionType?.results?.singleOrNull()?.let { resolveRuntimeType(it, env) }
-        }
+        is CallExpression -> staticExpressionResultType(expression, 0, env)
         is BinaryExpression -> when (expression.operator) {
             TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ -> NamedGoType("bool")
             TokenKind.LAND, TokenKind.LOR -> staticExpressionType(expression.left, env) ?: staticExpressionType(expression.right, env)
@@ -1040,6 +1043,48 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             else -> null
         }
         else -> null
+    }
+
+    private fun importedFunctionType(path: String, function: FunctionDeclaration): FunctionGoType {
+        val owner = importedRuntimePackages[path] ?: this
+        return FunctionGoType(function.parameterTypes.mapIndexed { index, type ->
+            ParameterSyntax(function.parameters.getOrNull(index), owner.externalizeRuntimeType(type, path),
+                function.variadic && index == function.parameterTypes.lastIndex)
+        }, function.resultTypes.map { owner.externalizeRuntimeType(it, path) })
+    }
+
+    private fun staticExpressionResultType(expression: Expression, resultIndex: Int, env: Environment): GoTypeSyntax? = when (expression) {
+        is ParenthesizedExpression -> staticExpressionResultType(expression.expression, resultIndex, env)
+        is TypeAssertionExpression -> when (resultIndex) {
+            0 -> resolveRuntimeType(expression.type, env)
+            1 -> NamedGoType("bool")
+            else -> null
+        }
+        is UnaryExpression -> if (expression.operator == TokenKind.ARROW) {
+            val channel = staticExpressionType(expression.operand, env)?.let(::underlying) as? ChannelGoType
+            when (resultIndex) {
+                0 -> channel?.element
+                1 -> NamedGoType("bool")
+                else -> null
+            }
+        } else if (resultIndex == 0) staticExpressionType(expression, env) else null
+        is IndexExpression -> {
+            val receiver = staticExpressionType(expression.receiver, env)?.let(::underlying)
+            if (resultIndex == 1 && receiver is MapGoType) NamedGoType("bool")
+            else if (resultIndex == 0) staticExpressionType(expression, env) else null
+        }
+        is CallExpression -> {
+            val conversionType = runtimeTypeConversion(expression, env)
+            if (conversionType != null) conversionType.takeIf { resultIndex == 0 }
+            else {
+                val functionType = when (val target = expression.function) {
+                    is FunctionLiteralExpression -> FunctionGoType(target.parameters, target.results)
+                    else -> staticExpressionType(target, env)?.let(::underlying) as? FunctionGoType
+                }
+                functionType?.results?.getOrNull(resultIndex)?.let { resolveRuntimeType(it, env) }
+            }
+        }
+        else -> if (resultIndex == 0) staticExpressionType(expression, env) else null
     }
 
     private fun isNilOperand(expression: Expression, env: Environment): Boolean = when (expression) {
@@ -1147,12 +1192,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 else defaultConstantValue(it, sourceExpression, env)
             }
             else if (resolvedType != null) zeroValue(resolvedType) else GoInteger(0L, NamedGoType("int"))
-            if (name != "_") env.define(name, value, resolvedType ?: inferredStorageType(value, expressions.getOrNull(i), env))
+            if (name != "_") env.define(name, value, resolvedType ?: inferredStorageType(
+                value, expressions.getOrNull(i), env, if (expressions.size == 1) i else 0
+            ))
         }
     }
 
-    private fun inferredStorageType(value: Any?, expression: Expression?, env: Environment): GoTypeSyntax? =
-        expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) }
+    private fun inferredStorageType(
+        value: Any?, expression: Expression?, env: Environment, resultIndex: Int = 0
+    ): GoTypeSyntax? = expression?.let { staticExpressionResultType(it, resultIndex, env) }
             ?: if (value == null || value is GoInterfaceValue) InterfaceGoType(emptyList()) else runtimeType(value)
 
     private suspend fun initializeConstant(declaration: ConstantDeclaration) {
