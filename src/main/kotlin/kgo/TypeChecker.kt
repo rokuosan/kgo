@@ -1064,7 +1064,7 @@ class TypeChecker(
                 val caseType = expressionType(case, caseScope)
                 if (caseType != nilType && !isComparable(caseType)) error("switch case expression must be comparable")
                 if (tagType != null) {
-                    if (!assignable(caseType, tagType))
+                    if (!assignable(caseType, tagType) && !constantIntegerAssignable(caseType, tagType, case, caseScope))
                         error("case type does not match switch expression")
                     requireIntegerConstantRepresentable(case, tagType, caseScope)
                 } else requireBoolean(caseType, "expressionless switch case")
