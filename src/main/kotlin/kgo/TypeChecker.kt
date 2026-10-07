@@ -1455,9 +1455,28 @@ class TypeChecker(
             listOfNotNull(expression.low, expression.high).forEach { bound ->
                 val boundType = expressionType(bound, scope)
                 requireInteger(boundType, "slice index")
-                if (isUntyped(boundType)) requireIntegerConstantRepresentable(bound, intType, scope)
+                requireValidConstantIndex(bound, null, "slice", scope)
             }
-            val receiver = underlying(expressionType(expression.receiver, scope))
+            val receiverType = expressionType(expression.receiver, scope)
+            val receiver = underlying(receiverType)
+            val constantLength = when (receiver) {
+                is ArrayGoType -> receiver.length?.let { constantInteger(it, scope) }
+                is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.length?.let { constantInteger(it, scope) }
+                is NamedGoType -> if (receiver.name == "string") constantStringLength(expression.receiver, scope) else null
+                else -> null
+            }
+            val low = expression.low?.let { constantInteger(it, scope) } ?:
+                if (expression.low == null) BigInteger.ZERO else null
+            val high = expression.high?.let { constantInteger(it, scope) } ?:
+                if (expression.high == null) constantLength else null
+            if (low != null && high != null && low > high) error("slice index low exceeds high")
+            if (constantLength != null) {
+                listOfNotNull(expression.low, expression.high).forEach { bound ->
+                    constantInteger(bound, scope)?.let { value ->
+                        if (value > constantLength) error("slice index $value is out of bounds")
+                    }
+                }
+            }
             when (receiver) {
                 is SliceGoType -> receiver
                 is ArrayGoType -> SliceGoType(receiver.element)
