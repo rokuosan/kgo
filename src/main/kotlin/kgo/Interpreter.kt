@@ -3372,7 +3372,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
         "#predeclared-uint8", "int8", "uint8", "byte" -> 8
         "int16", "uint16" -> 16
-        "int32", "uint32" -> 32
+        "#predeclared-int32", "int32", "uint32" -> 32
         else -> 64
     }
 

@@ -2528,7 +2528,7 @@ class TypeChecker(
         val bits = when (name) {
             "#predeclared-uint8", "int8", "uint8", "byte" -> 8
             "int16", "uint16" -> 16
-            "int32", "uint32" -> 32
+            "#predeclared-int32", "int32", "uint32" -> 32
             else -> 64
         }
         val unsigned = name in setOf("#predeclared-uint8", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
