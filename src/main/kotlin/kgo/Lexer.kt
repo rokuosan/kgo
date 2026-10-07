@@ -178,7 +178,7 @@ class Lexer(private val source: String) {
     private fun validateUnicodeEscape(count: Int, start: Position) {
         val digits = consumeDigits(count, 16, start)
         val cp = digits.toLong(16)
-        if (cp > 0x10ffff || cp in 0xd800..0xdfff)
+        if (cp > 0x10ffff)
             throw ScanError("invalid Unicode code point", start)
     }
 
