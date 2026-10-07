@@ -3817,8 +3817,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         val shift = if (op == TokenKind.SHL || op == TokenKind.SHR) b else BigInteger.ZERO
         if (shift.signum() < 0) throw RuntimeGoError("negative shift count")
-        if (shift > BigInteger.valueOf(Int.MAX_VALUE.toLong())) {
-            if (integerType == null) throw RuntimeGoError("untyped shift result exceeds implementation limits")
+        if (integerType != null && shift >= BigInteger.valueOf(integerBitWidth(integerType).toLong())) {
             val saturated = when {
                 op == TokenKind.SHL -> BigInteger.ZERO
                 isUnsignedInteger(integerType) || a.signum() >= 0 -> BigInteger.ZERO
@@ -3826,6 +3825,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             return GoInteger(wrapInteger(saturated.toLong(), integerType), integerType)
         }
+        if (shift > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
+            throw RuntimeGoError("untyped shift result exceeds implementation limits")
         val result = when (op) {
             TokenKind.ADD -> a + b
             TokenKind.SUB -> a - b
