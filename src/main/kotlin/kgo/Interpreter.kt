@@ -99,6 +99,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private var knownPackageNames: Map<String, String> = emptyMap()
     private var exportedConstantNames: Set<String> = emptySet()
     private var exportedVariableNames: Set<String> = emptySet()
+    private var exportedTypeNames: Set<String> = emptySet()
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) = run(listOf(file), emptyList())
@@ -167,12 +168,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         }
         file.declarations.filterIsInstance<TypeDeclaration>().forEach {
             if (it.name != "_") {
-                typeDefinitions[it.name] = it.type
+                val typeScope = globals.child().also { scope ->
+                    scope.imports = declarationImports[it] ?: RuntimeImports()
+                }
+                typeDefinitions[it.name] = resolveRuntimeType(it.type, typeScope)
                 globals.defineType(it.name, NamedGoType(it.name))
             }
         }
         val packageConstants = file.declarations.filterIsInstance<ConstantDeclaration>()
         val packageVariables = file.declarations.filterIsInstance<VariableDeclaration>()
+        exportedTypeNames = file.declarations.filterIsInstance<TypeDeclaration>().mapNotNullTo(mutableSetOf()) {
+            it.name.takeIf { name -> name != "_" && name.firstOrNull()?.isUpperCase() == true }
+        }
         exportedConstantNames = packageConstants.flatMap { it.names }.filterTo(mutableSetOf()) {
             it != "_" && it.firstOrNull()?.isUpperCase() == true
         }
@@ -1248,12 +1255,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val dotImportedVariablePath = env.imports.dotPackages.firstOrNull { path ->
                 expression.name in importedRuntimePackages[path]?.exportedVariableNames.orEmpty()
             }
+            val dotImportedTypePath = env.imports.dotPackages.firstOrNull { path ->
+                expression.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty()
+            }
             if (binding != null) binding.value
             else typeDefinitions[expression.name]?.let { TypeValue(NamedGoType(expression.name)) }
                 ?: functions[expression.name]?.let { FunctionValue(it, globals, owner = this) }
                 ?: dotImportedFunction
                 ?: dotImportedConstant
                 ?: dotImportedVariablePath?.let { path -> importedRuntimePackages[path]?.exportedVariable(expression.name) }
+                ?: dotImportedTypePath?.let { path -> TypeValue(QualifiedGoType(path, expression.name)) }
                 ?: when {
                     "fmt" in env.imports.dotPackages && expression.name in GoFmtPackage.exportedNames ->
                         BuiltinValue(expression.name, GoFmtPackage.functionType(expression.name))
@@ -1326,6 +1337,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     imported.exportedFunction(expression.field) != null -> imported.exportedFunction(expression.field)
                     expression.field in imported.exportedConstantNames -> imported.exportedConstant(expression.field)
                     expression.field in imported.exportedVariableNames -> imported.exportedVariable(expression.field)
+                    expression.field in imported.exportedTypeNames -> TypeValue(QualifiedGoType(path, expression.field))
                     else -> throw RuntimeGoError("undefined imported identifier ${expression.field}")
                 }
             }
@@ -1619,9 +1631,18 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val binding = env.binding(target.name)
             when {
                 binding?.value is TypeValue -> binding.value.type
-                binding == null && target.name in builtinTypes -> NamedGoType(target.name)
+                binding == null -> env.imports.dotPackages.firstOrNull { path ->
+                    target.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty()
+                }?.let { path -> QualifiedGoType(path, target.name) }
+                    ?: target.name.takeIf { it in builtinTypes }?.let(::NamedGoType)
                 else -> null
             }
+        }
+        is SelectorExpression -> {
+            val alias = (target.receiver as? NameExpression)?.name
+            val path = alias?.let(env.imports.packages::get)
+            if (path != null && target.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
+                QualifiedGoType(path, target.field) else null
         }
         else -> null
     }
@@ -1954,12 +1975,20 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             "error" -> errorInterfaceType
             else -> type
         }
+        is QualifiedGoType -> importedRuntimePackages[type.packageName]?.let { imported ->
+            imported.typeDefinitions[type.name]?.let(imported::underlying)
+        } ?: type
         else -> type
     }
 
     private fun resolveRuntimeType(type: GoTypeSyntax, env: Environment): GoTypeSyntax = when (type) {
-        is NamedGoType -> env.typeBinding(type.name) ?: type
-        is QualifiedGoType -> type
+        is NamedGoType -> env.typeBinding(type.name) ?: env.imports.dotPackages.firstOrNull { path ->
+            type.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty()
+        }?.let { path -> QualifiedGoType(path, type.name) } ?: type
+        is QualifiedGoType -> {
+            val path = env.imports.packages[type.packageName] ?: type.packageName
+            QualifiedGoType(path, type.name)
+        }
         is PointerGoType -> PointerGoType(resolveRuntimeType(type.element, env))
         is SliceGoType -> SliceGoType(resolveRuntimeType(type.element, env))
         is ArrayGoType -> {

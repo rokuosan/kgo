@@ -268,22 +268,45 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     internal fun exportedNames(): Set<String> =
         packageLevelNames.filterTo(linkedSetOf(), ::isExportedIdentifier)
 
-    internal fun exportedFunctionType(name: String): FunctionGoType? =
-        if (isExportedIdentifier(name)) functions[name]?.let(::functionType) else null
+    internal fun exportedFunctionType(name: String, importPath: String? = null): FunctionGoType? =
+        if (isExportedIdentifier(name)) functions[name]?.let(::functionType)
+            ?.let { externalizeType(it, importPath) as FunctionGoType } else null
 
-    internal fun exportedVariableType(name: String): GoTypeSyntax? =
-        if (isExportedIdentifier(name) && globals.isVariable(name)) globals.getOrNull(name) else null
+    internal fun exportedVariableType(name: String, importPath: String? = null): GoTypeSyntax? =
+        if (isExportedIdentifier(name) && globals.isVariable(name)) globals.getOrNull(name)?.let { externalizeType(it, importPath) } else null
 
-    internal fun exportedConstant(name: String): ExportedConstant? {
+    internal fun hasExportedType(name: String): Boolean = isExportedIdentifier(name) && name in typeDeclarations
+
+    internal fun exportedConstant(name: String, importPath: String? = null): ExportedConstant? {
         if (!isExportedIdentifier(name) || !globals.isConstant(name)) return null
         return ExportedConstant(
-            globals.get(name), globals.constantInteger(name), globals.constantRational(name),
+            externalizeType(globals.get(name), importPath), globals.constantInteger(name), globals.constantRational(name),
             globals.constantStringLength(name), globals.constantStringIdentity(name),
             globals.constantBoolean(name), globals.constantComplex(name)
         )
     }
 
     private fun isExportedIdentifier(name: String): Boolean = name.firstOrNull()?.isUpperCase() == true
+
+    private fun externalizeType(type: GoTypeSyntax, importPath: String?): GoTypeSyntax {
+        fun visit(current: GoTypeSyntax): GoTypeSyntax = when (current) {
+            is NamedGoType -> if (importPath != null && current.name in typeDeclarations)
+                QualifiedGoType(importPath, current.name) else current
+            is PointerGoType -> PointerGoType(visit(current.element))
+            is SliceGoType -> SliceGoType(visit(current.element))
+            is ArrayGoType -> ArrayGoType(current.length, visit(current.element))
+            is MapGoType -> MapGoType(visit(current.key), visit(current.value))
+            is ChannelGoType -> ChannelGoType(visit(current.element), current.direction)
+            is StructGoType -> StructGoType(current.fields.map { it.copy(type = visit(it.type)) })
+            is InterfaceGoType -> InterfaceGoType(current.methods.map { method -> method.copy(
+                parameters = method.parameters.map { it.copy(type = visit(it.type)) },
+                results = method.results.map(::visit)
+            ) }, current.embeddedTypes.map(::visit))
+            is FunctionGoType -> FunctionGoType(current.parameters.map { it.copy(type = visit(it.type)) }, current.results.map(::visit))
+            is QualifiedGoType -> current
+        }
+        return visit(type)
+    }
 
     private fun dotImportedIdentifierType(name: String): Pair<String, GoTypeSyntax>? {
         dotImportPaths.forEach { path ->
@@ -292,8 +315,8 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 "math" -> GoMathPackage.memberType(name)
                 else -> null
             } ?: importedPackages[path]?.let { imported ->
-                imported.exportedFunctionType(name) ?: imported.exportedConstant(name)?.type
-                    ?: imported.exportedVariableType(name)
+                imported.exportedFunctionType(name, path) ?: imported.exportedConstant(name, path)?.type
+                    ?: imported.exportedVariableType(name, path)
             }
             if (type != null) return path to type
         }
@@ -301,10 +324,24 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     }
 
     private fun importedConstant(path: String, name: String): ExportedConstant? =
-        importedPackages[path]?.exportedConstant(name)
+        importedPackages[path]?.exportedConstant(name, path)
 
     private fun dotImportedConstant(name: String): Pair<String, ExportedConstant>? =
         dotImportPaths.firstNotNullOfOrNull { path -> importedConstant(path, name)?.let { path to it } }
+
+    private fun dotImportedType(name: String): QualifiedGoType? = dotImportPaths.firstNotNullOfOrNull { path ->
+        importedPackages[path]?.takeIf { it.hasExportedType(name) }?.let {
+            usedDotImportPaths += path
+            QualifiedGoType(path, name)
+        }
+    }
+
+    private fun importedPackageType(expression: SelectorExpression): QualifiedGoType? {
+        val alias = (expression.receiver as? NameExpression)?.name ?: return null
+        val path = importedPackagePath(alias) ?: return null
+        return importedPackages[path]?.takeIf { it.hasExportedType(expression.field) }
+            ?.let { QualifiedGoType(path, expression.field) }
+    }
 
     private fun checkMain() {
         val main = functions["main"] ?: error("main function not found")
@@ -1320,7 +1357,8 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     private fun expressionType(expression: Expression, scope: Scope): GoTypeSyntax = when (expression) {
         is NameExpression -> scope.getOrNull(expression.name) ?: when {
             scope.typeBinding(expression.name) != null || typeDeclarations.containsKey(expression.name) ||
-                isBuiltinType(expression.name) -> error("type ${expression.name} is not an expression")
+                dotImportedType(expression.name) != null || isBuiltinType(expression.name) ->
+                error("type ${expression.name} is not an expression")
             expression.name in packagePaths -> error("package ${expression.name} cannot be used as a value")
             expression.name == "true" || expression.name == "false" -> untypedBool
             expression.name == "nil" -> nilType
@@ -1482,8 +1520,8 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 "fmt" -> GoFmtPackage.functionType(expression.field) ?: error("undefined fmt identifier ${expression.field}")
                 "math" -> GoMathPackage.memberType(expression.field) ?: error("undefined math identifier ${expression.field}")
                 else -> importedPackages[path]?.let { imported ->
-                    imported.exportedFunctionType(expression.field) ?: imported.exportedConstant(expression.field)?.type
-                        ?: imported.exportedVariableType(expression.field)
+                    imported.exportedFunctionType(expression.field, path) ?: imported.exportedConstant(expression.field, path)?.type
+                        ?: imported.exportedVariableType(expression.field, path)
                 }
                     ?: error("undefined imported identifier ${expression.field}")
             }
@@ -1511,7 +1549,10 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                     is StructGoType -> {
                         actual.fields.forEach { field ->
                             val fieldNames = field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
-                            if (expression.field in fieldNames) candidates += Candidate(field.type)
+                            val externalNamedType = (node.type as? PointerGoType)?.element as? QualifiedGoType
+                                ?: node.type as? QualifiedGoType
+                            val fieldIsVisible = externalNamedType == null || isExportedIdentifier(expression.field)
+                            if (fieldIsVisible && expression.field in fieldNames) candidates += Candidate(field.type)
                         }
                         val named = namedType(node.type)
                         if (named != null) methods["$named.${expression.field}"]?.let { method ->
@@ -1581,14 +1622,14 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     }
 
     private fun dotImportedVariable(name: String): Pair<String, GoTypeSyntax>? = dotImportPaths.firstNotNullOfOrNull { path ->
-        importedPackages[path]?.exportedVariableType(name)?.let { path to it }
+        importedPackages[path]?.exportedVariableType(name, path)?.let { path to it }
     }
 
     private fun importedPackageVariable(expression: SelectorExpression): Pair<String, GoTypeSyntax>? {
         val alias = (expression.receiver as? NameExpression)?.name ?: return null
         val path = packagePaths[alias] ?: return null
         if (standardPackageName(path) in setOf("fmt", "math")) return null
-        return importedPackages[path]?.exportedVariableType(expression.field)?.let { path to it }
+        return importedPackages[path]?.exportedVariableType(expression.field, path)?.let { path to it }
     }
 
     private fun requireAssignmentTarget(expression: Expression, scope: Scope, allowBlank: Boolean = true) {
@@ -1658,8 +1699,13 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     }
 
     private fun resolveLocalType(type: GoTypeSyntax, scope: Scope): GoTypeSyntax = when (type) {
-        is NamedGoType -> scope.typeBinding(type.name)?.let(::NamedGoType) ?: type
-        is QualifiedGoType -> type
+        is NamedGoType -> scope.typeBinding(type.name)?.let(::NamedGoType) ?: dotImportedType(type.name) ?: type
+        is QualifiedGoType -> {
+            val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
+            if (importedPackages[path]?.hasExportedType(type.name) != true)
+                error("undefined imported type ${type.packageName}.${type.name}")
+            QualifiedGoType(path, type.name)
+        }
         is PointerGoType -> PointerGoType(resolveLocalType(type.element, scope))
         is SliceGoType -> SliceGoType(resolveLocalType(type.element, scope))
         is ArrayGoType -> {
@@ -1739,11 +1785,15 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 val fields = fieldList.toMap()
                 val keyed = elements.map { it.key != null }.toSet()
                 if (keyed.size > 1) error("mixture of keyed and unkeyed struct literal elements")
+                if (literalType is QualifiedGoType && keyed.singleOrNull() != true)
+                    error("implicit assignment to unexported fields in struct literal")
                 if (keyed.singleOrNull() == true) {
                     val usedFields = mutableSetOf<String>()
                     elements.forEach { item ->
                         val key = (item.key as? NameExpression)?.name ?: error("struct field key must be an identifier")
                         if (key == "_") error("cannot use blank field in keyed struct literal")
+                        if (literalType is QualifiedGoType && !isExportedIdentifier(key))
+                            error("cannot refer to unexported field $key in struct literal")
                         if (!usedFields.add(key)) error("duplicate field $key in struct literal")
                         val fieldType = fields[key] ?: error("unknown field $key")
                         checkCompositeValue(item.value, fieldType, "struct field", scope, allowElided = false)
@@ -1809,6 +1859,18 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
 
     private fun callResults(call: CallExpression, scope: Scope): List<GoTypeSyntax> {
         val target = call.function
+        if (target is SelectorExpression) {
+            val importedType = importedPackageType(target)
+            if (importedType != null) {
+                if (call.arguments.size != 1) error("conversion requires one argument")
+                validateType(importedType)
+                val from = expressionType(call.arguments.single(), scope)
+                if (!convertible(from, importedType, isConstantExpression(call.arguments.single(), scope)))
+                    error("cannot convert $from to $importedType")
+                requireIntegerConstantRepresentable(call.arguments.single(), importedType, scope)
+                return listOf(importedType)
+            }
+        }
         if (target is TypeExpression) {
             if (call.arguments.size != 1) error("conversion requires one argument")
             val to = resolveLocalType(target.type, scope)
@@ -2269,9 +2331,9 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 }
             }
             is QualifiedGoType -> {
-                val path = importedPackagePath(type.packageName) ?: error("unknown package ${type.packageName}")
-                if (standardPackageName(path) == "fmt") error("undefined fmt type ${type.name}")
-                else error("unknown imported package ${type.packageName}")
+                val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
+                if (importedPackages[path]?.hasExportedType(type.name) != true)
+                    error("undefined imported type ${type.packageName}.${type.name}")
             }
             is PointerGoType -> validateType(type.element, active, true)
             is SliceGoType -> validateType(type.element, active, true)
@@ -2320,6 +2382,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     }, function.resultTypes)
     private fun namedType(type: GoTypeSyntax): String? = when (type) {
         is NamedGoType -> type.name
+        is QualifiedGoType -> "${type.packageName}.${type.name}"
         is PointerGoType -> namedType(type.element)
         else -> null
     }
@@ -2682,6 +2745,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
             val conversion = when (val target = expression.function) {
                 is TypeExpression -> true
                 is NameExpression -> scope.getOrNull(target.name) == null && isTypeName(target.name, scope)
+                is SelectorExpression -> importedPackageType(target) != null
                 else -> false
             }
             !conversion || expression.arguments.any { containsCallOrReceive(it, scope) }
@@ -2732,9 +2796,10 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 "error" -> errorInterfaceType
                 else -> type
             }
+        is QualifiedGoType -> importedPackages[type.packageName]?.underlying(NamedGoType(type.name)) ?: type
         else -> type
     }
-    private fun isNamed(type: GoTypeSyntax) = type is NamedGoType && !type.name.startsWith("#")
+    private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType && !type.name.startsWith("#")
     private fun isUntyped(type: GoTypeSyntax) = type is NamedGoType && type.name.startsWith("#untyped-")
     private fun isBuiltinType(name: String) = name in builtinTypes || name == "error"
     private fun isNumeric(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
@@ -2793,10 +2858,11 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     private fun isTypeConversion(expression: Expression, scope: Scope): Boolean = when (val target = expression.unparenthesized()) {
         is TypeExpression -> true
         is NameExpression -> scope.getOrNull(target.name) == null && isTypeName(target.name, scope)
+        is SelectorExpression -> importedPackageType(target) != null
         else -> false
     }
     private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
-        (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
+        dotImportedType(name) != null || (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
     private fun requireCount(name: String, args: List<Expression>, count: Int, actualCount: Int = args.size) {
         if (actualCount != count) error("$name expects $count arguments")
     }

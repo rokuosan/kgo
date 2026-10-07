@@ -71,8 +71,9 @@ Import aliases are scoped to their source file during static checking and
 execution. Local source packages can be loaded from relative paths, a `go.mod`
 module path, or `GOPATH/src`; exported functions, constants, and variables can
 be accessed through named or dot imports, and dependencies initialize before
-their importers. Exported package types and general standard-library/runtime
-support are still missing.
+their importers. Exported package types can be named, converted, and used in
+composite literals. Imported type methods and some cross-package type details,
+along with general standard-library/runtime support, are still incomplete.
 Bodyless function and method declarations are parsed and type-checked,
 but their external implementations cannot be linked by the interpreter.
 Go features added after Go 1.0, such as generics and later literal syntax, are
