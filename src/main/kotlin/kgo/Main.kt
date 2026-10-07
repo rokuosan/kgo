@@ -39,7 +39,10 @@ fun main(args: Array<String>) {
                 packageCheckers[imported.importPath] = checker
             }
             TypeChecker(packageCheckers, sourceDirectory.canonicalPath).checkFiles(files)
-            Interpreter().run(files, packages)
+            Interpreter(outputBytes = { bytes ->
+                System.out.write(bytes)
+                System.out.flush()
+            }).run(files, packages)
         }
     } catch (e: ScanError) {
         System.err.println(e.message)

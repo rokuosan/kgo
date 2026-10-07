@@ -84,7 +84,10 @@ private data class RuntimeImports(val packages: Map<String, String> = emptyMap()
 private val untypedRuneRuntimeType = NamedGoType("#untyped-rune")
 
 /** Runtime for the currently implemented Go 1.0 execution subset. */
-class Interpreter(private val output: (String) -> Unit = { print(it) }) {
+class Interpreter(
+    private val output: (String) -> Unit = { print(it) },
+    private val outputBytes: ((ByteArray) -> Unit)? = null
+) {
     private val functions = mutableMapOf<String, FunctionDeclaration>()
     private val methods = mutableMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
@@ -121,7 +124,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 knownPackageNames = sourcePackages.associate { it.importPath to it.packageName }
                 val runtimes = linkedMapOf<String, Interpreter>()
                 sourcePackages.forEach { sourcePackage ->
-                    val runtime = Interpreter(output)
+                    val runtime = Interpreter(output, outputBytes)
                     runtime.packageIdentity = sourcePackage.importPath
                     runtime.goroutines = goroutines
                     runtime.importedRuntimePackages = runtimes.toMap()
@@ -1886,7 +1889,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 throw RuntimeGoError("call of nil function")
             is BuiltinValue -> when (target.name) {
                 "print", "println" -> {
-                    output(effectiveArgs.joinToString(if (target.name == "println") " " else "") { stringify(it) } + if (target.name == "println") "\n" else "")
+                    emitOutput(formatBuiltinPrint(effectiveArgs, target.name == "println"))
                     return null
                 }
                 "panic" -> args.singleOrNull().let { throw PanicSignal(it, stringify(it)) }
@@ -1973,7 +1976,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         writeFmtOutput(effectiveArgs.firstOrNull()
                             ?: throw RuntimeGoError("Fprint requires an io.Writer"), rendered, environment)
                     } else {
-                        output(decodeGoUtf8Text(rendered))
+                        emitOutput(rendered)
                         fmtWriteResult(rendered.size, null)
                     }
                 }
@@ -1984,7 +1987,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         writeFmtOutput(effectiveArgs.firstOrNull()
                             ?: throw RuntimeGoError("Fprintln requires an io.Writer"), rendered, environment)
                     } else {
-                        output(decodeGoUtf8Text(rendered))
+                        emitOutput(rendered)
                         fmtWriteResult(rendered.size, null)
                     }
                 }
@@ -2004,6 +2007,21 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         if (newline) bytes += 0x0a.toByte()
         return bytes.toByteArray()
+    }
+
+    private fun formatBuiltinPrint(values: List<Any?>, newline: Boolean): ByteArray {
+        val bytes = mutableListOf<Byte>()
+        values.forEachIndexed { index, value ->
+            if (newline && index > 0) bytes += 0x20.toByte()
+            bytes += formatValueBytes(value).toList()
+        }
+        if (newline) bytes += 0x0a.toByte()
+        return bytes.toByteArray()
+    }
+
+    private fun emitOutput(bytes: ByteArray) {
+        val byteOutput = outputBytes
+        if (byteOutput != null) byteOutput(bytes) else output(decodeGoUtf8Text(bytes))
     }
 
     private fun formatValueBytes(value: Any?): ByteArray = when (value) {
