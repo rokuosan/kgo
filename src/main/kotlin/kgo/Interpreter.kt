@@ -528,9 +528,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         val defaultIndex = statement.cases.indexOfFirst { it.communication == null }
         for (operation in operations.shuffled()) {
             when (operation) {
-                is SelectSend -> if (operation.channel.trySend(operation.value)) {
-                    executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
-                    return
+                is SelectSend -> when (operation.channel.trySend(operation.value)) {
+                    GoTrySendResult.CLOSED -> throw RuntimeGoError("send on closed channel")
+                    GoTrySendResult.SENT -> {
+                        executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
+                        return
+                    }
+                    GoTrySendResult.NOT_READY -> Unit
                 }
                 is SelectReceive -> operation.channel.tryReceive()?.let { received ->
                     executeSelectedCase(statement.cases[operation.caseIndex], env, labels, operation.assignment, received)
@@ -3363,6 +3367,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private data class MethodExpressionValue(val receiverType: GoTypeSyntax, val name: String, val type: GoTypeSyntax)
     private data class GoMultiValue(val values: List<Any?>)
     private data class GoReceiveResult(val value: Any?, val ok: Boolean)
+    private enum class GoTrySendResult { SENT, NOT_READY, CLOSED }
     private data class MapLookupResult(val value: Any?, val ok: Boolean)
     private data class GoAssertionResult(val value: Any?, val ok: Boolean, val dynamicType: GoTypeSyntax)
     private data class GoInterfaceValue(val dynamicType: GoTypeSyntax, val value: Any?)
@@ -3530,10 +3535,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val result = queue.receiveCatching()
             return decode(result)
         }
-        fun trySend(value: Any?): Boolean {
+        fun trySend(value: Any?): GoTrySendResult {
             val result = queue.trySend(copyForType(value, elementType))
-            if (result.isClosed) throw RuntimeGoError("send on closed channel")
-            return result.isSuccess.also { if (it && capacity > 0) buffered.incrementAndGet() }
+            if (result.isClosed) return GoTrySendResult.CLOSED
+            if (!result.isSuccess) return GoTrySendResult.NOT_READY
+            if (capacity > 0) buffered.incrementAndGet()
+            return GoTrySendResult.SENT
         }
         fun recordSelectSend() { if (capacity > 0) buffered.incrementAndGet() }
         fun tryReceive(): GoReceiveResult? {
