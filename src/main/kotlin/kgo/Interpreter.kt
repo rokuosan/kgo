@@ -996,12 +996,16 @@ class Interpreter(
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
         val onlyIndexIsUsed = range.targets.size <= 1 || range.targets.getOrNull(1).isBlankIdentifier()
         val declarationTypes = if (range.operator == TokenKind.DEFINE) rangeVariableTypes(range, env) else null
+        // A := range clause declares its variables in the for statement's scope.
+        // Keep that scope separate so a same-named variable in the enclosing block
+        // is shadowed, and reuse the new bindings across Go 1.0 loop iterations.
+        val loopEnv = if (range.operator == TokenKind.DEFINE) env.child() else env
         if (onlyIndexIsUsed) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
                 // A constant array length means the range expression itself is not evaluated,
                 // even when it contains calls or receives with side effects.
-                rangeIndexed(arrayLength, range, body, env, labels, declarationTypes) { index -> listOf(index.toLong()) }
+                rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
         }
@@ -1016,10 +1020,10 @@ class Interpreter(
                 if (!received.ok) break
                 if (range.targets.isNotEmpty()) {
                     val values = listOf(received.value).take(range.targets.size)
-                    assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env,
+                    assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, loopEnv,
                         declaredTypes = declarationTypes)
                 }
-                try { executeBlock(body, env) }
+                try { executeBlock(body, loopEnv) }
                 catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                 catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
             }
@@ -1035,16 +1039,16 @@ class Interpreter(
                     val (cp, width) = decodeUtf8Rune(value.bytes, byteIndex)
                     if (range.targets.isNotEmpty()) {
                         val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), NamedGoType("int32"))).take(range.targets.size)
-                        assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env,
+                        assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, loopEnv,
                             declaredTypes = declarationTypes)
                     }
-                    try { executeBlock(body, env) }
+                    try { executeBlock(body, loopEnv) }
                     catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                     catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
                     byteIndex += width
                 }
             }
-            is GoSlice -> rangeIndexed(value.length, range, body, env, labels, declarationTypes) { i ->
+            is GoSlice -> rangeIndexed(value.length, range, body, loopEnv, labels, declarationTypes) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.get(i))
             }
             is GoPointer -> {
@@ -1052,14 +1056,14 @@ class Interpreter(
                     ?: if (!value.isNil) (value.get() as? GoArray)?.values?.size
                         ?: throw RuntimeGoError("range over pointer requires an array")
                     else throw RuntimeGoError("range over nil pointer requires a known array length")
-                rangeIndexed(arrayLength, range, body, env, labels, declarationTypes) { index ->
+                rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index ->
                     if (onlyIndexIsUsed) listOf(index.toLong()) else {
                         val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
                         listOf(index.toLong(), array.values[index])
                     }
                 }
             }
-            is GoArray -> rangeIndexed(value.values.size, range, body, env, labels, declarationTypes) { i ->
+            is GoArray -> rangeIndexed(value.values.size, range, body, loopEnv, labels, declarationTypes) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
             }
             is GoMap -> {
@@ -1072,8 +1076,8 @@ class Interpreter(
                     val entryValue = if (onlyIndexIsUsed) null else value.values[key]
                     if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
                         (if (onlyIndexIsUsed) listOf(copyValue(key.value)) else listOf(copyValue(key.value), entryValue))
-                            .take(range.targets.size), env, declaredTypes = declarationTypes)
-                    try { executeBlock(body, env) }
+                            .take(range.targets.size), loopEnv, declaredTypes = declarationTypes)
+                    try { executeBlock(body, loopEnv) }
                     catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                     catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
                 }
