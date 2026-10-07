@@ -4101,7 +4101,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         fun close() {
             if (!queue.close()) throw RuntimeGoError("close of closed channel")
         }
-        fun len() = if (capacity == 0) 0L else buffered.get().coerceAtLeast(0).toLong()
+        fun len() = if (capacity == 0) 0L else buffered.get().coerceIn(0, capacity).toLong()
     }
     private class ReturnSignal(val values: List<Any?>, val runeConstants: List<Boolean> = emptyList()) : RuntimeException(null, null, false, false)
     private class BreakSignal(val label: String?) : RuntimeException(null, null, false, false)
