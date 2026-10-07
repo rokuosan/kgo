@@ -2491,10 +2491,10 @@ class TypeChecker(
     }
 
     private fun isByteElementType(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? NamedGoType)?.name == "uint8"
+        "byte" !in typeDeclarations && "uint8" !in typeDeclarations && sameType(type, byteType)
 
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? NamedGoType)?.name == "int32"
+        "rune" !in typeDeclarations && "int32" !in typeDeclarations && sameType(type, runeType)
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
         type == NamedGoType("rune") && "rune" !in typeDeclarations ||

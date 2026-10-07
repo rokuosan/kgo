@@ -3203,7 +3203,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun isByteElementType(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? NamedGoType)?.name == "uint8"
+        !typeDefinitions.containsKey("byte") && !typeDefinitions.containsKey("uint8") &&
+            canonicalAliasType(type) == NamedGoType("uint8")
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
         (underlying(type) as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
 
@@ -3211,7 +3212,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") ||
             type == NamedGoType("int32") && !typeDefinitions.containsKey("int32")
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? NamedGoType)?.name == "int32"
+        !typeDefinitions.containsKey("rune") && !typeDefinitions.containsKey("int32") &&
+            canonicalAliasType(type) == NamedGoType("int32")
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
         setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
