@@ -683,7 +683,7 @@ class Interpreter(
                 importedRuntimePackages[path]?.exportedVariableTarget(target.name)
             } ?: RuntimeTarget({ env.get(target.name) }, { env.set(target.name, it) }, env.typeOf(target.name))
         is IndexExpression -> {
-            val receiver = evaluateAssignmentReceiver(target.receiver, env)
+            val receiver = evaluateIndexReceiver(target.receiver, env)
             val key = evaluate(target.index, env)
             when (receiver) {
                 is GoSlice -> {
@@ -777,6 +777,11 @@ class Interpreter(
             is SelectorExpression, is IndexExpression -> addressOf(expression, env)
             else -> evaluate(expression, env)
         }
+
+    private suspend fun evaluateIndexReceiver(expression: Expression, env: Environment): Any? =
+        if (staticExpressionType(expression, env)?.let(::underlying) is ArrayGoType)
+            evaluateStructReceiver(expression, env)
+        else evaluate(expression, env)
 
     private fun pointedArray(pointer: GoPointer): GoArray {
         var value: Any? = pointer
@@ -1731,7 +1736,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             pointer ?: pointerToStructField(evaluateStructReceiver(expression.receiver, env), expression.field)
         }
         is IndexExpression -> {
-            val receiver = evaluate(expression.receiver, env)
+            val receiver = evaluateIndexReceiver(expression.receiver, env)
             val key = collectionIndex(evaluate(expression.index, env), "index")
             when (receiver) {
                 is GoSlice -> receiver.pointerAt(key)
