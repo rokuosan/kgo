@@ -1553,6 +1553,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private suspend fun addressOf(expression: Expression, env: Environment): GoPointer = when (expression) {
+        is ParenthesizedExpression -> addressOf(expression.expression, env)
         is NameExpression -> env.imports.dotPackages.firstNotNullOfOrNull { path ->
             importedRuntimePackages[path]?.exportedVariablePointer(expression.name)
         } ?: env.pointer(expression.name)
