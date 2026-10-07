@@ -1153,7 +1153,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun inferredStorageType(value: Any?, expression: Expression?, env: Environment): GoTypeSyntax? =
         expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) }
-            ?: if (value is GoInterfaceValue) InterfaceGoType(emptyList()) else runtimeType(value)
+            ?: if (value == null || value is GoInterfaceValue) InterfaceGoType(emptyList()) else runtimeType(value)
 
     private suspend fun initializeConstant(declaration: ConstantDeclaration) {
         initializeConstantIn(declaration, globals)
