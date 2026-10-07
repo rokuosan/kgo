@@ -1791,7 +1791,8 @@ class TypeChecker(
                 val fields = fieldList.toMap()
                 val keyed = elements.map { it.key != null }.toSet()
                 if (keyed.size > 1) error("mixture of keyed and unkeyed struct literal elements")
-                if (literalType is QualifiedGoType && keyed.singleOrNull() != true)
+                if (literalType is QualifiedGoType && keyed.singleOrNull() != true &&
+                    fieldList.any { !isExportedIdentifier(it.first) })
                     error("implicit assignment to unexported fields in struct literal")
                 if (keyed.singleOrNull() == true) {
                     val usedFields = mutableSetOf<String>()
