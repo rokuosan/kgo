@@ -997,7 +997,8 @@ class Interpreter(
     }
 
     private fun canonicalAliasType(type: GoTypeSyntax): GoTypeSyntax = when (type) {
-        NamedGoType("byte") -> if (!typeDefinitions.containsKey("byte")) NamedGoType("uint8") else type
+        NamedGoType("byte") -> if (!typeDefinitions.containsKey("byte")) predeclaredUInt8RuntimeType else type
+        NamedGoType("uint8") -> if (!typeDefinitions.containsKey("uint8")) predeclaredUInt8RuntimeType else type
         NamedGoType("rune") -> if (!typeDefinitions.containsKey("rune")) predeclaredIntRuntimeType else type
         NamedGoType("int") -> if (!typeDefinitions.containsKey("int")) predeclaredIntRuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
@@ -2275,7 +2276,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private suspend fun writeFmtOutput(writer: Any?, bytes: ByteArray, environment: Environment?): Any {
         val scope = environment ?: globals
         val method = selectStructMember(writer, "Write", NameExpression("<fmt writer>"), scope)
-        val byteType = NamedGoType("uint8")
+        val byteType = predeclaredUInt8RuntimeType
         val slice = GoSlice(
             byteType,
             bytes.mapTo(mutableListOf()) { GoInteger((it.toInt() and 0xff).toLong(), byteType) },
@@ -2290,7 +2291,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             null -> emptyList()
             else -> listOf(result)
         }
-        val written = values.firstOrNull() ?: GoInteger(0, NamedGoType("int"))
+        val written = values.firstOrNull() ?: GoInteger(0, predeclaredIntRuntimeType)
         val failure = values.getOrNull(1)
         return fmtWriteResult(written, failure)
     }
@@ -2298,8 +2299,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun fmtWriteResult(written: Any?, failure: Any?): GoMultiValue = GoMultiValue(listOf(
         when (written) {
             is GoInteger -> written
-            is Number -> GoInteger(written.toLong(), NamedGoType("int"))
-            else -> GoInteger(0, NamedGoType("int"))
+            is Number -> GoInteger(written.toLong(), predeclaredIntRuntimeType)
+            else -> GoInteger(0, predeclaredIntRuntimeType)
         },
         failure
     ))
@@ -2409,7 +2410,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
-            "byte" -> NamedGoType("uint8")
+            "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
             "error" -> errorInterfaceType
             else -> type
@@ -2554,7 +2555,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoFloat -> value.type
         is GoBoolean -> value.type
         is GoInteger -> when {
-            value.type == NamedGoType("byte") && !typeDefinitions.containsKey("byte") -> NamedGoType("uint8")
+            value.type == NamedGoType("byte") && !typeDefinitions.containsKey("byte") -> predeclaredUInt8RuntimeType
             value.type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") -> predeclaredIntRuntimeType
             else -> value.type
         }
@@ -3053,7 +3054,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is GoString -> {
                 val i = collectionIndex(rawIndex, "index")
                 if (i !in receiver.bytes.indices) throw RuntimeGoError("string index out of range")
-                GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), NamedGoType("uint8"))
+                GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), NamedGoType("byte"))
             }
             else -> throw RuntimeGoError("cannot index this value")
         }
@@ -3254,8 +3255,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun isByteElementType(type: GoTypeSyntax): Boolean =
-        !typeDefinitions.containsKey("byte") && !typeDefinitions.containsKey("uint8") &&
-            canonicalAliasType(type) == NamedGoType("uint8")
+        canonicalAliasType(type) == predeclaredUInt8RuntimeType
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
         (underlying(type) as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
 
@@ -3265,7 +3265,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         canonicalAliasType(type) == predeclaredIntRuntimeType
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
-        setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+        setOf("#predeclared-uint8", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
 
     private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
 
@@ -3331,7 +3331,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
-        "int8", "uint8", "byte" -> 8
+        "#predeclared-uint8", "int8", "uint8", "byte" -> 8
         "int16", "uint16" -> 16
         "int32", "uint32" -> 32
         else -> 64
@@ -3375,7 +3375,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val inferredDestinationType = when (sourceValue) {
             is GoSlice -> SliceGoType(sourceValue.elementType)
             is GoNilValue -> underlying(sourceValue.type).takeIf { it is SliceGoType }
-            is GoString -> SliceGoType(NamedGoType("uint8"))
+            is GoString -> SliceGoType(NamedGoType("byte"))
             else -> null
         }
         val destinationType = when (destinationValue) {
@@ -4753,7 +4753,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     companion object {
         private val predeclaredIntRuntimeType = NamedGoType("#predeclared-int")
-        private val integerTypeNames = setOf("#predeclared-int", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
+        private val predeclaredUInt8RuntimeType = NamedGoType("#predeclared-uint8")
+        private val integerTypeNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")

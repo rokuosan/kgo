@@ -4,12 +4,13 @@ package kgo
 internal object GoFmtPackage {
     private val any = InterfaceGoType(emptyList())
     private val variadic = ParameterSyntax(null, SliceGoType(any), variadic = true)
-    private val int = NamedGoType("int")
+    private val int = NamedGoType("#predeclared-int")
     private val error = NamedGoType("error")
+    private val byte = NamedGoType("#predeclared-uint8")
     private val writer = InterfaceGoType(listOf(
         InterfaceMethodSyntax(
             "Write",
-            listOf(ParameterSyntax("p", SliceGoType(NamedGoType("byte")))),
+            listOf(ParameterSyntax("p", SliceGoType(byte))),
             listOf(int, error)
         )
     ))
