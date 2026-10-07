@@ -3538,9 +3538,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 TokenKind.MUL -> result(a.real * b.real - a.imaginary * b.imaginary,
                     a.real * b.imaginary + a.imaginary * b.real)
                 TokenKind.QUO -> {
-                    val denominator = b.real * b.real + b.imaginary * b.imaginary
-                    result((a.real * b.real + a.imaginary * b.imaginary) / denominator,
-                        (a.imaginary * b.real - a.real * b.imaginary) / denominator)
+                    val (real, imaginary) = divideComplex(a, b)
+                    result(real, imaginary)
                 }
                 else -> throw RuntimeGoError("invalid complex operator $op")
             }
@@ -3605,6 +3604,55 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         return integerType?.let { GoInteger(wrapInteger(result.toLong(), it), it) } ?: result
     }
+
+    private fun divideComplex(numerator: GoComplex, denominator: GoComplex): Pair<Double, Double> {
+        val a = numerator.real
+        val b = numerator.imaginary
+        val c = denominator.real
+        val d = denominator.imaginary
+        var real: Double
+        var imaginary: Double
+
+        // Smith's algorithm avoids squaring the denominator components, which can overflow
+        // or underflow even when the quotient is representable.
+        if (abs(c) >= abs(d)) {
+            val ratio = d / c
+            val divisor = c + ratio * d
+            real = (a + b * ratio) / divisor
+            imaginary = (b - a * ratio) / divisor
+        } else {
+            val ratio = c / d
+            val divisor = d + ratio * c
+            real = (a * ratio + b) / divisor
+            imaginary = (b * ratio - a) / divisor
+        }
+
+        if (real.isNaN() && imaginary.isNaN()) {
+            when {
+                c == 0.0 && d == 0.0 && (!a.isNaN() || !b.isNaN()) -> {
+                    val signedInfinity = Math.copySign(Double.POSITIVE_INFINITY, c)
+                    real = signedInfinity * a
+                    imaginary = signedInfinity * b
+                }
+                (a.isInfinite() || b.isInfinite()) && c.isFinite() && d.isFinite() -> {
+                    val scaledReal = infToSignedOne(a)
+                    val scaledImaginary = infToSignedOne(b)
+                    real = Double.POSITIVE_INFINITY * (scaledReal * c + scaledImaginary * d)
+                    imaginary = Double.POSITIVE_INFINITY * (scaledImaginary * c - scaledReal * d)
+                }
+                (c.isInfinite() || d.isInfinite()) && a.isFinite() && b.isFinite() -> {
+                    val scaledReal = infToSignedOne(c)
+                    val scaledImaginary = infToSignedOne(d)
+                    real = 0.0 * (a * scaledReal + b * scaledImaginary)
+                    imaginary = 0.0 * (b * scaledReal - a * scaledImaginary)
+                }
+            }
+        }
+        return real to imaginary
+    }
+
+    private fun infToSignedOne(value: Double): Double =
+        Math.copySign(if (value.isInfinite()) 1.0 else 0.0, value)
 
     private fun goEqual(left: Any?, right: Any?): Boolean {
         if (left is GoBoolean || right is GoBoolean)
