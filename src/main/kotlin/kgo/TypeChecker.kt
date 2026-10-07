@@ -2258,8 +2258,12 @@ class TypeChecker(
     ): Boolean = assignable(left, right) || constantIntegerAssignable(left, right, leftExpression, scope) ||
         assignable(right, left) || constantIntegerAssignable(right, left, rightExpression, scope)
 
-    private fun constantIntegerAssignable(from: GoTypeSyntax, to: GoTypeSyntax, expression: Expression?, scope: Scope) =
-        expression != null && isUntyped(from) && isInteger(to) && constantInteger(expression, scope) != null
+    private fun constantIntegerAssignable(from: GoTypeSyntax, to: GoTypeSyntax, expression: Expression?, scope: Scope): Boolean {
+        if (expression == null || !isUntyped(from) || !isInteger(to)) return false
+        if (constantInteger(expression, scope) != null) return true
+        val complex = constantComplex(expression, scope) ?: return false
+        return complex.imaginary.numerator.signum() == 0 && complex.real.isInteger()
+    }
 
     private fun requireSameOperands(
         left: GoTypeSyntax,
