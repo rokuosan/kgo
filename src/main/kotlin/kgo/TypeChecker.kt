@@ -1343,7 +1343,6 @@ class TypeChecker(
     private fun checkTypeSwitch(statement: TypeSwitchStatement, scope: Scope) {
         val switchScope = scope.child()
         statement.init?.let { checkStatement(it, switchScope) }
-        if (statement.guard.name == "_") error("type switch guard must declare a variable")
         val interfaceType = expressionType(statement.guard.expression, switchScope)
         if (underlying(interfaceType) !is InterfaceGoType) error("type switch requires an interface operand")
         var sawDefault = false
