@@ -4,7 +4,7 @@ package kgo
 internal object GoMathPackage {
     private val float64 = NamedGoType("float64")
     private val float32 = NamedGoType("float32")
-    private val int = NamedGoType("int")
+    private val int = NamedGoType("#predeclared-int")
     private val bool = NamedGoType("bool")
     private val integerConstants = setOf(
         "MaxInt8", "MinInt8", "MaxInt16", "MinInt16", "MaxInt32", "MinInt32", "MaxInt64", "MinInt64",

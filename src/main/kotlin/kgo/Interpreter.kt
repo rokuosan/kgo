@@ -2642,7 +2642,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     value == 0.0 -> Double.NEGATIVE_INFINITY
                     value.isInfinite() -> Double.POSITIVE_INFINITY
                     value.isNaN() -> value
-                    else -> (mathCall("Ilogb", listOf(value)) as Long).toDouble()
+                    else -> number(mathCall("Ilogb", listOf(value)), "math.Logb exponent").toDouble()
                 }
             }
             "Sin" -> unary(Math::sin)
@@ -2691,11 +2691,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 count(1)
                 val value = x()
                 when {
-                    value == 0.0 || !value.isFinite() -> GoMultiValue(listOf(value, 0L))
+                    value == 0.0 || !value.isFinite() -> GoMultiValue(listOf(value, GoInteger(0L, predeclaredIntRuntimeType)))
                     else -> {
                         val scaled = if (abs(value) < java.lang.Double.MIN_NORMAL) value * 18014398509481984.0 else value
                         val exponent = Math.getExponent(scaled) + 1 - if (scaled != value) 54 else 0
-                        GoMultiValue(listOf(Math.scalb(value, -exponent), exponent.toLong()))
+                        GoMultiValue(listOf(Math.scalb(value, -exponent), GoInteger(exponent.toLong(), predeclaredIntRuntimeType)))
                     }
                 }
             }
@@ -2705,13 +2705,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 count(1)
                 val value = x()
                 when {
-                    value == 0.0 -> Int.MIN_VALUE.toLong()
-                    value.isInfinite() || value.isNaN() -> Int.MAX_VALUE.toLong()
+                    value == 0.0 -> GoInteger(Int.MIN_VALUE.toLong(), predeclaredIntRuntimeType)
+                    value.isInfinite() || value.isNaN() -> GoInteger(Int.MAX_VALUE.toLong(), predeclaredIntRuntimeType)
                     abs(value) < java.lang.Double.MIN_NORMAL -> {
                         val significand = java.lang.Double.doubleToRawLongBits(abs(value)) and 0x000fffffffffffffL
-                        (63 - java.lang.Long.numberOfLeadingZeros(significand) - 1074).toLong()
+                        GoInteger((63 - java.lang.Long.numberOfLeadingZeros(significand) - 1074).toLong(), predeclaredIntRuntimeType)
                     }
-                    else -> Math.getExponent(value).toLong()
+                    else -> GoInteger(Math.getExponent(value).toLong(), predeclaredIntRuntimeType)
                 }
             }
             "Nextafter" -> binary(Math::nextAfter)
@@ -2729,7 +2729,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                             if (sine < 0.0) -1L else 1L
                     }
                 }
-                GoMultiValue(listOf(logAbsGamma, sign))
+                GoMultiValue(listOf(logAbsGamma, GoInteger(sign, predeclaredIntRuntimeType)))
             }
             "Float32bits" -> {
                 count(1)
