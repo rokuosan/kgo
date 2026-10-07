@@ -98,6 +98,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private var importedRuntimePackages: Map<String, Interpreter> = emptyMap()
     private var knownPackageNames: Map<String, String> = emptyMap()
     private var exportedConstantNames: Set<String> = emptySet()
+    private var exportedVariableNames: Set<String> = emptySet()
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) = run(listOf(file), emptyList())
@@ -175,6 +176,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         exportedConstantNames = packageConstants.flatMap { it.names }.filterTo(mutableSetOf()) {
             it != "_" && it.firstOrNull()?.isUpperCase() == true
         }
+        exportedVariableNames = packageVariables.flatMap { it.names }.filterTo(mutableSetOf()) {
+            it != "_" && it.firstOrNull()?.isUpperCase() == true
+        }
         packageConstants.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name -> globals.define(name, null, declaration.type) } }
         packageVariables.forEach { declaration -> declaration.names.filter { it != "_" }.forEach { name ->
             globals.define(name, declaration.type?.let(::zeroValue), declaration.type)
@@ -217,6 +221,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
 
     private fun exportedConstant(name: String): Any? =
         if (name in exportedConstantNames) globals.getOrNull(name) else null
+
+    private fun exportedVariable(name: String): Any? =
+        if (name in exportedVariableNames) globals.getOrNull(name) else null
+
+    private fun exportedVariableTarget(name: String): RuntimeTarget? = if (name in exportedVariableNames) {
+        val type = globals.typeOf(name)
+        RuntimeTarget({ globals.get(name) }, { globals.set(name, it) }, type)
+    } else null
 
     private suspend fun invoke(
         function: FunctionDeclaration,
@@ -510,7 +522,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private suspend fun resolveTarget(target: Expression, env: Environment): RuntimeTarget = when (target) {
         is ParenthesizedExpression -> resolveTarget(target.expression, env)
         is NameExpression -> if (target.name == "_") RuntimeTarget({ null }, {})
-            else RuntimeTarget({ env.get(target.name) }, { env.set(target.name, it) }, env.typeOf(target.name))
+            else env.imports.dotPackages.firstNotNullOfOrNull { path ->
+                importedRuntimePackages[path]?.exportedVariableTarget(target.name)
+            } ?: RuntimeTarget({ env.get(target.name) }, { env.set(target.name, it) }, env.typeOf(target.name))
         is IndexExpression -> {
             val receiver = evaluate(target.receiver, env)
             val key = evaluate(target.index, env)
@@ -555,6 +569,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
         }
         is SelectorExpression -> {
+            if (target.receiver is NameExpression && !env.contains(target.receiver.name)) {
+                val path = env.imports.packages[target.receiver.name]
+                if (path != null) importedRuntimePackages[path]?.exportedVariableTarget(target.field)?.let { return it }
+            }
             val receiver = evaluate(target.receiver, env)
             val field = pointerToStructField(receiver, target.field)
             RuntimeTarget({ field.get() }, { value -> field.set(copyForType(value, field.pointeeType ?: runtimeType(field.get()) ?: NamedGoType("<unknown>"))) }, field.pointeeType)
@@ -1227,11 +1245,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val dotImportedConstant = env.imports.dotPackages.firstNotNullOfOrNull { path ->
                 importedRuntimePackages[path]?.exportedConstant(expression.name)
             }
+            val dotImportedVariablePath = env.imports.dotPackages.firstOrNull { path ->
+                expression.name in importedRuntimePackages[path]?.exportedVariableNames.orEmpty()
+            }
             if (binding != null) binding.value
             else typeDefinitions[expression.name]?.let { TypeValue(NamedGoType(expression.name)) }
                 ?: functions[expression.name]?.let { FunctionValue(it, globals, owner = this) }
                 ?: dotImportedFunction
                 ?: dotImportedConstant
+                ?: dotImportedVariablePath?.let { path -> importedRuntimePackages[path]?.exportedVariable(expression.name) }
                 ?: when {
                     "fmt" in env.imports.dotPackages && expression.name in GoFmtPackage.exportedNames ->
                         BuiltinValue(expression.name, GoFmtPackage.functionType(expression.name))
@@ -1299,9 +1321,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name]?.let(importedRuntimePackages::containsKey) == true) {
                 val path = env.imports.packages.getValue(expression.receiver.name)
-                importedRuntimePackages.getValue(path).exportedFunction(expression.field)
-                    ?: importedRuntimePackages.getValue(path).exportedConstant(expression.field)
-                    ?: throw RuntimeGoError("undefined imported identifier ${expression.field}")
+                val imported = importedRuntimePackages.getValue(path)
+                when {
+                    imported.exportedFunction(expression.field) != null -> imported.exportedFunction(expression.field)
+                    expression.field in imported.exportedConstantNames -> imported.exportedConstant(expression.field)
+                    expression.field in imported.exportedVariableNames -> imported.exportedVariable(expression.field)
+                    else -> throw RuntimeGoError("undefined imported identifier ${expression.field}")
+                }
             }
             else {
                 val receiver = evaluate(expression.receiver, env)
@@ -1368,8 +1394,18 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private suspend fun addressOf(expression: Expression, env: Environment): GoPointer = when (expression) {
-        is NameExpression -> env.pointer(expression.name)
-        is SelectorExpression -> pointerToStructField(evaluate(expression.receiver, env), expression.field)
+        is NameExpression -> env.imports.dotPackages.firstNotNullOfOrNull { path ->
+            importedRuntimePackages[path]?.exportedVariableTarget(expression.name)
+        }?.let { target -> GoPointer.reference(target.get, target.set, target.type) } ?: env.pointer(expression.name)
+        is SelectorExpression -> {
+            val target = if (expression.receiver is NameExpression && !env.contains(expression.receiver.name)) {
+                env.imports.packages[expression.receiver.name]?.let { path ->
+                    importedRuntimePackages[path]?.exportedVariableTarget(expression.field)
+                }
+            } else null
+            target?.let { GoPointer.reference(it.get, it.set, it.type) }
+                ?: pointerToStructField(evaluate(expression.receiver, env), expression.field)
+        }
         is IndexExpression -> {
             val receiver = evaluate(expression.receiver, env)
             val key = number(evaluate(expression.index, env), "index").toInt()

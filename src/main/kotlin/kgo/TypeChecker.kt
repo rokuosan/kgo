@@ -271,6 +271,9 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     internal fun exportedFunctionType(name: String): FunctionGoType? =
         if (isExportedIdentifier(name)) functions[name]?.let(::functionType) else null
 
+    internal fun exportedVariableType(name: String): GoTypeSyntax? =
+        if (isExportedIdentifier(name) && globals.isVariable(name)) globals.getOrNull(name) else null
+
     internal fun exportedConstant(name: String): ExportedConstant? {
         if (!isExportedIdentifier(name) || !globals.isConstant(name)) return null
         return ExportedConstant(
@@ -290,6 +293,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 else -> null
             } ?: importedPackages[path]?.let { imported ->
                 imported.exportedFunctionType(name) ?: imported.exportedConstant(name)?.type
+                    ?: imported.exportedVariableType(name)
             }
             if (type != null) return path to type
         }
@@ -1479,6 +1483,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
                 "math" -> GoMathPackage.memberType(expression.field) ?: error("undefined math identifier ${expression.field}")
                 else -> importedPackages[path]?.let { imported ->
                     imported.exportedFunctionType(expression.field) ?: imported.exportedConstant(expression.field)?.type
+                        ?: imported.exportedVariableType(expression.field)
                 }
                     ?: error("undefined imported identifier ${expression.field}")
             }
@@ -1561,7 +1566,7 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
     }
 
     private fun isAddressable(expression: Expression, scope: Scope): Boolean = when (expression) {
-        is NameExpression -> scope.isVariable(expression.name)
+        is NameExpression -> scope.isVariable(expression.name) || dotImportedVariable(expression.name) != null
         is ParenthesizedExpression -> isAddressable(expression.expression, scope)
         is UnaryExpression -> expression.operator == TokenKind.MUL &&
             underlying(expressionType(expression.operand, scope)) is PointerGoType
@@ -1571,8 +1576,19 @@ class TypeChecker(private val importedPackages: Map<String, TypeChecker> = empty
             is PointerGoType -> underlying(receiver.element) is ArrayGoType
             else -> false
         }
-        is SelectorExpression -> selectorFieldAddressable(expression, scope)
+        is SelectorExpression -> importedPackageVariable(expression) != null || selectorFieldAddressable(expression, scope)
         else -> false
+    }
+
+    private fun dotImportedVariable(name: String): Pair<String, GoTypeSyntax>? = dotImportPaths.firstNotNullOfOrNull { path ->
+        importedPackages[path]?.exportedVariableType(name)?.let { path to it }
+    }
+
+    private fun importedPackageVariable(expression: SelectorExpression): Pair<String, GoTypeSyntax>? {
+        val alias = (expression.receiver as? NameExpression)?.name ?: return null
+        val path = packagePaths[alias] ?: return null
+        if (standardPackageName(path) in setOf("fmt", "math")) return null
+        return importedPackages[path]?.exportedVariableType(expression.field)?.let { path to it }
     }
 
     private fun requireAssignmentTarget(expression: Expression, scope: Scope, allowBlank: Boolean = true) {

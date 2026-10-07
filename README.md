@@ -69,10 +69,10 @@ The command-line runner accepts a source file or a directory of `.go` files;
 directory input combines files declaring the same package and ignores test files.
 Import aliases are scoped to their source file during static checking and
 execution. Local source packages can be loaded from relative paths, a `go.mod`
-module path, or `GOPATH/src`; exported functions and constants can be accessed
-through named or dot imports, and dependencies initialize before their
-importers. Exported package variables and types, and general
-standard-library/runtime support, are still missing.
+module path, or `GOPATH/src`; exported functions, constants, and variables can
+be accessed through named or dot imports, and dependencies initialize before
+their importers. Exported package types and general standard-library/runtime
+support are still missing.
 Bodyless function and method declarations are parsed and type-checked,
 but their external implementations cannot be linked by the interpreter.
 Go features added after Go 1.0, such as generics and later literal syntax, are
