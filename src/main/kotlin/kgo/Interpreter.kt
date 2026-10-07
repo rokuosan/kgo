@@ -995,6 +995,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         else -> null
     }
 
+    private fun runtimeNamedType(name: String, path: String?): GoTypeSyntax =
+        path?.takeIf { it != packageIdentity }?.let { QualifiedGoType(it, name) } ?: NamedGoType(name)
+
     private fun inferredArrayLiteralLength(literal: CompositeLiteral, env: Environment): Int {
         var nextIndex = 0
         var largestIndex = -1
@@ -1981,7 +1984,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     backing[at] = copyForType(evaluateCompositeValue(element.value, type.element, env), type.element)
                     nextIndex = at + 1
                 }
-                GoSlice(type.element, backing, 0, backing.size, backing.size, (literal.type as? NamedGoType)?.name, literal.type)
+                GoSlice(type.element, backing, 0, backing.size, backing.size, namedTypeName(literal.type), literal.type,
+                    namedTypePackage(literal.type))
             }
             is ArrayGoType -> {
                 val indices = mutableListOf<Int>()
@@ -2006,7 +2010,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     if (!usedIndices.add(at)) throw RuntimeGoError("duplicate array literal index")
                     values[at] = copyForType(evaluateCompositeValue(element.value, type.element, env), type.element)
                 }
-                GoArray(type.element, values, (literal.type as? NamedGoType)?.name, literal.type)
+                GoArray(type.element, values, namedTypeName(literal.type), literal.type, namedTypePackage(literal.type))
             }
             is MapGoType -> {
                 val values = linkedMapOf<GoMapKey, Any?>()
@@ -2016,7 +2020,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     values[mapKey(key, type.key)] = copyForType(evaluateCompositeValue(element.value, type.value, env), type.value)
                 }
                 GoMap(type.key, type.value, zeroValue(type.value), values,
-                    (literal.type as? NamedGoType)?.name, literal.type)
+                    namedTypeName(literal.type), literal.type, namedTypePackage(literal.type))
             }
             is StructGoType -> {
                 val fields = linkedMapOf<String, Any?>()
@@ -2178,9 +2182,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoStruct -> value.namedType?.let { name ->
             value.packagePath?.takeIf { it != packageIdentity }?.let { QualifiedGoType(it, name) } ?: NamedGoType(name)
         } ?: value.staticType
-        is GoArray -> value.namedType?.let(::NamedGoType) ?: value.type
-        is GoSlice -> value.namedType?.let(::NamedGoType) ?: value.type ?: SliceGoType(value.elementType)
-        is GoChannel -> value.namedType?.let(::NamedGoType) ?: value.type ?: ChannelGoType(value.elementType, value.direction)
+        is GoArray -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type
+        is GoSlice -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: SliceGoType(value.elementType)
+        is GoChannel -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: ChannelGoType(value.elementType, value.direction)
         is GoPointer -> {
             val pointedType = if (value.isNil) null else runtimeType(value.get())
             val qualifiedPointedType = pointedType as? QualifiedGoType
@@ -2201,7 +2205,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoRational -> NamedGoType("float64")
         is GoExactComplex -> NamedGoType("complex128")
         is BigInteger -> NamedGoType("int")
-        is GoMap -> value.namedType?.let(::NamedGoType) ?: value.type ?: MapGoType(value.keyType, value.valueType)
+        is GoMap -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: MapGoType(value.keyType, value.valueType)
         is FunctionValue -> value.type ?: FunctionGoType(value.function.parameterTypes.mapIndexed { i, type ->
             ParameterSyntax(value.function.parameters.getOrNull(i), type, value.function.variadic && i == value.function.parameterTypes.lastIndex)
         }, value.function.resultTypes)
@@ -2600,7 +2604,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             value.fields.mapValuesTo(linkedMapOf()) { copyValue(it.value) },
             value.namedType, value.fieldTypes, value.embeddedFields, value.staticType, value.packagePath
         )
-        is GoArray -> GoArray(value.elementType, value.values.mapTo(mutableListOf(), ::copyValue), value.namedType, value.type)
+        is GoArray -> GoArray(value.elementType, value.values.mapTo(mutableListOf(), ::copyValue), value.namedType, value.type, value.packagePath)
         is GoInterfaceValue -> GoInterfaceValue(value.dynamicType, copyValue(value.value))
         else -> value
     }
@@ -2617,11 +2621,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else if (value is GoPointer && actual is PointerGoType) value.retype(actual.element)
         else if (value is GoArray && actual is ArrayGoType)
             GoArray(actual.element, value.values.mapTo(mutableListOf()) { copyForType(it, actual.element) },
-                (type as? NamedGoType)?.name, type)
-        else if (value is GoSlice && actual is SliceGoType) value.retype(actual.element, (type as? NamedGoType)?.name, type)
-        else if (value is GoMap && actual is MapGoType) value.retype(actual.key, actual.value, (type as? NamedGoType)?.name, type)
+                namedTypeName(type), type, namedTypePackage(type))
+        else if (value is GoSlice && actual is SliceGoType) value.retype(actual.element, namedTypeName(type), type, namedTypePackage(type))
+        else if (value is GoMap && actual is MapGoType) value.retype(actual.key, actual.value, namedTypeName(type), type, namedTypePackage(type))
         else if (value is GoChannel && actual is ChannelGoType)
-            value.retype(actual.element, actual.direction, (type as? NamedGoType)?.name, type)
+            value.retype(actual.element, actual.direction, namedTypeName(type), type, namedTypePackage(type))
         else if (value is FunctionValue && actual is FunctionGoType) value.copy(type = type)
         else if (value is MethodExpressionValue && actual is FunctionGoType) value.copy(type = type)
         else if (value is GoStruct && actual is StructGoType) {
@@ -2733,7 +2737,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is ArrayGoType -> {
             if (value !is GoArray) throw RuntimeGoError("cannot convert value to $type")
             GoArray(target.element, value.values.mapTo(mutableListOf()) { copyForType(it, target.element) },
-                (type as? NamedGoType)?.name, type)
+                namedTypeName(type), type, namedTypePackage(type))
         }
         is SliceGoType -> {
             if (value is GoString && (isPredeclaredByteType(target.element) || isPredeclaredRuneType(target.element))) {
@@ -2743,19 +2747,20 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                         value.bytes.map { (it.toInt() and 0xff).toLong() }
                     else decodeUtf8Runes(value.bytes).map(Int::toLong)
                     val backing = converted.mapTo(mutableListOf()) { copyForType(it, target.element) }
-                    GoSlice(target.element, backing, 0, backing.size, backing.size, (type as? NamedGoType)?.name, type)
+                    GoSlice(target.element, backing, 0, backing.size, backing.size, namedTypeName(type), type,
+                        namedTypePackage(type))
                 }
-            } else if (value is GoSlice) value.retype(target.element, (type as? NamedGoType)?.name, type)
+            } else if (value is GoSlice) value.retype(target.element, namedTypeName(type), type, namedTypePackage(type))
             else if (value == null || value is GoNilValue && underlying(value.type) is SliceGoType) GoNilValue(type)
             else throw RuntimeGoError("cannot convert value to $type")
         }
         is MapGoType -> when (value) {
-            is GoMap -> value.retype(target.key, target.value, (type as? NamedGoType)?.name, type)
+            is GoMap -> value.retype(target.key, target.value, namedTypeName(type), type, namedTypePackage(type))
             null, is GoNilValue -> GoNilValue(type)
             else -> throw RuntimeGoError("cannot convert value to $type")
         }
         is ChannelGoType -> when (value) {
-            is GoChannel -> value.retype(target.element, target.direction, (type as? NamedGoType)?.name, type)
+            is GoChannel -> value.retype(target.element, target.direction, namedTypeName(type), type, namedTypePackage(type))
             null, is GoNilValue -> GoNilValue(type)
             else -> throw RuntimeGoError("cannot convert value to $type")
         }
@@ -2889,7 +2894,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is GoSlice -> first
             is GoNilValue -> (underlying(first.type) as? SliceGoType)?.let {
                 GoSlice(it.element, mutableListOf(), 0, 0, 0,
-                    (first.type as? NamedGoType)?.name, first.type)
+                    namedTypeName(first.type), first.type, namedTypePackage(first.type))
             } ?: throw RuntimeGoError("append requires a slice")
             else -> throw RuntimeGoError("append requires a slice")
         }
@@ -3015,7 +3020,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 val capacity = args.getOrNull(1)?.let { makeSize(it, "channel capacity") } ?: 0
                 if (capacity < 0) throw RuntimeGoError("negative channel capacity")
                 val requestedType = (args.first() as TypeValue).type
-                GoChannel(type.element, capacity, (requestedType as? NamedGoType)?.name, requestedType, type.direction)
+                GoChannel(type.element, capacity, namedTypeName(requestedType), requestedType, type.direction,
+                    packagePath = namedTypePackage(requestedType))
             }
             is SliceGoType -> {
                 if (args.size !in 2..3) throw RuntimeGoError("make slice requires length and optional capacity")
@@ -3025,7 +3031,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (length < 0 || capacity < length) throw RuntimeGoError("invalid slice length or capacity")
                 val requestedType = (args.first() as TypeValue).type
                 GoSlice(type.element, zeroedSliceBacking(capacity, type.element), 0, length, capacity,
-                    (requestedType as? NamedGoType)?.name, requestedType)
+                    namedTypeName(requestedType), requestedType, namedTypePackage(requestedType))
             }
             is MapGoType -> {
                 if (args.size !in 1..2) throw RuntimeGoError("make map accepts one or two arguments")
@@ -3033,7 +3039,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (size < 0) throw RuntimeGoError("negative map size hint")
                 val requestedType = (args.first() as TypeValue).type
                 GoMap(type.key, type.value, zeroValue(type.value), linkedMapOf(),
-                    (requestedType as? NamedGoType)?.name, requestedType)
+                    namedTypeName(requestedType), requestedType, namedTypePackage(requestedType))
             }
             else -> throw RuntimeGoError("make for this type is not implemented")
         }
@@ -3082,7 +3088,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (value < 0) throw RuntimeGoError("negative array length")
                 value
             } ?: 0
-            GoArray(actual.element, MutableList(length) { zeroValue(actual.element) }, (type as? NamedGoType)?.name, type)
+            GoArray(actual.element, MutableList(length) { zeroValue(actual.element) }, namedTypeName(type), type,
+                namedTypePackage(type))
         }
         is StructGoType -> {
             val fields = linkedMapOf<String, Any?>()
@@ -3865,7 +3872,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val elementType: GoTypeSyntax,
         val values: MutableList<Any?>,
         val namedType: String? = null,
-        val type: GoTypeSyntax? = null
+        val type: GoTypeSyntax? = null,
+        val packagePath: String? = packageIdentity
     ) {
         fun pointerAt(index: Int): GoPointer {
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
@@ -3882,7 +3890,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val length: Int,
         val capacity: Int,
         val namedType: String? = null,
-        val type: GoTypeSyntax? = null
+        val type: GoTypeSyntax? = null,
+        val packagePath: String? = packageIdentity
     ) {
         fun get(index: Int): Any? {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
@@ -3899,23 +3908,23 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
-            return GoSlice(elementType, backing, start + low, high - low, max - low, namedType, type)
+            return GoSlice(elementType, backing, start + low, high - low, max - low, namedType, type, packagePath)
         }
-        fun retype(element: GoTypeSyntax, name: String?, type: GoTypeSyntax) =
-            GoSlice(element, backing, start, length, capacity, name, type)
+        fun retype(element: GoTypeSyntax, name: String?, type: GoTypeSyntax, packagePath: String? = packageIdentity) =
+            GoSlice(element, backing, start, length, capacity, name, type, packagePath)
         fun append(values: List<Any?>): GoSlice {
             val required = length.toLong() + values.size
             if (required > Int.MAX_VALUE) throw RuntimeGoError("slice length out of range")
             if (required <= capacity) {
                 values.forEachIndexed { i, value -> backing[start + length + i] = copyForType(value, elementType) }
-                return GoSlice(elementType, backing, start, length + values.size, capacity, namedType, type)
+                return GoSlice(elementType, backing, start, length + values.size, capacity, namedType, type, packagePath)
             }
             val grownCapacity = minOf(capacity.toLong() * 2, Int.MAX_VALUE.toLong())
             val newCapacity = maxOf(required, maxOf(1L, grownCapacity)).toInt()
             val newBacking = zeroedSliceBacking(newCapacity, elementType)
             repeat(length) { newBacking[it] = get(it) }
             values.forEachIndexed { i, value -> newBacking[length + i] = copyForType(value, elementType) }
-            return GoSlice(elementType, newBacking, 0, length + values.size, newCapacity, namedType, type)
+            return GoSlice(elementType, newBacking, 0, length + values.size, newCapacity, namedType, type, packagePath)
         }
         fun toList(): List<Any?> = (0 until length).map(::get)
     }
@@ -3925,10 +3934,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val elementZero: Any?,
         val values: MutableMap<GoMapKey, Any?>,
         val namedType: String? = null,
-        val type: GoTypeSyntax? = null
+        val type: GoTypeSyntax? = null,
+        val packagePath: String? = packageIdentity
     ) {
-        fun retype(key: GoTypeSyntax, value: GoTypeSyntax, name: String?, type: GoTypeSyntax) =
-            GoMap(key, value, zeroValue(value), values, name, type)
+        fun retype(key: GoTypeSyntax, value: GoTypeSyntax, name: String?, type: GoTypeSyntax,
+                   packagePath: String? = packageIdentity) =
+            GoMap(key, value, zeroValue(value), values, name, type, packagePath)
     }
     private inner class GoMapKey(val value: Any?) {
         override fun equals(other: Any?) = other is GoMapKey && goEqual(value, other.value)
@@ -3988,10 +3999,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val direction: ChannelDirection = ChannelDirection.SEND_RECEIVE,
         val queue: Channel<Any?> = Channel(capacity),
         private val buffered: AtomicInteger = AtomicInteger(0),
-        private val identity: Any = Any()
+        private val identity: Any = Any(),
+        val packagePath: String? = packageIdentity
     ) {
-        fun retype(element: GoTypeSyntax, direction: ChannelDirection, name: String?, type: GoTypeSyntax) =
-            GoChannel(element, capacity, name, type, direction, queue, buffered, identity)
+        fun retype(element: GoTypeSyntax, direction: ChannelDirection, name: String?, type: GoTypeSyntax,
+                   packagePath: String? = packageIdentity) =
+            GoChannel(element, capacity, name, type, direction, queue, buffered, identity, packagePath)
 
         override fun equals(other: Any?) = other is GoChannel && identity === other.identity
         override fun hashCode() = System.identityHashCode(identity)
