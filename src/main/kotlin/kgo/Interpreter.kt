@@ -4621,7 +4621,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             if (comparableFields.toSet() != other.fields.keys.filterNot(::isBlankStorageKey).toSet()) return false
             return comparableFields.all { goEqual(fields[it], other.fields[it]) }
         }
-        override fun hashCode(): Int = fields.filterKeys { !isBlankStorageKey(it) }.hashCode()
+        override fun hashCode(): Int = fields.entries.filterNot { isBlankStorageKey(it.key) }
+            .fold(0) { hash, (name, value) ->
+                31 * (31 * hash + name.hashCode()) + goHash(value)
+            }
     }
 
     private fun isBlankStorageKey(key: String) = key.startsWith("\u0000blank:")
