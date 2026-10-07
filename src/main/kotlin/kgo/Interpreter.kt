@@ -510,7 +510,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 if (!declared.add(name)) throw RuntimeGoError("$name repeated on left side of :=")
                 val initialized = defaultConstantValue(value, sourceExpressions?.getOrNull(index), env)
                 if (env.containsLocal(name)) env.set(name, initialized)
-                else env.define(name, initialized, runtimeType(initialized))
+                else env.define(name, initialized, inferredStorageType(
+                    initialized, sourceExpressions?.getOrNull(index), env
+                ))
             }
             return
         }
@@ -1145,9 +1147,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 else defaultConstantValue(it, sourceExpression, env)
             }
             else if (resolvedType != null) zeroValue(resolvedType) else GoInteger(0L, NamedGoType("int"))
-            if (name != "_") env.define(name, value, resolvedType ?: runtimeType(value))
+            if (name != "_") env.define(name, value, resolvedType ?: inferredStorageType(value, expressions.getOrNull(i), env))
         }
     }
+
+    private fun inferredStorageType(value: Any?, expression: Expression?, env: Environment): GoTypeSyntax? =
+        expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) }
+            ?: if (value is GoInterfaceValue) InterfaceGoType(emptyList()) else runtimeType(value)
 
     private suspend fun initializeConstant(declaration: ConstantDeclaration) {
         initializeConstantIn(declaration, globals)
