@@ -576,7 +576,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                         defaultRuneValue(key, target.index, env) else key
                     val mapKey = mapKey(mapIndex, receiver.keyType)
                     RuntimeTarget(
-                        { if (receiver.values.containsKey(mapKey)) receiver.values[mapKey] else receiver.elementZero },
+                        { mapValue(receiver, mapKey) },
                         { receiver.values[mapKey] = copyForType(it, receiver.valueType) },
                         receiver.valueType
                     )
@@ -1250,7 +1250,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     defaultRuneValue(key, index.index, env) else key
                 val mapKey = mapKey(mapIndex, keyType)
                 val found = receiver.values.containsKey(mapKey)
-                return listOf(MapLookupResult(if (found) receiver.values[mapKey] else receiver.elementZero, found))
+                return listOf(MapLookupResult(mapValue(receiver, mapKey), found))
             }
             if (receiver is GoNilValue && underlying(receiver.type) is MapGoType) {
                 val mapType = underlying(receiver.type) as MapGoType
@@ -2563,7 +2563,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is GoMap -> {
                 val key = if (underlying(receiver.keyType) is InterfaceGoType && indexExpression != null && env != null)
                     defaultRuneValue(rawIndex, indexExpression, env) else rawIndex
-                mapKey(key, receiver.keyType).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
+                mapValue(receiver, mapKey(key, receiver.keyType))
             }
             is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { mapType ->
                 val key = if (underlying(mapType.key) is InterfaceGoType && indexExpression != null && env != null)
@@ -2837,6 +2837,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         if (!runtimeComparable(typedValue)) throw RuntimeGoError("hash of unhashable type")
         return GoMapKey(copyValue(typedValue))
     }
+
+    private fun mapValue(map: GoMap, key: GoMapKey): Any? =
+        copyForType(if (map.values.containsKey(key)) map.values[key] else map.elementZero, map.valueType)
 
     private fun literal(token: Token): Any = when (token.kind) {
         TokenKind.INT -> integer(token.lexeme)
