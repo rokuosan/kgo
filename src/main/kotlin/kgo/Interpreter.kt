@@ -2917,10 +2917,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 namedTypeName(type), type, namedTypePackage(type))
         }
         is SliceGoType -> {
-            if (value is GoString && (isPredeclaredByteType(target.element) || isPredeclaredRuneType(target.element))) {
+            if (value is GoString && (isByteElementType(target.element) || isRuneElementType(target.element))) {
                 if (value.bytes.isEmpty()) GoNilValue(type)
                 else {
-                    val converted = if (isPredeclaredByteType(target.element))
+                    val converted = if (isByteElementType(target.element))
                         value.bytes.map { (it.toInt() and 0xff).toLong() }
                     else decodeUtf8Runes(value.bytes).map(Int::toLong)
                     val backing = converted.mapTo(mutableListOf()) { copyForType(it, target.element) }
@@ -2960,8 +2960,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 is BigInteger -> GoString(encodeGoCodePoint(value), type)
                 is GoInteger -> GoString(encodeGoCodePoint(integerValue(value, "string conversion")), type)
                 is GoSlice -> when {
-                    isPredeclaredByteType(value.elementType) -> GoString(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), type)
-                    isPredeclaredRuneType(value.elementType) -> GoString(value.toList().flatMap {
+                    isByteElementType(value.elementType) -> GoString(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), type)
+                    isRuneElementType(value.elementType) -> GoString(value.toList().flatMap {
                         encodeGoCodePoint(number(it, "string conversion")).toList()
                     }.toByteArray(), type)
                     else -> throw RuntimeGoError("cannot convert slice to string")
@@ -3027,12 +3027,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
         type == NamedGoType("byte") && !typeDefinitions.containsKey("byte") ||
             type == NamedGoType("uint8") && !typeDefinitions.containsKey("uint8")
+    private fun isByteElementType(type: GoTypeSyntax): Boolean =
+        (underlying(type) as? NamedGoType)?.name == "uint8"
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? SliceGoType)?.element?.let { isPredeclaredByteType(it) || isPredeclaredRuneType(it) } == true
+        (underlying(type) as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
         type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") ||
             type == NamedGoType("int32") && !typeDefinitions.containsKey("int32")
+    private fun isRuneElementType(type: GoTypeSyntax): Boolean =
+        (underlying(type) as? NamedGoType)?.name == "int32"
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
         setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")

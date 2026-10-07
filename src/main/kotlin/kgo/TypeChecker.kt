@@ -2370,8 +2370,14 @@ class TypeChecker(
 
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean {
         val slice = underlying(type) as? SliceGoType ?: return false
-        return isPredeclaredByteType(slice.element) || isPredeclaredRuneType(slice.element)
+        return isByteElementType(slice.element) || isRuneElementType(slice.element)
     }
+
+    private fun isByteElementType(type: GoTypeSyntax): Boolean =
+        (underlying(type) as? NamedGoType)?.name == "uint8"
+
+    private fun isRuneElementType(type: GoTypeSyntax): Boolean =
+        (underlying(type) as? NamedGoType)?.name == "int32"
 
     private fun isPredeclaredByteType(type: GoTypeSyntax): Boolean =
         type == NamedGoType("byte") && "byte" !in typeDeclarations ||
