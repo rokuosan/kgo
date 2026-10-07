@@ -142,7 +142,7 @@ class TypeChecker(
                 val name = declaration.names[binding.index]
                 val expression = declaration.values[binding.index]
                 val scope = globals.child().also { initializerScope ->
-                    if ("iota" !in packageLevelNames) {
+                    if ("iota" !in packageLevelNames && "iota" !in packagePaths) {
                         initializerScope.define(
                             "iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true
                         )
@@ -715,7 +715,8 @@ class TypeChecker(
                         requireUniqueNames(declaration.names, "constant declaration")
                         val declaredType = declaration.type?.let { resolveLocalType(it, scope) }
                         val constants = scope.child().also { initializerScope ->
-                            if (!initializerScope.hasBinding("iota") && "iota" !in packageLevelNames) {
+                            if (!initializerScope.hasBinding("iota") && "iota" !in packageLevelNames &&
+                                "iota" !in packagePaths) {
                                 initializerScope.define(
                                     "iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true
                                 )

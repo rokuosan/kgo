@@ -1291,7 +1291,8 @@ class Interpreter(
     private suspend fun initializeConstantIn(declaration: ConstantDeclaration, target: Environment) {
         val resolvedType = declaration.type?.let { resolveRuntimeType(it, target) }
         val scope = target.child()
-        val iotaIsShadowed = if (target === globals) packageShadowsIota else target.binding("iota") != null
+        val iotaIsShadowed = "iota" in scope.imports.packages ||
+            if (target === globals) packageShadowsIota else target.binding("iota") != null
         if (!iotaIsShadowed) scope.define("iota", BigInteger.valueOf(declaration.iotaIndex.toLong()))
         val values = expandValues(declaration.values.map { evaluate(it, scope) }, declaration.names.size)
         if (values.size != declaration.names.size) throw RuntimeGoError("constant initializer count mismatch")
