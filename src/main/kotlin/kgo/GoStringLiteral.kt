@@ -5,6 +5,55 @@ internal fun canonicalGoStringLiteral(text: String): String =
         (byte.toInt() and 0xff).toString(16).padStart(2, '0')
     }
 
+internal fun decodeGoCharacterLiteral(text: String): Int {
+    if (text.length < 3 || text.first() != '\'' || text.last() != '\'')
+        throw RuntimeGoError("invalid character literal")
+    val body = text.substring(1, text.length - 1)
+    if (body.isEmpty()) throw RuntimeGoError("empty character literal")
+    if (body.first() != '\\') {
+        if (body.codePointCount(0, body.length) != 1)
+            throw RuntimeGoError("character literal must contain one Unicode code point")
+        return body.codePointAt(0)
+    }
+    val escape = body.substring(1)
+    return when (escape.firstOrNull()) {
+        'a' -> 7
+        'b' -> 8
+        'f' -> 12
+        'n' -> 10
+        'r' -> 13
+        't' -> 9
+        'v' -> 11
+        '\\' -> 92
+        '\'' -> 39
+        'x' -> {
+            if (escape.length != 3 || !escape.drop(1).all(Char::isHexDigit))
+                throw RuntimeGoError("invalid hexadecimal character escape")
+            escape.drop(1).toInt(16)
+        }
+        'u', 'U' -> {
+            val digits = if (escape.first() == 'u') 4 else 8
+            val hex = escape.drop(1)
+            if (hex.length != digits || !hex.all(Char::isHexDigit))
+                throw RuntimeGoError("invalid Unicode character escape")
+            val codePoint = hex.toLong(16).toInt()
+            if (codePoint !in 0..0x10ffff || codePoint in 0xd800..0xdfff)
+                throw RuntimeGoError("invalid Unicode code point")
+            codePoint
+        }
+        in '0'..'7' -> {
+            if (escape.length != 3 || !escape.all { it in '0'..'7' })
+                throw RuntimeGoError("invalid octal character escape")
+            val value = escape.toInt(8)
+            if (value > 0xff) throw RuntimeGoError("octal character escape out of range")
+            value
+        }
+        else -> throw RuntimeGoError("invalid character escape")
+    }
+}
+
+private fun Char.isHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
 internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
     if (text.length < 2) throw RuntimeGoError("invalid string literal")
     if (text.first() == '`') return text.substring(1, text.length - 1).replace("\r", "").toByteArray(Charsets.UTF_8)

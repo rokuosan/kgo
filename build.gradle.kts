@@ -23,6 +23,7 @@ java {
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation("org.apache.commons:commons-math3:3.6.1")
 }
 
 application { mainClass.set("kgo.MainKt") }

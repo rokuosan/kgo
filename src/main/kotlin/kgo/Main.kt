@@ -6,8 +6,9 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 
 fun main(args: Array<String>) {
-    val mode = args.firstOrNull()?.takeIf { it.startsWith("--") } ?: "--run"
-    val path = if (mode == "--run") args.firstOrNull() else args.getOrNull(1)
+    val explicitMode = args.firstOrNull()?.takeIf { it.startsWith("--") }
+    val mode = explicitMode ?: "--run"
+    val path = if (explicitMode == null) args.firstOrNull() else args.getOrNull(1)
     if (path == null || args.size > 2 || mode !in setOf("--run", "--tokens", "--parse")) {
         System.err.println("usage: kgo [--run|--parse|--tokens] <source.go|package-dir>")
         return

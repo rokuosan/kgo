@@ -202,11 +202,15 @@ class TypeChecker {
                 val alias = when (spec.alias) {
                     "." -> {
                         dotImportPaths += path
-                        if (packageName(path) == "fmt") importedNames += listOf("Print", "Println", "Fprint", "Fprintln")
+                        importedNames += when (standardPackageName(path)) {
+                            "fmt" -> listOf("Print", "Println", "Fprint", "Fprintln")
+                            "math" -> GoMathPackage.exportedNames
+                            else -> emptySet()
+                        }
                         null
                     }
                     "_" -> null
-                    null -> path.substringAfterLast('/')
+                    null -> standardPackageName(path) ?: path.substringAfterLast('/')
                     else -> spec.alias
                 } ?: return@forEach
                 if (!importedNames.add(alias)) error("package name $alias imported more than once in a file")
@@ -242,6 +246,18 @@ class TypeChecker {
         }
     }
 
+    private fun dotImportedIdentifierType(name: String): Pair<String, GoTypeSyntax>? {
+        dotImportPaths.forEach { path ->
+            val type = when (standardPackageName(path)) {
+                "fmt" -> dotImportedFmtFunctionType(name)
+                "math" -> GoMathPackage.memberType(name)
+                else -> null
+            }
+            if (type != null) return path to type
+        }
+        return null
+    }
+
     private fun checkMain() {
         val main = functions["main"] ?: error("main function not found")
         if (main.parameters.isNotEmpty() || main.resultTypes.isNotEmpty()) error("main must have no parameters or results")
@@ -251,12 +267,10 @@ class TypeChecker {
         val ownerByName = variables.flatMapIndexed { index, declaration ->
             declaration.names.filter { it != "_" }.map { it to index }
         }.toMap()
-        val dependencies = variables.map { declaration -> declaration.values
-            .flatMap(::referencedNames)
-            .mapNotNull(ownerByName::get)
-            .distinct()
-            .sorted()
-            .toSet()
+        val dependencies = variables.map { declaration ->
+            val references = declaration.values.flatMapTo(linkedSetOf(), ::referencedNames)
+            addFunctionDependencies(references)
+            references.mapNotNull(ownerByName::get).distinct().sorted().toSet()
         }
         val state = IntArray(variables.size)
         val result = mutableListOf<VariableDeclaration>()
@@ -320,6 +334,19 @@ class TypeChecker {
         is CompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
         is ElidedCompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
         is FunctionLiteralExpression -> emptySet()
+    }
+
+    private fun addFunctionDependencies(references: MutableSet<String>) {
+        val pending = ArrayDeque(references.filter { it in functions })
+        val visited = mutableSetOf<String>()
+        while (pending.isNotEmpty()) {
+            val name = pending.removeFirst()
+            if (!visited.add(name)) continue
+            val function = functions[name] ?: continue
+            val functionReferences = GoPackageDependencies.functionReferences(function)
+            functionReferences.filter { it !in references && it in functions }.forEach(pending::addLast)
+            references += functionReferences
+        }
     }
 
     private fun checkFunction(function: FunctionDeclaration) {
@@ -906,7 +933,7 @@ class TypeChecker {
         statement.clauses.forEachIndexed { clauseIndex, clause ->
             val lastStatementIndex = clause.statements.indexOfLast { it != EmptyStatement }
             clause.statements.forEachIndexed { statementIndex, child ->
-                val branch = unwrapLabels(child) as? BranchStatement
+                val branch = child as? BranchStatement
                 if (branch?.kind == TokenKind.FALLTHROUGH) {
                     if (clauseIndex == statement.clauses.lastIndex || statementIndex != lastStatementIndex)
                         error("fallthrough statement out of place")
@@ -942,7 +969,7 @@ class TypeChecker {
             switchType != null && underlying(switchType) is InterfaceGoType -> defaultType(caseType)
             else -> switchType ?: defaultType(caseType)
         }
-        val typeKey = identityType.toString()
+        val typeKey = constantIdentityTypeKey(identityType)
         if (isComplex(identityType)) {
             constantComplex(expression, scope)?.let { value ->
                 return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
@@ -963,7 +990,7 @@ class TypeChecker {
     ): String? {
         val sourceType = expressionType(expression, scope)
         val identityType = if (underlying(keyType) is InterfaceGoType) defaultType(sourceType) else keyType
-        val typeKey = identityType.toString()
+        val typeKey = constantIdentityTypeKey(identityType)
         if (isComplex(identityType)) {
             constantComplex(expression, scope)?.let { value ->
                 return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
@@ -975,6 +1002,12 @@ class TypeChecker {
         }
         constantStringIdentity(expression, scope)?.let { value -> return "$typeKey:string:$value" }
         return constantBoolean(expression, scope)?.let { "$typeKey:boolean:$it" }
+    }
+
+    private fun constantIdentityTypeKey(type: GoTypeSyntax): String = when {
+        "byte" !in typeDeclarations && "uint8" !in typeDeclarations && sameType(type, byteType) -> "uint8"
+        "rune" !in typeDeclarations && "int32" !in typeDeclarations && sameType(type, runeType) -> "int32"
+        else -> type.toString()
     }
 
     private fun constantComplex(expression: Expression, scope: Scope = globals): ConstantComplexValue? = when (expression) {
@@ -1230,13 +1263,15 @@ class TypeChecker {
                 ?: if (typeDeclarations.containsKey(expression.name)) NamedGoType(expression.name)
                 else if (isBuiltinType(expression.name)) NamedGoType(expression.name)
                 else if (functions.containsKey(expression.name)) functionType(functions.getValue(expression.name))
-                else dotImportedFmtFunctionType(expression.name)?.also {
-                    usedDotImportPaths += dotImportPaths.first { packageName(it) == "fmt" }
-                } ?: error("undefined: ${expression.name}")
+                else dotImportedIdentifierType(expression.name)?.also { usedDotImportPaths += it.first }?.second
+                    ?: error("undefined: ${expression.name}")
         }
         is LiteralExpression -> when (expression.token.kind) {
             TokenKind.INT -> untypedInt
-            TokenKind.CHAR -> untypedRune
+            TokenKind.CHAR -> {
+                if (decodeCharacterConstant(expression.token.lexeme) == null) error("invalid character literal")
+                untypedRune
+            }
             TokenKind.FLOAT -> untypedFloat
             TokenKind.IMAG -> untypedComplex
             TokenKind.STRING -> untypedString
@@ -1379,7 +1414,11 @@ class TypeChecker {
         if (expression.receiver is NameExpression && expression.receiver.name in packagePaths &&
             scope.getOrNull(expression.receiver.name) == null) {
             val path = importedPackagePath(expression.receiver.name)!!
-            return if (packageName(path) == "fmt") dotImportedFmtFunctionType(expression.field) ?: FunctionGoType(emptyList(), emptyList()) else error("unknown imported package")
+            return when (standardPackageName(path)) {
+                "fmt" -> dotImportedFmtFunctionType(expression.field) ?: error("undefined fmt identifier ${expression.field}")
+                "math" -> GoMathPackage.memberType(expression.field) ?: error("undefined math identifier ${expression.field}")
+                else -> error("unknown imported package ${expression.receiver.name}")
+            }
         }
         methodExpressionReceiver(expression.receiver, scope)?.let { receiverType ->
             val method = methodSet(receiverType)[expression.field] ?: error("undefined method ${expression.field} on $receiverType")
@@ -1545,7 +1584,16 @@ class TypeChecker {
         is QualifiedGoType -> type
         is PointerGoType -> PointerGoType(resolveLocalType(type.element, scope))
         is SliceGoType -> SliceGoType(resolveLocalType(type.element, scope))
-        is ArrayGoType -> ArrayGoType(type.length, resolveLocalType(type.element, scope))
+        is ArrayGoType -> {
+            val length = type.length?.let { expression ->
+                requireInteger(expressionType(expression, scope), "array length")
+                val value = constantInteger(expression, scope) ?: error("array length must be constant")
+                if (value.signum() < 0) error("array length must be non-negative")
+                requireIntegerConstantRepresentable(expression, intType, scope)
+                LiteralExpression(Token(TokenKind.INT, value.toString(), Position(0, 1, 1)))
+            }
+            ArrayGoType(length, resolveLocalType(type.element, scope))
+        }
         is MapGoType -> MapGoType(resolveLocalType(type.key, scope), resolveLocalType(type.value, scope))
         is ChannelGoType -> ChannelGoType(resolveLocalType(type.element, scope), type.direction)
         is StructGoType -> StructGoType(type.fields.map { field ->
@@ -1688,18 +1736,6 @@ class TypeChecker {
             if (!convertible(from, target.type)) error("cannot convert $from to ${target.type}")
             requireIntegerConstantRepresentable(call.arguments.single(), target.type, scope)
             return listOf(target.type)
-        }
-        if (target is SelectorExpression && target.receiver is NameExpression &&
-            target.receiver.name in packagePaths && scope.getOrNull(target.receiver.name) == null) {
-            val importedPath = importedPackagePath(target.receiver.name)!!
-            callArgumentTypes(call.arguments, call.expandLastArgument, scope)
-            return when {
-                packageName(importedPath) != "fmt" -> error("unknown imported package")
-                target.field in setOf("Print", "Println", "Printf", "Fprint", "Fprintln", "Fprintf") -> listOf(intType, NamedGoType("error"))
-                target.field.startsWith("S") -> listOf(stringType)
-                target.field == "Errorf" -> listOf(NamedGoType("error"))
-                else -> error("undefined fmt function ${target.field}")
-            }
         }
         val typeNameTarget = target.unparenthesized() as? NameExpression
         if (typeNameTarget != null && scope.getOrNull(typeNameTarget.name) == null) {
@@ -1998,20 +2034,31 @@ class TypeChecker {
             requireIntegerConstantRepresentable(shift.left, contextualType, scope)
             return
         }
-        val targetName = (underlying(target) as? NamedGoType)?.name ?: return
+        val checkedTarget = if (underlying(target) is InterfaceGoType) {
+            val sourceType = expressionType(expression, scope)
+            if (isUntyped(sourceType)) defaultType(sourceType) else target
+        } else target
+        val targetName = (underlying(checkedTarget) as? NamedGoType)?.name ?: return
         if (targetName in floatNames) {
             val value = constantRational(expression, scope) ?: return
             val converted = value.toDouble()
             if (!converted.isFinite() || targetName == "float32" && !converted.toFloat().isFinite())
-                error("constant overflows $target")
+                error("constant overflows $checkedTarget")
             return
         }
-        if (!isInteger(target)) return
+        if (targetName in complexNames) {
+            val value = constantComplex(expression, scope) ?: return
+            val components = listOf(value.real.toDouble(), value.imaginary.toDouble())
+            if (components.any { !it.isFinite() || targetName == "complex64" && !it.toFloat().isFinite() })
+                error("constant overflows $checkedTarget")
+            return
+        }
+        if (!isInteger(checkedTarget)) return
         val value = constantInteger(expression, scope) ?: run {
-            if (isConstantExpression(expression, scope)) error("constant is not representable as $target")
+            if (isConstantExpression(expression, scope)) error("constant is not representable as $checkedTarget")
             return
         }
-        val name = (underlying(target) as? NamedGoType)?.name ?: return
+        val name = (underlying(checkedTarget) as? NamedGoType)?.name ?: return
         val bits = when (name) {
             "int8", "uint8", "byte" -> 8
             "int16", "uint16" -> 16
@@ -2022,7 +2069,7 @@ class TypeChecker {
         val minimum = if (unsigned) BigInteger.ZERO else BigInteger.ONE.shiftLeft(bits - 1).negate()
         val maximum = if (unsigned) BigInteger.ONE.shiftLeft(bits).subtract(BigInteger.ONE)
             else BigInteger.ONE.shiftLeft(bits - 1).subtract(BigInteger.ONE)
-        if (value < minimum || value > maximum) error("constant $value overflows $target")
+        if (value < minimum || value > maximum) error("constant $value overflows $checkedTarget")
     }
 
     private fun assignable(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
@@ -2095,8 +2142,11 @@ class TypeChecker {
                     }
                 }
             }
-            is QualifiedGoType -> if (type.packageName !in packagePaths) error("unknown package ${type.packageName}")
-                else importedPackagePath(type.packageName)
+            is QualifiedGoType -> {
+                val path = importedPackagePath(type.packageName) ?: error("unknown package ${type.packageName}")
+                if (standardPackageName(path) == "fmt") error("undefined fmt type ${type.name}")
+                else error("unknown imported package ${type.packageName}")
+            }
             is PointerGoType -> validateType(type.element, active, true)
             is SliceGoType -> validateType(type.element, active, true)
             is ArrayGoType -> {
@@ -2133,7 +2183,13 @@ class TypeChecker {
         }
     }
 
-    private fun packageName(path: String): String = decodeGoStringLiteralBytes(path).toString(Charsets.UTF_8).substringAfterLast('/')
+    private fun standardPackageName(path: String): String? {
+        val decodedPath = runCatching { decodeGoStringLiteralBytes(path).toString(Charsets.UTF_8) }.getOrDefault(path)
+        return when (decodedPath) {
+        "fmt", "math" -> decodedPath
+        else -> null
+        }
+    }
     private fun functionType(function: FunctionDeclaration) = FunctionGoType(function.parameterTypes.mapIndexed { i, t ->
         ParameterSyntax(function.parameters.getOrNull(i), t, function.variadic && i == function.parameterTypes.lastIndex)
     }, function.resultTypes)
@@ -2268,7 +2324,10 @@ class TypeChecker {
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING
         )
         is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.isConstant(expression.name)
-            else expression.name in setOf("true", "false")
+            else expression.name in setOf("true", "false") || dotImportedConstantRational(expression.name) != null
+        is SelectorExpression -> expression.receiver is NameExpression &&
+            packagePaths[expression.receiver.name]?.let { standardPackageName(it) == "math" } == true &&
+            GoMathPackage.constant(expression.field) != null
         is ParenthesizedExpression -> isConstantExpression(expression.expression, scope)
         is UnaryExpression -> expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR) &&
             isConstantExpression(expression.operand, scope)
@@ -2293,7 +2352,15 @@ class TypeChecker {
     }
 
     private fun constantRational(expression: Expression, scope: Scope = globals): GoRational? = when (expression) {
-        is NameExpression -> scope.constantRational(expression.name)
+        is NameExpression -> scope.constantRational(expression.name) ?: if (scope.getOrNull(expression.name) == null)
+            dotImportedConstantRational(expression.name) else null
+        is SelectorExpression -> {
+            val alias = (expression.receiver as? NameExpression)?.name
+            val path = alias?.let(::importedPackagePath)
+            if (path != null && standardPackageName(path) == "math")
+                GoMathPackage.constant(expression.field)?.let(GoRational::decimal)
+            else null
+        }
         is LiteralExpression -> when (expression.token.kind) {
             TokenKind.INT -> parseIntegerConstant(expression.token.lexeme)?.let(GoRational::of)
             TokenKind.CHAR -> decodeCharacterConstant(expression.token.lexeme)?.let(GoRational::of)
@@ -2336,6 +2403,10 @@ class TypeChecker {
             else constantRational(expression.arguments.single(), scope)
         }
         else -> null
+    }
+
+    private fun dotImportedConstantRational(name: String): GoRational? = dotImportPaths.firstNotNullOfOrNull { path ->
+        if (standardPackageName(path) == "math") GoMathPackage.constant(name)?.let(GoRational::decimal) else null
     }
 
     private fun constantInteger(expression: Expression, scope: Scope = globals): BigInteger? {
@@ -2512,31 +2583,8 @@ class TypeChecker {
     }.getOrNull()
 
     private fun decodeCharacterConstant(text: String): BigInteger? = runCatching {
-        BigInteger(characterCodePoint(text).toString())
+        BigInteger(decodeGoCharacterLiteral(text).toString())
     }.getOrNull()
-
-    private fun characterCodePoint(text: String): Int {
-        val body = text.substring(1, text.length - 1)
-        if (!body.startsWith("\\")) return body.codePointAt(0)
-        val escape = body.drop(1)
-        return when (escape.first()) {
-            'a' -> 7
-            'b' -> 8
-            'f' -> 12
-            'n' -> 10
-            'r' -> 13
-            't' -> 9
-            'v' -> 11
-            '\\' -> 92
-            '\'' -> 39
-            '"' -> 34
-            'x' -> escape.drop(1).toInt(16)
-            'u' -> escape.drop(1).toInt(16)
-            'U' -> escape.drop(1).toLong(16).toInt()
-            in '0'..'7' -> escape.take(3).toInt(8)
-            else -> error("invalid character escape")
-        }
-    }
 
     private fun arrayLengthSyntax(expression: Expression): Any = when (expression) {
         is LiteralExpression -> expression.token.kind to expression.token.lexeme

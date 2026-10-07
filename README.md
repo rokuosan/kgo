@@ -37,6 +37,10 @@ declarations.
 Goroutines use `kotlinx.coroutines`; channel operations suspend through Kotlin
 channels. The `fmt` calls are a small runtime shim, not the Go standard library;
 its `Print`, `Println`, `Fprint`, and `Fprintln` functions can also be dot-imported.
+The `math` import exposes the Go 1.0 constants and function signatures. JVM math
+operations handle the elementary functions, while Apache Commons Math provides
+error and gamma functions; Bessel Y functions use an in-runtime approximation.
+These package shims do not provide general imported-package resolution.
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
 an incomplete subset of the Go 1.0 type system.

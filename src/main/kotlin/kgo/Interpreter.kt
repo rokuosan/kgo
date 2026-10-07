@@ -22,7 +22,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.selectUnbiased
 import kotlinx.coroutines.yield
+import org.apache.commons.math3.special.BesselJ
+import org.apache.commons.math3.special.Erf
+import org.apache.commons.math3.special.Gamma
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.ln
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.cos
+import kotlin.math.sqrt
 
 open class RuntimeGoError(message: String) : RuntimeException(message)
 
@@ -82,7 +93,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
     private val nextLocalTypeIdentity = AtomicInteger()
     private val fmtAliases = mutableSetOf("fmt")
+    private val mathAliases = mutableSetOf("math")
     private var fmtDotImported = false
+    private var mathDotImported = false
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) {
@@ -95,14 +108,16 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     val importPath = decodeGoStringLiteralBytes(spec.path).toString(Charsets.UTF_8)
                     val alias = when (spec.alias) {
                         "." -> {
-                            if (importPath.substringAfterLast('/') == "fmt") fmtDotImported = true
+                            if (importPath == "fmt") fmtDotImported = true
+                            if (importPath == "math") mathDotImported = true
                             null
                         }
                         "_" -> null
                         null -> importPath.substringAfterLast('/')
                         else -> spec.alias
                     }
-                    if (alias != null && importPath.substringAfterLast('/') == "fmt") fmtAliases += alias
+                    if (alias != null && importPath == "fmt") fmtAliases += alias
+                    if (alias != null && importPath == "math") mathAliases += alias
                 }
         file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
                     if (function.receiver != null) methods[methodKey(function.receiver.type, function.name)] = function
@@ -259,7 +274,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         fun predeclare(statement: Statement) {
             when (statement) {
                 is DeclarationStatement -> statement.declarations.filterIsInstance<TypeDeclaration>()
-                    .forEach { defineLocalType(it, env) }
+                    .forEach { defineLocalType(it, env, resolveDefinition = false) }
                 is LabeledStatement -> predeclare(statement.statement)
                 else -> Unit
             }
@@ -315,14 +330,18 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             }
             is IncrementStatement -> {
                 val target = resolveTarget(statement.target, env)
-                val old = number(target.get(), "increment")
-                target.set(old + statement.delta)
+                val old = target.get()
+                val operator = if (statement.delta > 0) TokenKind.ADD else TokenKind.SUB
+                target.set(binary(old, operator, 1L))
             }
             is SendStatement -> {
                 val channel = evaluate(statement.channel, env)
                 val value = evaluate(statement.value, env)
                 when (channel) {
-                    is GoChannel -> channel.send(value)
+                    is GoChannel -> channel.send(
+                        if (underlying(channel.elementType) is InterfaceGoType)
+                            defaultRuneValue(value, statement.value, env) else value
+                    )
                     is GoNilValue -> if (underlying(channel.type) is ChannelGoType) awaitCancellation() else throw RuntimeGoError("send on non-channel")
                     else -> throw RuntimeGoError("send on non-channel")
                 }
@@ -331,14 +350,14 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 val call = statement.call.unparenthesized() as? CallExpression
                     ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = evaluateCallArguments(call, env)
+                val arguments = adaptCallArguments(call, target, evaluateCallArguments(call, env), env)
                 goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState(), environment = env) }
             }
             is DeferStatement -> {
                 val call = statement.call.unparenthesized() as? CallExpression
                     ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = evaluateCallArguments(call, env)
+                val arguments = adaptCallArguments(call, target, evaluateCallArguments(call, env), env)
                 env.defer { call(target, arguments, call.expandLastArgument, env.panicState, deferredCall = true, environment = env) }
             }
             is BranchStatement -> when (statement.kind) {
@@ -444,7 +463,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     }, (receiver.pointeeType?.let { underlying(it) as? ArrayGoType })?.element)
                 }
                 is GoMap -> {
-                    val mapKey = mapKey(key, receiver.keyType)
+                    val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
+                        defaultRuneValue(key, target.index, env) else key
+                    val mapKey = mapKey(mapIndex, receiver.keyType)
                     RuntimeTarget(
                         { if (receiver.values.containsKey(mapKey)) receiver.values[mapKey] else receiver.elementZero },
                         { receiver.values[mapKey] = copyForType(it, receiver.valueType) },
@@ -454,7 +475,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                 is GoNilValue -> {
                     val mapType = underlying(receiver.type) as? MapGoType
                         ?: throw RuntimeGoError("cannot assign through index")
-                    mapKey(key, mapType.key)
+                    val mapIndex = if (underlying(mapType.key) is InterfaceGoType)
+                        defaultRuneValue(key, target.index, env) else key
+                    mapKey(mapIndex, mapType.key)
                     RuntimeTarget({ zeroValue(mapType.value) }, { throw RuntimeGoError("assignment to entry in nil map") }, mapType.value)
                 }
                 else -> throw RuntimeGoError("cannot assign through index")
@@ -483,7 +506,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
                     val channelValue = evaluate(communication.channel, env)
                     val sendValue = evaluate(communication.value, env)
                     val channel = selectChannelOrNull(channelValue) ?: return@mapIndexedNotNull null
-                    SelectSend(caseIndex, channel, copyForType(sendValue, channel.elementType))
+                    val value = if (underlying(channel.elementType) is InterfaceGoType)
+                        defaultRuneValue(sendValue, communication.value, env) else sendValue
+                    SelectSend(caseIndex, channel, copyForType(value, channel.elementType))
                 }
                 is ExpressionStatement -> {
                     val receive = communication.expression.unparenthesized() as? UnaryExpression
@@ -568,7 +593,13 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         val tag = statement.tag?.let { copyValue(evaluate(it, scope)) } ?: if (statement.tag == null) true else null
         var selected = -1
         for ((clauseIndex, clause) in statement.clauses.withIndex()) {
-            if (clause.expressions?.any { goEqual(evaluate(it, scope), tag) } == true) {
+            if (clause.expressions?.any { expression ->
+                    val caseValue = copyValue(evaluate(expression, scope))
+                    val (comparedCase, comparedTag) = interfaceComparisonOperands(
+                        expression, caseValue, statement.tag, tag, scope
+                    )
+                    goEqual(comparedCase, comparedTag)
+                } == true) {
                 selected = clauseIndex
                 break
             }
@@ -853,6 +884,38 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         else -> null
     }
 
+    private fun isNilOperand(expression: Expression, env: Environment): Boolean = when (expression) {
+        is ParenthesizedExpression -> isNilOperand(expression.expression, env)
+        is NameExpression -> expression.name == "nil" && !env.contains(expression.name)
+        else -> false
+    }
+
+    private fun interfaceComparisonOperands(
+        leftExpression: Expression?,
+        leftValue: Any?,
+        rightExpression: Expression?,
+        rightValue: Any?,
+        env: Environment
+    ): Pair<Any?, Any?> {
+        fun operandType(expression: Expression?, value: Any?): GoTypeSyntax? =
+            expression?.let { staticExpressionType(it, env) }?.let { resolveRuntimeType(it, env) } ?: runtimeType(value)
+        var left = leftValue
+        var right = rightValue
+        val leftType = operandType(leftExpression, leftValue)
+        val rightType = operandType(rightExpression, rightValue)
+        val leftIsInterface = leftType?.let { underlying(it) is InterfaceGoType } == true
+        val rightIsInterface = rightType?.let { underlying(it) is InterfaceGoType } == true
+        val leftIsUntypedNil = leftType == null && leftExpression?.let { isNilOperand(it, env) } == true
+        val rightIsUntypedNil = rightType == null && rightExpression?.let { isNilOperand(it, env) } == true
+        if (!leftIsInterface && !leftIsUntypedNil && rightIsInterface) {
+            left = boxInterface(leftExpression?.let { defaultRuneValue(leftValue, it, env) } ?: leftValue, rightType)
+        }
+        if (!rightIsInterface && !rightIsUntypedNil && leftIsInterface) {
+            right = boxInterface(rightExpression?.let { defaultRuneValue(rightValue, it, env) } ?: rightValue, leftType)
+        }
+        return left to right
+    }
+
     private fun logicalResultType(
         leftExpression: Expression,
         leftValue: Any?,
@@ -982,8 +1045,7 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val name = pending.removeFirst()
             if (!visited.add(name)) continue
             val function = functions[name] ?: continue
-            val body = function.body ?: continue
-            val functionReferences = statementNames(body) - functionLocalNames(function)
+            val functionReferences = GoPackageDependencies.functionReferences(function)
             functionReferences.filter { it !in references && it in functions }.forEach(pending::addLast)
             references += functionReferences
         }
@@ -1007,81 +1069,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         is ElidedCompositeLiteral -> expression.elements.flatMapTo(linkedSetOf()) { element ->
             (element.key?.let(::expressionNames) ?: emptySet()) + expressionNames(element.value)
         }
-        is FunctionLiteralExpression -> statementNames(expression.body) - functionLocalNames(expression.parameters.mapNotNull { it.name }.toSet(), expression.body)
-    }
-
-    private fun statementNames(statement: Statement): Set<String> = when (statement) {
-        EmptyStatement -> emptySet()
-        is LabeledStatement -> statementNames(statement.statement)
-        is DeclarationStatement -> statement.declarations.flatMapTo(linkedSetOf()) { declaration -> when (declaration) {
-            is VariableDeclaration -> declaration.values.flatMap(::expressionNames)
-            is ConstantDeclaration -> declaration.values.flatMap(::expressionNames)
-            else -> emptyList()
-        } }
-        is BlockStatement -> statement.statements.flatMapTo(linkedSetOf(), ::statementNames)
-        is VariableStatement -> statement.values.flatMapTo(linkedSetOf(), ::expressionNames)
-        is ReturnStatement -> statement.values.flatMapTo(linkedSetOf(), ::expressionNames)
-        is ExpressionStatement -> expressionNames(statement.expression)
-        is SendStatement -> expressionNames(statement.channel) + expressionNames(statement.value)
-        is GoStatement -> expressionNames(statement.call)
-        is DeferStatement -> expressionNames(statement.call)
-        is BranchStatement -> emptySet()
-        is SelectStatement -> statement.cases.flatMapTo(linkedSetOf()) { clause ->
-            (clause.communication?.let(::statementNames) ?: emptySet()) + clause.statements.flatMap(::statementNames)
-        }
-        is SwitchStatement -> (statement.init?.let(::statementNames) ?: emptySet()) +
-            (statement.tag?.let(::expressionNames) ?: emptySet()) + statement.clauses.flatMap { clause ->
-                (clause.expressions?.flatMap(::expressionNames) ?: emptyList()) + clause.statements.flatMap(::statementNames)
-            }
-        is TypeSwitchStatement -> (statement.init?.let(::statementNames) ?: emptySet()) + expressionNames(statement.guard.expression) +
-            statement.clauses.flatMap { it.statements.flatMap(::statementNames) }
-        is AssignmentStatement -> statement.targets.flatMapTo(linkedSetOf(), ::expressionNames) + statement.values.flatMap(::expressionNames)
-        is IncrementStatement -> expressionNames(statement.target)
-        is IfStatement -> (statement.init?.let(::statementNames) ?: emptySet()) + expressionNames(statement.condition) +
-            statementNames(statement.thenBranch) + (statement.elseBranch?.let(::statementNames) ?: emptySet())
-        is ForStatement -> (statement.init?.let(::statementNames) ?: emptySet()) +
-            (statement.condition?.let(::expressionNames) ?: emptySet()) + (statement.post?.let(::statementNames) ?: emptySet()) +
-            (statement.rangeClause?.let { expressionNames(it.expression) + it.targets.flatMap(::expressionNames) } ?: emptySet()) + statementNames(statement.body)
-    }
-
-    private fun functionLocalNames(function: FunctionDeclaration): Set<String> =
-        functionLocalNames(function.parameters.filterNotNull().toSet() + listOfNotNull(function.receiver?.name), function.body)
-
-    private fun functionLocalNames(initial: Set<String>, body: BlockStatement?): Set<String> {
-        if (body == null) return initial
-        val names = initial.toMutableSet()
-        fun collect(statement: Statement) {
-            when (statement) {
-                is LabeledStatement -> collect(statement.statement)
-                is DeclarationStatement -> statement.declarations.forEach { declaration -> when (declaration) {
-                    is VariableDeclaration -> names += declaration.names
-                    is ConstantDeclaration -> names += declaration.names
-                    is TypeDeclaration -> names += declaration.name
-                    else -> Unit
-                } }
-                is VariableStatement -> names += statement.names
-                is AssignmentStatement -> if (statement.operator == TokenKind.DEFINE)
-                    names += statement.targets.mapNotNull { (it as? NameExpression)?.name }
-                is BlockStatement -> statement.statements.forEach(::collect)
-                is IfStatement -> { statement.init?.let(::collect); collect(statement.thenBranch); statement.elseBranch?.let(::collect) }
-                is ForStatement -> {
-                    statement.rangeClause?.takeIf { it.operator == TokenKind.DEFINE }?.targets?.mapNotNullTo(names) { (it as? NameExpression)?.name }
-                    statement.init?.let(::collect); statement.post?.let(::collect); collect(statement.body)
-                }
-                is SwitchStatement -> { statement.init?.let(::collect); statement.clauses.forEach { it.statements.forEach(::collect) } }
-                is TypeSwitchStatement -> {
-                    statement.init?.let(::collect)
-                    statement.guard.name?.let(names::add)
-                    statement.clauses.forEach { it.statements.forEach(::collect) }
-                }
-                is SelectStatement -> statement.cases.forEach { clause ->
-                    clause.communication?.let(::collect); clause.statements.forEach(::collect)
-                }
-                else -> Unit
-            }
-        }
-        collect(body)
-        return names
+        is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
+            expression.parameters, expression.resultNames, expression.body
+        )
     }
 
     private suspend fun evaluateRhs(expressions: List<Expression>, arity: Int, env: Environment): List<Any?> {
@@ -1099,7 +1089,10 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val receiver = evaluate(index.receiver, env)
             val key = evaluate(index.index, env)
             if (receiver is GoMap) {
-                val mapKey = mapKey(key, receiver.keyType)
+                val keyType = receiver.keyType
+                val mapIndex = if (underlying(keyType) is InterfaceGoType)
+                    defaultRuneValue(key, index.index, env) else key
+                val mapKey = mapKey(mapIndex, keyType)
                 val found = receiver.values.containsKey(mapKey)
                 return listOf(MapLookupResult(if (found) receiver.values[mapKey] else receiver.elementZero, found))
             }
@@ -1120,6 +1113,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 ?: when {
                     fmtDotImported && expression.name in setOf("Print", "Println", "Fprint", "Fprintln") ->
                         BuiltinValue(expression.name, dotImportedFmtFunctionType(expression.name))
+                    mathDotImported && expression.name in GoMathPackage.exportedNames -> evaluateMathPackageMember(expression.name)
                     else -> when (expression.name) {
                     "true" -> true
                     "false" -> false
@@ -1154,7 +1148,17 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     else -> booleanValue(evaluate(expression.right, env), expression.operator.name)
                 }
                 logicalResultType(expression.left, left, expression.right, env)?.let { GoBoolean(result, it) } ?: result
-            } else binary(left, expression.operator, copyValue(evaluate(expression.right, env)))
+            } else {
+                val right = copyValue(evaluate(expression.right, env))
+                if (expression.operator == TokenKind.EQL || expression.operator == TokenKind.NEQ) {
+                    val (comparedLeft, comparedRight) = interfaceComparisonOperands(
+                        expression.left, left, expression.right, right, env
+                    )
+                    binary(comparedLeft, expression.operator, comparedRight)
+                } else {
+                    binary(left, expression.operator, right)
+                }
+            }
         }
         is SelectorExpression -> {
             val methodReceiverType = methodExpressionReceiver(expression.receiver, env)
@@ -1166,8 +1170,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     expression.field,
                     FunctionGoType(listOf(ParameterSyntax(null, methodReceiverType)) + method.parameters, method.results)
                 )
-            } else if (expression.receiver is NameExpression && expression.receiver.name in fmtAliases &&
-                !env.contains(expression.receiver.name)) BuiltinValue(expression.field)
+            } else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+                expression.receiver.name in fmtAliases) BuiltinValue(expression.field)
+            else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+                expression.receiver.name in mathAliases) evaluateMathPackageMember(expression.field)
             else {
                 val receiver = evaluate(expression.receiver, env)
                 if (receiver is GoPointer && receiver.isNil) {
@@ -1194,7 +1200,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
         }
         is CallExpression -> call(expression, env)
-        is IndexExpression -> index(evaluate(expression.receiver, env), evaluate(expression.index, env))
+        is IndexExpression -> index(
+            evaluate(expression.receiver, env), evaluate(expression.index, env), expression.index, env
+        )
         is SliceExpression -> slice(evaluate(expression.receiver, env), expression.low?.let { evaluate(it, env) },
             expression.high?.let { evaluate(it, env) })
         is TypeAssertionExpression -> {
@@ -1363,19 +1371,59 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         val target = evaluate(call.function, env)
         val rawArgs = evaluateCallArguments(call, env)
+        val args = adaptCallArguments(call, target, rawArgs, env)
+        return call(target, args, call.expandLastArgument, env.panicState, environment = env)
+    }
+
+    private fun adaptCallArguments(
+        call: CallExpression,
+        target: Any?,
+        rawArgs: List<Any?>,
+        env: Environment
+    ): List<Any?> {
         val parameterTypes = when (target) {
             is FunctionValue -> target.function.parameterTypes
             is MethodValue -> target.function.parameterTypes
             is MethodExpressionValue -> (target.type as? FunctionGoType)?.parameters?.map { it.type }.orEmpty()
             else -> emptyList()
         }
-        val args = rawArgs.mapIndexed { index, value ->
-            val declaredType = parameterTypes.getOrNull(index)
-                ?: parameterTypes.lastOrNull()?.let { if (target is FunctionValue && target.function.variadic) (it as? SliceGoType)?.element else null }
-            if (declaredType != null && underlying(declaredType) is InterfaceGoType)
-                defaultRuneValue(value, call.arguments.getOrNull(index), env) else value
+        val variadicParameterIndex = when (target) {
+            is FunctionValue -> target.function.parameterTypes.lastIndex.takeIf { target.function.variadic }
+            is MethodValue -> target.function.parameterTypes.lastIndex.takeIf { target.function.variadic }
+            is MethodExpressionValue -> (target.type as? FunctionGoType)?.parameters?.let { parameters ->
+                parameters.lastIndex.takeIf { parameters[it].variadic }
+            }
+            else -> null
         }
-        return call(target, args, call.expandLastArgument, env.panicState, environment = env)
+        val variadicElementType = variadicParameterIndex?.let { index ->
+            (parameterTypes.getOrNull(index) as? SliceGoType)?.element
+        }
+        val appendElementType = if (target == BuiltinValue("append") && !call.expandLastArgument) {
+            call.arguments.firstOrNull()?.let { staticExpressionType(it, env) }?.let(::underlying)
+                .let { it as? SliceGoType }?.element
+        } else null
+        val deleteKeyType = if (target == BuiltinValue("delete")) {
+            call.arguments.firstOrNull()?.let { staticExpressionType(it, env) }?.let(::underlying)
+                .let { it as? MapGoType }?.key
+        } else null
+        return rawArgs.mapIndexed { index, value ->
+            val declaredType = when {
+                !call.expandLastArgument && variadicParameterIndex != null && index >= variadicParameterIndex ->
+                    variadicElementType
+                else -> parameterTypes.getOrNull(index)
+            }
+            when {
+                declaredType != null && underlying(declaredType) is InterfaceGoType ->
+                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                target == BuiltinValue("panic") && index == 0 ->
+                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                index > 0 && appendElementType?.let { underlying(it) is InterfaceGoType } == true ->
+                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                index == 1 && deleteKeyType?.let { underlying(it) is InterfaceGoType } == true ->
+                    defaultRuneValue(value, call.arguments.getOrNull(index), env)
+                else -> value
+            }
+        }
     }
 
     private suspend fun evaluateCallArguments(call: CallExpression, env: Environment): List<Any?> {
@@ -1471,7 +1519,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     panicState.activePanic = null
                     return when (val value = activePanic.value) {
                         null, is GoInterfaceValue -> value
-                        else -> runtimeType(value)?.let { GoInterfaceValue(it, value) } ?: value
+                        else -> runtimeType(value)?.let { GoInterfaceValue(canonicalAliasType(it), value) } ?: value
                     }
                 }
                 "complex" -> {
@@ -1550,6 +1598,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     output(rendered)
                     return GoMultiValue(listOf(GoInteger(rendered.toByteArray(Charsets.UTF_8).size.toLong(), NamedGoType("int")), null))
                 }
+                else -> if (target.name.startsWith("math.")) return mathCall(target.name.removePrefix("math."), args)
             }
             is TypeValue -> return convert(target.type, args.singleOrNull() ?: throw RuntimeGoError("conversion requires one argument"))
         }
@@ -1646,7 +1695,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private suspend fun evaluateCompositeValue(expression: Expression, type: GoTypeSyntax, env: Environment): Any? = when {
-        expression !is ElidedCompositeLiteral -> evaluate(expression, env)
+        expression !is ElidedCompositeLiteral -> {
+            val value = evaluate(expression, env)
+            if (underlying(type) is InterfaceGoType) defaultRuneValue(value, expression, env) else value
+        }
         underlying(type) is PointerGoType -> {
             val pointerType = underlying(type) as PointerGoType
             GoPointer.cell(composite(CompositeLiteral(pointerType.element, expression.elements), env), pointerType.element)
@@ -1669,7 +1721,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is QualifiedGoType -> type
         is PointerGoType -> PointerGoType(resolveRuntimeType(type.element, env))
         is SliceGoType -> SliceGoType(resolveRuntimeType(type.element, env))
-        is ArrayGoType -> ArrayGoType(type.length, resolveRuntimeType(type.element, env))
+        is ArrayGoType -> {
+            val length = type.length?.let { expression ->
+                val value = integerLiteral(expression, env)
+                if (value.signum() < 0) throw RuntimeGoError("negative array length")
+                LiteralExpression(Token(TokenKind.INT, value.toString(), Position(0, 1, 1)))
+            }
+            ArrayGoType(length, resolveRuntimeType(type.element, env))
+        }
         is MapGoType -> MapGoType(resolveRuntimeType(type.key, env), resolveRuntimeType(type.value, env))
         is ChannelGoType -> ChannelGoType(resolveRuntimeType(type.element, env), type.direction)
         is StructGoType -> StructGoType(type.fields.map { field ->
@@ -1690,7 +1749,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         )
     }
 
-    private fun defineLocalType(declaration: TypeDeclaration, env: Environment) {
+    private fun defineLocalType(declaration: TypeDeclaration, env: Environment, resolveDefinition: Boolean = true) {
         val identity = synchronized(localTypeIdentities) {
             localTypeIdentities[declaration] ?: "<local:${nextLocalTypeIdentity.incrementAndGet()}:${declaration.name}>".also {
                 localTypeIdentities[declaration] = it
@@ -1698,12 +1757,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         val namedType = NamedGoType(identity)
         env.defineType(declaration.name, namedType)
-        typeDefinitions.putIfAbsent(identity, resolveRuntimeType(declaration.type, env))
+        if (resolveDefinition) typeDefinitions[identity] = resolveRuntimeType(declaration.type, env)
     }
 
     private fun boxInterface(value: Any?, targetType: GoTypeSyntax): Any? {
         if ((underlying(targetType) as? InterfaceGoType) == null || value == null || value is GoInterfaceValue) return value
-        val dynamicType = runtimeType(value) ?: return value
+        val dynamicType = canonicalAliasType(runtimeType(value) ?: return value)
         return GoInterfaceValue(dynamicType, value)
     }
 
@@ -1748,6 +1807,254 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             "Fprint", "Fprintln" -> FunctionGoType(listOf(writer, variadic), listOf(NamedGoType("int"), NamedGoType("error")))
             else -> throw RuntimeGoError("undefined fmt function $name")
         }
+    }
+
+    private fun evaluateMathPackageMember(name: String): Any? = when {
+        GoMathPackage.constant(name) != null -> GoRational.decimal(GoMathPackage.constant(name)!!)
+        GoMathPackage.functionType(name) != null -> BuiltinValue("math.$name", GoMathPackage.functionType(name))
+        else -> throw RuntimeGoError("undefined math identifier $name")
+    }
+
+    private fun mathCall(name: String, args: List<Any?>): Any? {
+        fun count(expected: Int) {
+            if (args.size != expected) throw RuntimeGoError("math.$name expects $expected argument(s)")
+        }
+        fun x() = real(args[0])
+        fun y() = real(args[1])
+        fun unary(operation: (Double) -> Double): Any { count(1); return operation(x()) }
+        fun binary(operation: (Double, Double) -> Double): Any { count(2); return operation(x(), y()) }
+        return when (name) {
+            "Abs" -> unary(Math::abs)
+            "Acos" -> unary(Math::acos)
+            "Acosh" -> unary { value ->
+                when {
+                    value < 1.0 -> Double.NaN
+                    value < 2.0 -> {
+                        val offset = value - 1.0
+                        Math.log1p(offset + Math.sqrt(offset * (offset + 2.0)))
+                    }
+                    else -> Math.log(value) + Math.log1p(Math.sqrt(1.0 - 1.0 / (value * value)))
+                }
+            }
+            "Asin" -> unary(Math::asin)
+            "Asinh" -> unary { value ->
+                val magnitude = abs(value)
+                val result = if (magnitude < 1.0) Math.log(magnitude + Math.hypot(magnitude, 1.0))
+                    else Math.log(magnitude) + Math.log1p(Math.sqrt(1.0 + 1.0 / (magnitude * magnitude)))
+                Math.copySign(result, value)
+            }
+            "Atan" -> unary(Math::atan)
+            "Atanh" -> unary { 0.5 * (Math.log1p(it) - Math.log1p(-it)) }
+            "Cbrt" -> unary(Math::cbrt)
+            "Ceil" -> unary(Math::ceil)
+            "Cos" -> unary(Math::cos)
+            "Cosh" -> unary(Math::cosh)
+            "Exp" -> unary(Math::exp)
+            "Exp2" -> unary { 2.0.pow(it) }
+            "Expm1" -> unary(Math::expm1)
+            "Erf" -> unary(Erf::erf)
+            "Erfc" -> unary(Erf::erfc)
+            "Floor" -> unary(Math::floor)
+            "Gamma" -> unary(Gamma::gamma)
+            "Log" -> unary(Math::log)
+            "Log10" -> unary(Math::log10)
+            "Log1p" -> unary(Math::log1p)
+            "Log2" -> unary { Math.log(it) / Math.log(2.0) }
+            "Logb" -> unary { value ->
+                when {
+                    value == 0.0 -> Double.NEGATIVE_INFINITY
+                    value.isInfinite() -> Double.POSITIVE_INFINITY
+                    value.isNaN() -> value
+                    else -> (mathCall("Ilogb", listOf(value)) as Long).toDouble()
+                }
+            }
+            "Sin" -> unary(Math::sin)
+            "Sinh" -> unary(Math::sinh)
+            "Sqrt" -> unary(Math::sqrt)
+            "Tan" -> unary(Math::tan)
+            "Tanh" -> unary(Math::tanh)
+            "Trunc" -> unary { if (it < 0.0) ceil(it) else floor(it) }
+            "Atan2" -> binary(Math::atan2)
+            "Copysign" -> binary(Math::copySign)
+            "Dim" -> binary { a, b -> Math.max(a - b, 0.0) }
+            "Hypot" -> binary(Math::hypot)
+            "J0" -> unary { besselJ(0L, it) }
+            "J1" -> unary { besselJ(1L, it) }
+            "Y0" -> unary { besselY(0, it) }
+            "Y1" -> unary { besselY(1, it) }
+            "Jn" -> { count(2); besselJ(number(args[0], "math.Jn order"), x()) }
+            "Yn" -> { count(2); besselY(number(args[0], "math.Yn order"), x()) }
+            "Max" -> binary(Math::max)
+            "Min" -> binary(Math::min)
+            "Mod" -> binary { a, b -> a % b }
+            "Pow" -> binary(Math::pow)
+            "Remainder" -> binary(Math::IEEEremainder)
+            "IsNaN" -> { count(1); java.lang.Double.isNaN(x()) }
+            "IsInf" -> {
+                count(2)
+                val value = x()
+                val sign = number(args[1], "math.IsInf sign")
+                java.lang.Double.isInfinite(value) && (sign == 0L || sign < 0L && value < 0.0 || sign > 0L && value > 0.0)
+            }
+            "Signbit" -> { count(1); java.lang.Double.doubleToRawLongBits(x()) < 0L }
+            "Inf" -> { count(1); if (number(args[0], "math.Inf sign") < 0L) Double.NEGATIVE_INFINITY else Double.POSITIVE_INFINITY }
+            "NaN" -> { count(0); Double.NaN }
+            "Sincos" -> {
+                count(1)
+                val value = x()
+                GoMultiValue(listOf(Math.sin(value), Math.cos(value)))
+            }
+            "Modf" -> {
+                count(1)
+                val value = x()
+                val integral = if (value < 0.0) ceil(value) else floor(value)
+                GoMultiValue(listOf(integral, value - integral))
+            }
+            "Frexp" -> {
+                count(1)
+                val value = x()
+                when {
+                    value == 0.0 || !value.isFinite() -> GoMultiValue(listOf(value, 0L))
+                    else -> {
+                        val scaled = if (abs(value) < java.lang.Double.MIN_NORMAL) value * 18014398509481984.0 else value
+                        val exponent = Math.getExponent(scaled) + 1 - if (scaled != value) 54 else 0
+                        GoMultiValue(listOf(Math.scalb(value, -exponent), exponent.toLong()))
+                    }
+                }
+            }
+            "Ldexp" -> { count(2); Math.scalb(x(), number(args[1], "math.Ldexp exponent").coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()) }
+            "Pow10" -> { count(1); 10.0.pow(number(args[0], "math.Pow10 exponent").toDouble()) }
+            "Ilogb" -> {
+                count(1)
+                val value = x()
+                when {
+                    value == 0.0 -> Int.MIN_VALUE.toLong()
+                    value.isInfinite() || value.isNaN() -> Int.MAX_VALUE.toLong()
+                    abs(value) < java.lang.Double.MIN_NORMAL -> {
+                        val significand = java.lang.Double.doubleToRawLongBits(abs(value)) and 0x000fffffffffffffL
+                        (63 - java.lang.Long.numberOfLeadingZeros(significand) - 1074).toLong()
+                    }
+                    else -> Math.getExponent(value).toLong()
+                }
+            }
+            "Nextafter" -> binary(Math::nextAfter)
+            "Lgamma" -> {
+                count(1)
+                val value = x()
+                val (logAbsGamma, sign) = when {
+                    value.isNaN() || value.isInfinite() -> value to 1L
+                    value == 0.0 -> Double.POSITIVE_INFINITY to 1L
+                    value > 0.0 -> Gamma.logGamma(value) to 1L
+                    value == floor(value) -> Double.POSITIVE_INFINITY to 1L
+                    else -> {
+                        val sine = sinPi(value)
+                        (Math.log(Math.PI) - Math.log(abs(sine)) - Gamma.logGamma(1.0 - value)) to
+                            if (sine < 0.0) -1L else 1L
+                    }
+                }
+                GoMultiValue(listOf(logAbsGamma, sign))
+            }
+            "Float32bits" -> {
+                count(1)
+                GoInteger(java.lang.Float.floatToRawIntBits(x().toFloat()).toLong() and 0xffffffffL, NamedGoType("uint32"))
+            }
+            "Float32frombits" -> {
+                count(1)
+                GoFloat(java.lang.Float.intBitsToFloat(number(args[0], "math.Float32frombits").toInt()).toDouble(), NamedGoType("float32"))
+            }
+            "Float64bits" -> { count(1); GoInteger(java.lang.Double.doubleToRawLongBits(x()), NamedGoType("uint64")) }
+            "Float64frombits" -> {
+                count(1)
+                val bits = when (val value = args[0]) {
+                    is GoInteger -> value.value
+                    is Long -> value
+                    is BigInteger -> value.toLong()
+                    else -> throw RuntimeGoError("math.Float64frombits requires uint64")
+                }
+                java.lang.Double.longBitsToDouble(bits)
+            }
+            else -> throw RuntimeGoError("undefined math function $name")
+        }
+    }
+
+    private fun besselJ(order: Long, x: Double): Double {
+        if (x.isNaN() || x.isInfinite()) return if (x.isNaN()) x else 0.0
+        if (order == Long.MIN_VALUE) return 0.0
+        val absoluteOrder = abs(order)
+        val value = BesselJ.value(absoluteOrder.toDouble(), abs(x))
+        val odd = (absoluteOrder and 1L) != 0L
+        val negativeSign = (order < 0L && odd) xor (x < 0.0 && odd)
+        return if (negativeSign) -value else value
+    }
+
+    private fun sinPi(value: Double): Double {
+        if (!value.isFinite() || value == 0.0 || abs(value) >= 9_007_199_254_740_992.0) return 0.0
+        val integerPart = floor(value)
+        val fraction = value - integerPart
+        if (fraction == 0.0) return 0.0
+        val reducedFraction = if (fraction > 0.5) 1.0 - fraction else fraction
+        val positiveSine = sin(Math.PI * reducedFraction)
+        val parity = integerPart.toLong() and 1L
+        return if (parity == 0L) positiveSine else -positiveSine
+    }
+
+    private fun besselY(order: Long, x: Double): Double {
+        if (x.isNaN()) return x
+        if (x < 0.0) return Double.NaN
+        if (x == 0.0) return Double.NEGATIVE_INFINITY
+        if (x.isInfinite()) return 0.0
+        if (order == Long.MIN_VALUE) return Double.NaN
+        var n = abs(order)
+        var previous = besselYBase(0, x)
+        if (n == 0L) return previous
+        var current = besselYBase(1, x)
+        var i = 1L
+        while (i < n) {
+            val next = 2.0 * i / x * current - previous
+            previous = current
+            current = next
+            i++
+        }
+        return if (order < 0L && (n and 1L) != 0L) -current else current
+    }
+
+    private fun besselYBase(order: Int, x: Double): Double {
+        if (x > 12.0) {
+            val mu = 4.0 * order * order
+            val coefficients = DoubleArray(13)
+            coefficients[0] = 1.0
+            for (k in 1 until coefficients.size) {
+                val odd = 2.0 * k - 1.0
+                coefficients[k] = coefficients[k - 1] * (mu - odd * odd) / (k * 8.0 * x)
+            }
+            var p = 0.0
+            var q = 0.0
+            for (k in coefficients.indices.reversed()) {
+                if (k % 2 == 0) p += (if ((k / 2) % 2 == 0) 1.0 else -1.0) * coefficients[k]
+                else q += (if (((k - 1) / 2) % 2 == 0) 1.0 else -1.0) * coefficients[k]
+            }
+            val phase = x - order * Math.PI / 2.0 - Math.PI / 4.0
+            return sqrt(2.0 / (Math.PI * x)) * (sin(phase) * p + cos(phase) * q)
+        }
+        val z = x * x / 4.0
+        var term = 1.0
+        var harmonic = 0.0
+        var sum = 0.0
+        var derivativeSum = 0.0
+        for (k in 1..160) {
+            term *= -z / (k.toDouble() * k)
+            harmonic += 1.0 / k
+            val harmonicTerm = -harmonic * term
+            sum += harmonicTerm
+            derivativeSum += (2.0 * k / x) * harmonicTerm
+            if (abs(term) < 1e-18 && abs(harmonicTerm) < 1e-18) break
+        }
+        val j0 = BesselJ.value(0.0, x)
+        val j1 = BesselJ.value(1.0, x)
+        val logTerm = ln(x / 2.0) + 0.5772156649015328606
+        val y0 = 2.0 / Math.PI * (logTerm * j0 + sum)
+        if (order == 0) return y0
+        return 2.0 / Math.PI * (logTerm * j1 - j0 / x - derivativeSum)
     }
 
     private fun assertType(value: Any?, target: GoTypeSyntax): GoAssertionResult {
@@ -1912,7 +2219,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         return boxInterface(copied, type)
     }
 
-    private fun index(receiver: Any?, rawIndex: Any?): Any? {
+    private fun index(
+        receiver: Any?,
+        rawIndex: Any?,
+        indexExpression: Expression? = null,
+        env: Environment? = null
+    ): Any? {
         return when (receiver) {
             is GoSlice -> receiver.get(number(rawIndex, "index").toInt())
             is GoArray -> arrayElement(receiver, rawIndex)
@@ -1920,9 +2232,17 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
                 arrayElement(array, rawIndex)
             }
-            is GoMap -> mapKey(rawIndex, receiver.keyType).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
-            is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { zeroValue(it.value) }
-                ?: throw RuntimeGoError("cannot index this value")
+            is GoMap -> {
+                val key = if (underlying(receiver.keyType) is InterfaceGoType && indexExpression != null && env != null)
+                    defaultRuneValue(rawIndex, indexExpression, env) else rawIndex
+                mapKey(key, receiver.keyType).let { if (receiver.values.containsKey(it)) receiver.values[it] else receiver.elementZero }
+            }
+            is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { mapType ->
+                val key = if (underlying(mapType.key) is InterfaceGoType && indexExpression != null && env != null)
+                    defaultRuneValue(rawIndex, indexExpression, env) else rawIndex
+                mapKey(key, mapType.key)
+                zeroValue(mapType.value)
+            } ?: throw RuntimeGoError("cannot index this value")
             is GoStruct -> {
                 val field = rawIndex as? String ?: throw RuntimeGoError("struct field must be a name")
                 if (receiver.fields.containsKey(field)) receiver.fields[field] else throw RuntimeGoError("unknown struct field: $field")
@@ -2194,7 +2514,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         TokenKind.INT -> integer(token.lexeme)
         TokenKind.FLOAT -> runCatching { GoRational.decimal(token.lexeme) }.getOrElse { throw RuntimeGoError("invalid float ${token.lexeme}") }
         TokenKind.IMAG -> GoExactComplex(GoRational.ZERO, imaginaryPart(token.lexeme.removeSuffix("i")))
-        TokenKind.CHAR -> BigInteger.valueOf(decodeQuoted(token.lexeme, '\'').codePointAt(0).toLong())
+        TokenKind.CHAR -> BigInteger.valueOf(decodeGoCharacterLiteral(token.lexeme).toLong())
         TokenKind.STRING -> decodeString(token.lexeme)
         else -> throw RuntimeGoError("invalid literal")
     }
@@ -2387,7 +2707,72 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 else -> throw RuntimeGoError("invalid integer constant expression")
             }
         }
+        is CallExpression -> {
+            if (expression.arguments.size != 1 || expression.expandLastArgument)
+                throw RuntimeGoError("array length is not a constant integer expression")
+            val name = (expression.function as? NameExpression)?.name
+            if (name == "len" || name == "cap") {
+                if (env?.contains(name) == true || globals.contains(name))
+                    throw RuntimeGoError("array length is not a constant integer expression")
+                val operand = expression.arguments.single()
+                if (name == "len") constantStringByteLength(operand, env)?.let { return it }
+                if (containsCallOrReceive(operand, env ?: globals))
+                    throw RuntimeGoError("array length is not a constant integer expression")
+                constantArrayLength(operand, env ?: globals)
+                    ?: throw RuntimeGoError("array length is not a constant integer expression")
+            } else {
+                val scope = env ?: globals
+                val target = when (val function = expression.function) {
+                    is TypeExpression -> function.type
+                    is NameExpression -> {
+                        if (!scope.contains(function.name) && !globals.contains(function.name))
+                            scope.typeBinding(function.name) ?: if (function.name in builtinTypes || typeDefinitions.containsKey(function.name))
+                                NamedGoType(function.name) else null
+                        else null
+                    }
+                    else -> null
+                }?.let { resolveRuntimeType(it, scope) }
+                if ((target?.let(::underlying) as? NamedGoType)?.name !in integerTypeNames)
+                    throw RuntimeGoError("array length is not a constant integer expression")
+                integerLiteral(expression.arguments.single(), env)
+            }
+        }
         else -> throw RuntimeGoError("array length is not a constant integer expression")
+    }
+
+    private fun constantArrayLength(expression: Expression, env: Environment): BigInteger? {
+        arrayCompositeLiteral(expression, env)?.let { return BigInteger.valueOf(inferredArrayLiteralLength(it, env).toLong()) }
+        val operandType = staticExpressionType(expression, env)?.let { resolveRuntimeType(it, env) }
+        val arrayType = when (val actual = operandType?.let(::underlying)) {
+            is ArrayGoType -> actual
+            is PointerGoType -> underlying(actual.element) as? ArrayGoType
+            else -> null
+        } ?: return null
+        return arrayType.length?.let { integerLiteral(it, env) }
+    }
+
+    private fun constantStringByteLength(expression: Expression, env: Environment?): BigInteger? = when (expression) {
+        is LiteralExpression -> if (expression.token.kind == TokenKind.STRING)
+            BigInteger.valueOf(decodeGoStringLiteralBytes(expression.token.lexeme).size.toLong()) else null
+        is NameExpression -> (env?.getOrNull(expression.name) ?: globals.getOrNull(expression.name))
+            ?.let { (it as? GoString)?.bytes?.size?.let { size -> BigInteger.valueOf(size.toLong()) } }
+        is ParenthesizedExpression -> constantStringByteLength(expression.expression, env)
+        is BinaryExpression -> if (expression.operator == TokenKind.ADD) {
+            val left = constantStringByteLength(expression.left, env)
+            val right = constantStringByteLength(expression.right, env)
+            if (left != null && right != null) left + right else null
+        } else null
+        is CallExpression -> if (expression.arguments.size == 1 && !expression.expandLastArgument &&
+            expression.function == NameExpression("string")) {
+            constantStringByteLength(expression.arguments.single(), env) ?: runCatching {
+                val value = integerLiteral(expression.arguments.single(), env)
+                val codePoint = runCatching { value.intValueExact() }.getOrNull() ?: -1
+                val rune = if (codePoint < 0 || codePoint > Character.MAX_CODE_POINT || codePoint in 0xd800..0xdfff)
+                    0xfffd else codePoint
+                BigInteger.valueOf(String(Character.toChars(rune)).toByteArray(Charsets.UTF_8).size.toLong())
+            }.getOrNull()
+        } else null
+        else -> null
     }
 
     private fun materializeExactConstant(value: Any?, typedOperand: Any?): Any? = when (value) {
@@ -2607,8 +2992,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         if (left is GoInterfaceValue || right is GoInterfaceValue) {
             if (left == null || right == null) return left == null && right == null
-            val leftType = (left as? GoInterfaceValue)?.dynamicType ?: runtimeType(left)
-            val rightType = (right as? GoInterfaceValue)?.dynamicType ?: runtimeType(right)
+            val leftType = ((left as? GoInterfaceValue)?.dynamicType ?: runtimeType(left))?.let(::canonicalAliasType)
+            val rightType = ((right as? GoInterfaceValue)?.dynamicType ?: runtimeType(right))?.let(::canonicalAliasType)
             if (leftType != rightType) return false
             val leftInterface = left as? GoInterfaceValue
             val rightInterface = right as? GoInterfaceValue
@@ -2683,6 +3068,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoRational -> value.hashCode()
         is GoExactComplex -> 31 * value.real.hashCode() + value.imaginary.hashCode()
         is GoBoolean -> value.value.hashCode()
+        is GoInteger -> integerValue(value, "hash").hashCode()
         is Double -> if (value == 0.0) 0 else value.hashCode()
         is GoFloat -> if (value.value == 0.0) 0 else value.value.hashCode()
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
@@ -2691,7 +3077,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             .fold(0) { hash, (name, element) ->
             31 * (31 * hash + name.hashCode()) + goHash(element)
         }
-        is GoInterfaceValue -> 31 * value.dynamicType.hashCode() + goHash(value.value)
+        is GoInterfaceValue -> 31 * canonicalAliasType(value.dynamicType).hashCode() + goHash(value.value)
         else -> value.hashCode()
     }
 
@@ -2862,36 +3248,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
         }
         return 0xfffd to 1
-    }
-
-    private fun decodeQuoted(text: String, quote: Char): String {
-        if (text.length < 2 || text.first() != quote || text.last() != quote) throw RuntimeGoError("invalid quoted literal")
-        val body = text.substring(1, text.length - 1)
-        if (quote == '`') return body.replace("\r", "")
-        val out = StringBuilder()
-        var i = 0
-        while (i < body.length) {
-            val c = body[i++]
-            if (c != '\\') { out.append(c); continue }
-            if (i >= body.length) throw RuntimeGoError("unfinished escape")
-            when (val escaped = body[i++]) {
-                'a' -> out.append('\u0007'); 'b' -> out.append('\b'); 'f' -> out.append('\u000c'); 'n' -> out.append('\n')
-                'r' -> out.append('\r'); 't' -> out.append('\t'); 'v' -> out.append('\u000b'); '\\' -> out.append('\\'); '"', '\'' -> out.append(escaped)
-                'x', 'u', 'U' -> {
-                    val digits = when (escaped) { 'x' -> 2; 'u' -> 4; else -> 8 }
-                    if (i + digits > body.length) throw RuntimeGoError("short unicode escape")
-                    val cp = body.substring(i, i + digits).toLongOrNull(16)?.toInt() ?: throw RuntimeGoError("invalid unicode escape")
-                    out.appendCodePoint(cp); i += digits
-                }
-                in '0'..'7' -> {
-                    val rest = body.getOrNull(i)?.takeIf { it in '0'..'7' }?.toString() ?: throw RuntimeGoError("short octal escape")
-                    val third = body.getOrNull(i + 1)?.takeIf { it in '0'..'7' }?.toString() ?: throw RuntimeGoError("short octal escape")
-                    out.append(("$escaped$rest$third").toInt(8).toChar()); i += 2
-                }
-                else -> throw RuntimeGoError("unknown escape sequence \\$escaped")
-            }
-        }
-        return out.toString()
     }
 
     private inner class Environment(
