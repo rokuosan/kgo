@@ -17,7 +17,11 @@ internal data class ExportedConstant(
     val boolean: Boolean?,
     val complex: ConstantComplexValue?
 )
-private data class TypeMethod(val signature: FunctionGoType, val pointerReceiver: Boolean)
+private data class TypeMethod(
+    val signature: FunctionGoType,
+    val pointerReceiver: Boolean,
+    val declaration: FunctionDeclaration? = null
+)
 
 /** Static checks for the declaration and statement forms currently represented by the AST. */
 class TypeChecker(
@@ -39,6 +43,11 @@ class TypeChecker(
     private val nextLocalTypeIdentity = AtomicInteger()
     private val terminatingPanicCalls = Collections.newSetFromMap(IdentityHashMap<CallExpression, Boolean>())
     private val globals = Scope()
+    private val calledMethodsByFunction = IdentityHashMap<FunctionDeclaration, MutableSet<FunctionDeclaration>>()
+    private val calledMethodsByVariable = IdentityHashMap<VariableDeclaration, MutableSet<FunctionDeclaration>>()
+    private var dependencyFunction: FunctionDeclaration? = null
+    private var dependencyVariable: VariableDeclaration? = null
+    private var checkedVariableInitializationOrder: List<VariableDeclaration> = emptyList()
     private var resultTypes: List<GoTypeSyntax> = emptyList()
     private var resultNames: List<String?> = emptyList()
     private var functionLabels: Map<String, LabelInfo> = emptyMap()
@@ -187,10 +196,14 @@ class TypeChecker(
         declarations.forEach { (file, declaration) ->
             (declaration as? VariableDeclaration)?.let { variableFiles[it] = file }
         }
-        for (declaration in globalVariableInitializationOrder(globalVariables)) {
+        val initialVariableOrder = globalVariableInitializationOrder(globalVariables)
+        for (declaration in initialVariableOrder) {
             val sourceFile = variableFiles.getValue(declaration)
             withFileImports(sourceFile) {
-                val values = expressionTypes(declaration.values, declaration.names.size, globals)
+                val previousDependencyVariable = dependencyVariable
+                dependencyVariable = declaration
+                val values = try { expressionTypes(declaration.values, declaration.names.size, globals) }
+                finally { dependencyVariable = previousDependencyVariable }
                 if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
                     error("initializer count mismatch")
                 val declaredType = declaration.type?.let { resolveLocalType(it, globals) }
@@ -216,6 +229,7 @@ class TypeChecker(
         for ((sourceFile, declaration) in declarations) {
             if (declaration is FunctionDeclaration) withFileImports(sourceFile) { checkFunction(declaration) }
         }
+        checkedVariableInitializationOrder = globalVariableInitializationOrder(globalVariables)
         files.forEach { file ->
             val usedAliases = usedPackageAliasesByFile[file].orEmpty()
             val usedDotImports = usedDotImportsByFile[file].orEmpty()
@@ -307,6 +321,9 @@ class TypeChecker(
 
     internal fun runtimeFunctionTypes(): Map<FunctionDeclaration, FunctionGoType> =
         IdentityHashMap<FunctionDeclaration, FunctionGoType>().also { it.putAll(checkedFunctionTypes) }
+
+    internal fun runtimeVariableInitializationOrder(): List<VariableDeclaration> =
+        checkedVariableInitializationOrder.toList()
 
     internal fun exportedFunctionType(name: String, importPath: String? = null): FunctionGoType? =
         if (isExportedIdentifier(name)) functions[name]?.let(::functionType)
@@ -416,7 +433,7 @@ class TypeChecker(
         }.toMap()
         val dependencies = variables.map { declaration ->
             val references = declaration.values.flatMapTo(linkedSetOf(), ::referencedNames)
-            addFunctionDependencies(references)
+            addFunctionDependencies(references, calledMethodsByVariable[declaration].orEmpty())
             references.mapNotNull(ownerByName::get).distinct().sorted().toSet()
         }
         val state = IntArray(variables.size)
@@ -485,16 +502,21 @@ class TypeChecker(
         )
     }
 
-    private fun addFunctionDependencies(references: MutableSet<String>) {
-        val pending = ArrayDeque(references.filter { it in functions })
-        val visited = mutableSetOf<String>()
+    private fun addFunctionDependencies(
+        references: MutableSet<String>,
+        methodDependencies: Iterable<FunctionDeclaration> = emptyList()
+    ) {
+        val pending = ArrayDeque<FunctionDeclaration>()
+        references.mapNotNull(functions::get).forEach(pending::addLast)
+        methodDependencies.forEach(pending::addLast)
+        val visited = Collections.newSetFromMap(IdentityHashMap<FunctionDeclaration, Boolean>())
         while (pending.isNotEmpty()) {
-            val name = pending.removeFirst()
-            if (!visited.add(name)) continue
-            val function = functions[name] ?: continue
+            val function = pending.removeFirst()
+            if (!visited.add(function)) continue
             val functionReferences = GoPackageDependencies.functionReferences(function)
-            functionReferences.filter { it !in references && it in functions }.forEach(pending::addLast)
             references += functionReferences
+            functionReferences.mapNotNull(functions::get).forEach(pending::addLast)
+            calledMethodsByFunction[function].orEmpty().forEach(pending::addLast)
         }
     }
 
@@ -533,6 +555,8 @@ class TypeChecker(
         val previousUsedLabels = usedLabels
         val previousBlockPath = labelBlockPath
         val previousBlockIndices = blockStatementIndices
+        val previousDependencyFunction = dependencyFunction
+        dependencyFunction = function
         resultTypes = signature.results
         resultNames = names
         functionLabels = collectLabels(body)
@@ -553,6 +577,7 @@ class TypeChecker(
             usedLabels = previousUsedLabels
             labelBlockPath = previousBlockPath
             blockStatementIndices = previousBlockIndices
+            dependencyFunction = previousDependencyFunction
         }
     }
 
@@ -1658,6 +1683,7 @@ class TypeChecker(
         }
         methodExpressionReceiver(expression.receiver, scope)?.let { receiverType ->
             val method = methodSet(receiverType)[expression.field] ?: error("undefined method ${expression.field} on $receiverType")
+            methodExpressionDeclaration(receiverType, expression.field)?.let(::recordMethodDependency)
             return FunctionGoType(listOf(ParameterSyntax(null, receiverType)) + method.parameters, method.results)
         }
         val receiverType = expressionType(expression.receiver, scope)
@@ -1686,6 +1712,7 @@ class TypeChecker(
                         }
                         val method = methodType(node.type, expression.field)
                         if (method != null) {
+                            method.declaration?.let(::recordMethodDependency)
                             candidates += Candidate(method.signature, method.pointerReceiver && !node.pointer &&
                                 !isAddressable(expression.receiver, scope), isMethod = true)
                         }
@@ -1699,6 +1726,7 @@ class TypeChecker(
                     }
                     else -> methodBaseName(node.type)?.let { named ->
                         methods["$named.${expression.field}"]?.let { method ->
+                            recordMethodDependency(method)
                             val pointerReceiver = method.receiver?.type is PointerGoType
                             candidates += Candidate(
                                 functionType(method), pointerReceiver && !node.pointer &&
@@ -1768,11 +1796,30 @@ class TypeChecker(
             val imported = importedPackages[base.packageName] ?: return null
             val function = imported.methods["${base.name}.$name"] ?: return null
             return TypeMethod(externalizeType(imported.functionType(function), base.packageName) as FunctionGoType,
-                function.receiver?.type is PointerGoType)
+                function.receiver?.type is PointerGoType, function)
         }
         val key = "${namedType(type) ?: return null}.$name"
         val function = methods[key] ?: return null
-        return TypeMethod(functionType(function), function.receiver?.type is PointerGoType)
+        return TypeMethod(functionType(function), function.receiver?.type is PointerGoType, function)
+    }
+
+    private fun methodExpressionDeclaration(type: GoTypeSyntax, name: String): FunctionDeclaration? {
+        val base = methodBaseName(type) ?: return null
+        val pointer = type is PointerGoType
+        return methods.values.singleOrNull { function ->
+            val receiverType = function.receiver?.type ?: return@singleOrNull false
+            function.name == name && methodBaseName(receiverType) == base && (pointer || receiverType !is PointerGoType)
+        }
+    }
+
+    private fun recordMethodDependency(function: FunctionDeclaration) {
+        if (methods.values.none { it === function }) return
+        dependencyFunction?.let { owner ->
+            calledMethodsByFunction.getOrPut(owner) { Collections.newSetFromMap(IdentityHashMap()) }.add(function)
+        }
+        dependencyVariable?.let { owner ->
+            calledMethodsByVariable.getOrPut(owner) { Collections.newSetFromMap(IdentityHashMap()) }.add(function)
+        }
     }
 
     private fun requireAssignmentTarget(expression: Expression, scope: Scope, allowBlank: Boolean = true) {

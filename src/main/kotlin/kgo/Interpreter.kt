@@ -140,6 +140,7 @@ class Interpreter(
     private var exportedTypeNames: Set<String> = emptySet()
     private var packageShadowsIota = false
     private var packageIdentity: String? = null
+    private var packageVariableInitializationOrder: List<VariableDeclaration>? = null
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) = run(listOf(file), emptyList())
@@ -152,7 +153,9 @@ class Interpreter(
         rootTypeDefinitions: Map<String, GoTypeSyntax> = emptyMap(),
         importedTypeDefinitions: Map<String, Map<String, GoTypeSyntax>> = emptyMap(),
         rootFunctionTypes: Map<FunctionDeclaration, FunctionGoType> = emptyMap(),
-        importedFunctionTypes: Map<String, Map<FunctionDeclaration, FunctionGoType>> = emptyMap()
+        importedFunctionTypes: Map<String, Map<FunctionDeclaration, FunctionGoType>> = emptyMap(),
+        rootVariableInitializationOrder: List<VariableDeclaration>? = null,
+        importedVariableInitializationOrders: Map<String, List<VariableDeclaration>> = emptyMap()
     ) {
         if (files.isEmpty()) throw RuntimeGoError("no Go source files")
         val packageName = files.first().packageName
@@ -174,6 +177,7 @@ class Interpreter(
                     runtime.knownPackageNames = knownPackageNames
                     runtime.checkedTypeDefinitions = importedTypeDefinitions[sourcePackage.importPath].orEmpty()
                     runtime.checkedFunctionTypes = importedFunctionTypes[sourcePackage.importPath].orEmpty()
+                    runtime.packageVariableInitializationOrder = importedVariableInitializationOrders[sourcePackage.importPath]
                     runtime.preparePackage(sourcePackage.files)
                     runtime.initializePackage(sourcePackage.files)
                     runtimes[sourcePackage.importPath] = runtime
@@ -181,6 +185,7 @@ class Interpreter(
                 importedRuntimePackages = runtimes
                 checkedTypeDefinitions = rootTypeDefinitions
                 checkedFunctionTypes = rootFunctionTypes
+                packageVariableInitializationOrder = rootVariableInitializationOrder
                 preparePackage(files)
                 initializePackage(files)
                 val main = functions["main"] ?: throw RuntimeGoError("main function not found")
@@ -255,7 +260,9 @@ class Interpreter(
                 globals.imports = declarationImports[declaration] ?: RuntimeImports()
                 initializeConstant(declaration)
             }
-        orderPackageDeclarations(packageVariables, { it.names }, { it.values }, includeFunctionDependencies = true)
+        (packageVariableInitializationOrder ?: orderPackageDeclarations(
+            packageVariables, { it.names }, { it.values }, includeFunctionDependencies = true
+        ))
             .forEach { declaration ->
                 globals.imports = declarationImports[declaration] ?: RuntimeImports()
                 initialize(declaration.names, declaration.values, globals, declaration.type)

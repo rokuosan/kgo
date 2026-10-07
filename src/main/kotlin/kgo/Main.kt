@@ -49,7 +49,9 @@ fun main(args: Array<String>) {
                 rootChecker.runtimeTypeDefinitions(),
                 packageCheckers.mapValues { (_, checker) -> checker.runtimeTypeDefinitions() },
                 rootChecker.runtimeFunctionTypes(),
-                packageCheckers.mapValues { (_, checker) -> checker.runtimeFunctionTypes() }
+                packageCheckers.mapValues { (_, checker) -> checker.runtimeFunctionTypes() },
+                rootChecker.runtimeVariableInitializationOrder(),
+                packageCheckers.mapValues { (_, checker) -> checker.runtimeVariableInitializationOrder() }
             )
         }
     } catch (e: ScanError) {
