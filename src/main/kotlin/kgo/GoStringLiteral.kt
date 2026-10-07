@@ -39,7 +39,7 @@ internal fun decodeGoCharacterLiteral(text: String): Int {
             if (hex.length != digits || !hex.all(Char::isHexDigit))
                 throw RuntimeGoError("invalid Unicode character escape")
             val codePoint = hex.toLong(16).toInt()
-            if (codePoint !in 0..0x10ffff)
+            if (codePoint !in 0..0x10ffff || codePoint in 0xd800..0xdfff)
                 throw RuntimeGoError("invalid Unicode code point")
             codePoint
         }
@@ -84,6 +84,7 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
             'u', 'U' -> {
                 val digits = if (escaped == 'u') 4 else 8
                 val codePoint = body.substring(i, i + digits).toLong(16).toInt()
+                if (codePoint in 0xd800..0xdfff) throw RuntimeGoError("invalid Unicode code point")
                 appendCodePoint(codePoint)
                 i += digits
             }
