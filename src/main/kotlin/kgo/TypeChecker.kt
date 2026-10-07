@@ -1979,7 +1979,10 @@ class TypeChecker {
         from: GoTypeSyntax, to: GoTypeSyntax, context: String, expression: Expression? = null, scope: Scope = globals
     ) {
         val integralFloatConstant = constantIntegerAssignable(from, to, expression, scope)
-        if (!assignable(from, to) && !integralFloatConstant) error("cannot use $from as $to in $context")
+        val comparisonResultAssignable = (expression?.unparenthesized() as? BinaryExpression)?.operator in
+            setOf(TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ) && isBoolean(to)
+        if (!assignable(from, to) && !integralFloatConstant && !comparisonResultAssignable)
+            error("cannot use $from as $to in $context")
         expression?.let { requireIntegerConstantRepresentable(it, to, scope) }
     }
 
