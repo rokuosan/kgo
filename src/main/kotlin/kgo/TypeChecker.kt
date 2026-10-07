@@ -1007,6 +1007,7 @@ class TypeChecker(
         val switchScope = scope.child()
         statement.init?.let { checkStatement(it, switchScope) }
         val tagType = statement.tag?.let { expressionType(it, switchScope) }
+            ?.let { if (isUntyped(it)) defaultType(it) else it }
         if (tagType == nilType) error("switch expression cannot be nil")
         if (tagType != null && !isComparable(tagType)) error("switch expression must be comparable")
         var sawDefault = false
@@ -1029,7 +1030,7 @@ class TypeChecker(
                 val caseType = expressionType(case, caseScope)
                 if (caseType != nilType && !isComparable(caseType)) error("switch case expression must be comparable")
                 if (tagType != null) {
-                    if (!assignable(caseType, tagType) && !assignable(tagType, caseType))
+                    if (!assignable(caseType, tagType))
                         error("case type does not match switch expression")
                     requireIntegerConstantRepresentable(case, tagType, caseScope)
                 } else requireBoolean(caseType, "expressionless switch case")
