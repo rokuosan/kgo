@@ -604,15 +604,15 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
             val key = evaluate(target.index, env)
             when (receiver) {
                 is GoSlice -> {
-                    val index = number(key, "index").toInt()
+                    val index = collectionIndex(key, "index")
                     RuntimeTarget({ receiver.get(index) }, { receiver.set(index, it) }, receiver.elementType)
                 }
                 is GoArray -> {
-                    val index = number(key, "index").toInt()
+                    val index = collectionIndex(key, "index")
                     RuntimeTarget({ arrayElement(receiver, index.toLong()) }, { setArrayElement(receiver, index.toLong(), it) }, receiver.elementType)
                 }
                 is GoPointer -> {
-                    val index = number(key, "index").toInt()
+                    val index = collectionIndex(key, "index")
                     RuntimeTarget({
                         val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
                         arrayElement(array, index.toLong())
@@ -1572,7 +1572,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         is IndexExpression -> {
             val receiver = evaluate(expression.receiver, env)
-            val key = number(evaluate(expression.index, env), "index").toInt()
+            val key = collectionIndex(evaluate(expression.index, env), "index")
             when (receiver) {
                 is GoSlice -> receiver.pointerAt(key)
                 is GoArray -> receiver.pointerAt(key)
@@ -2732,7 +2732,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         env: Environment? = null
     ): Any? {
         return when (receiver) {
-            is GoSlice -> receiver.get(number(rawIndex, "index").toInt())
+            is GoSlice -> receiver.get(collectionIndex(rawIndex, "index"))
             is GoArray -> arrayElement(receiver, rawIndex)
             is GoPointer -> {
                 val array = receiver.get() as? GoArray ?: throw RuntimeGoError("index requires pointer to array")
@@ -2754,7 +2754,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (receiver.fields.containsKey(field)) receiver.fields[field] else throw RuntimeGoError("unknown struct field: $field")
             }
             is GoString -> {
-                val i = number(rawIndex, "index").toInt()
+                val i = collectionIndex(rawIndex, "index")
                 if (i !in receiver.bytes.indices) throw RuntimeGoError("string index out of range")
                 GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), NamedGoType("byte"))
             }
@@ -2763,13 +2763,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun arrayElement(array: GoArray, rawIndex: Any?): Any? {
-        val index = number(rawIndex, "index").toInt()
+        val index = collectionIndex(rawIndex, "index")
         if (index !in array.values.indices) throw RuntimeGoError("array index out of range")
         return array.values[index]
     }
 
     private fun setArrayElement(array: GoArray, rawIndex: Any?, value: Any?) {
-        val index = number(rawIndex, "index").toInt()
+        val index = collectionIndex(rawIndex, "index")
         if (index !in array.values.indices) throw RuntimeGoError("array index out of range")
         array.values[index] = copyForType(value, array.elementType)
     }
@@ -2782,24 +2782,24 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
 
     private fun slice(receiver: Any?, lowValue: Any?, highValue: Any?): Any? {
-        val low = lowValue?.let { number(it, "slice index").toInt() } ?: 0
+        val low = lowValue?.let { collectionIndex(it, "slice index") } ?: 0
         return when (receiver) {
             is GoSlice -> {
-                val high = highValue?.let { number(it, "slice index").toInt() } ?: receiver.length
+                val high = highValue?.let { collectionIndex(it, "slice index") } ?: receiver.length
                 receiver.subSlice(low, high, receiver.capacity)
             }
             is GoArray -> {
-                val high = highValue?.let { number(it, "slice index").toInt() } ?: receiver.values.size
+                val high = highValue?.let { collectionIndex(it, "slice index") } ?: receiver.values.size
                 sliceArray(receiver, low, high, receiver.values.size)
             }
             is GoPointer -> {
                 val array = receiver.get() as? GoArray ?: throw RuntimeGoError("slice requires pointer to array")
-                val high = highValue?.let { number(it, "slice index").toInt() } ?: array.values.size
+                val high = highValue?.let { collectionIndex(it, "slice index") } ?: array.values.size
                 sliceArray(array, low, high, array.values.size)
             }
             is GoString -> {
                 val bytes = receiver.bytes
-                val high = highValue?.let { number(it, "slice index").toInt() } ?: bytes.size
+                val high = highValue?.let { collectionIndex(it, "slice index") } ?: bytes.size
                 if (low < 0 || high < low || high > bytes.size) throw RuntimeGoError("string slice bounds out of range")
                 GoString(bytes.copyOfRange(low, high), receiver.type)
             }
@@ -3638,6 +3638,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is BigInteger -> try { value.longValueExact() }
             catch (_: ArithmeticException) { throw RuntimeGoError("integer out of range for $op") }
         else -> typeError(op, value)
+    }
+    private fun collectionIndex(value: Any?, op: String): Int {
+        val index = number(value, op)
+        if (index < Int.MIN_VALUE || index > Int.MAX_VALUE) throw RuntimeGoError("$op out of range")
+        return index.toInt()
     }
     private fun integerValue(value: Any?, op: String): BigInteger = when (value) {
         is BigInteger -> value
