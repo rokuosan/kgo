@@ -1696,7 +1696,7 @@ class TypeChecker(
                             )
                         }
                     }
-                    else -> namedType(node.type)?.let { named ->
+                    else -> methodBaseName(node.type)?.let { named ->
                         methods["$named.${expression.field}"]?.let { method ->
                             val pointerReceiver = method.receiver?.type is PointerGoType
                             candidates += Candidate(
@@ -2588,6 +2588,12 @@ class TypeChecker(
         is PointerGoType -> namedType(type.element)
         else -> null
     }
+    private fun methodBaseName(type: GoTypeSyntax): String? = when (val base =
+        if (type is PointerGoType) type.element else type) {
+        is NamedGoType -> base.name
+        is QualifiedGoType -> "${base.packageName}.${base.name}"
+        else -> null
+    }
     private fun selectorBaseType(type: GoTypeSyntax): GoTypeSyntax = underlying((type as? PointerGoType)?.element ?: type)
     private fun methodKey(type: GoTypeSyntax, name: String): String = "${namedType(type) ?: type}.$name"
     private fun interfaceMethods(type: GoTypeSyntax, seen: Set<String> = emptySet()): Map<String, FunctionGoType> {
@@ -2639,10 +2645,10 @@ class TypeChecker(
                         candidates.getOrPut(name) { mutableListOf() } += signature
                     }
                     is StructGoType -> {
-                        val baseName = namedType(node.type)
+                        val baseName = methodBaseName(node.type)
                         if (baseName != null) methods.values.forEach { method ->
                             val receiverType = method.receiver?.type ?: return@forEach
-                            if (namedType(receiverType) != baseName || receiverType is PointerGoType && !node.pointer) return@forEach
+                            if (methodBaseName(receiverType) != baseName || receiverType is PointerGoType && !node.pointer) return@forEach
                             candidates.getOrPut(packageMethodKey(method.name)) { mutableListOf() } += functionType(method)
                         }
                         nodeType.fields.filter { it.names.isEmpty() }.forEach { field ->
@@ -2656,10 +2662,10 @@ class TypeChecker(
                         }
                     }
                     else -> {
-                        val baseName = namedType(node.type)
+                        val baseName = methodBaseName(node.type)
                         if (baseName != null) methods.values.forEach methodLoop@{ method ->
                             val receiverType = method.receiver?.type ?: return@methodLoop
-                            if (namedType(receiverType) != baseName || receiverType is PointerGoType && !node.pointer) return@methodLoop
+                            if (methodBaseName(receiverType) != baseName || receiverType is PointerGoType && !node.pointer) return@methodLoop
                             candidates.getOrPut(packageMethodKey(method.name)) { mutableListOf() } += functionType(method)
                         }
                     }
