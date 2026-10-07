@@ -3666,8 +3666,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         if (left is GoFloat || right is GoFloat) return real(left) == real(right)
         if (left is Double && right is Double) return left == right
-        if (left is GoArray || right is GoArray || left is GoStruct || right is GoStruct)
-            throw RuntimeGoError("comparing uncomparable type ${runtimeType(left) ?: runtimeType(right) ?: "aggregate"}")
+        if (left is GoArray && right is GoArray)
+            return left.values.size == right.values.size &&
+                left.values.indices.all { goEqual(left.values[it], right.values[it]) }
+        if (left is GoStruct && right is GoStruct) return left == right
         return left == right
     }
 
@@ -3687,7 +3689,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is SliceGoType, is MapGoType, is FunctionGoType -> false
             else -> true
         }
-        is GoArray, is GoStruct -> false
+        is GoArray -> value.values.all(::runtimeComparable)
+        is GoStruct -> value.fields.values.all(::runtimeComparable)
         is GoInterfaceValue -> runtimeComparable(value.value)
         else -> true
     }
@@ -3701,7 +3704,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is Double -> if (value == 0.0) 0 else value.hashCode()
         is GoFloat -> if (value.value == 0.0) 0 else value.value.hashCode()
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
-        is GoArray, is GoStruct -> throw RuntimeGoError("hash of unhashable type")
+        is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
+        is GoStruct -> value.fields.entries.filterNot { isBlankStorageKey(it.key) }
+            .fold(0) { hash, (name, element) ->
+                31 * (31 * hash + name.hashCode()) + goHash(element)
+            }
         is GoInterfaceValue -> 31 * canonicalAliasType(value.dynamicType).hashCode() + goHash(value.value)
         else -> value.hashCode()
     }
@@ -4024,6 +4031,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
             return elementPointer(values, index, elementType)
         }
+        override fun equals(other: Any?) = other is GoArray && namedType == other.namedType &&
+            (namedType == null || packagePath == other.packagePath) && values.size == other.values.size &&
+            values.indices.all { goEqual(values[it], other.values[it]) }
+        override fun hashCode() = values.hashCode()
     }
     private inner class GoSlice(
         val elementType: GoTypeSyntax,
@@ -4109,6 +4120,14 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 fields[field] = preserveAggregateStorage(fields[field], assigned, fieldType)
             }, fieldTypes[field])
         }
+        override fun equals(other: Any?): Boolean {
+            if (other !is GoStruct || (namedType != null && other.namedType != null &&
+                    (namedType != other.namedType || packagePath != other.packagePath))) return false
+            val comparableFields = fields.keys.filterNot(::isBlankStorageKey)
+            if (comparableFields.toSet() != other.fields.keys.filterNot(::isBlankStorageKey).toSet()) return false
+            return comparableFields.all { goEqual(fields[it], other.fields[it]) }
+        }
+        override fun hashCode(): Int = fields.filterKeys { !isBlankStorageKey(it) }.hashCode()
     }
 
     private fun isBlankStorageKey(key: String) = key.startsWith("\u0000blank:")
