@@ -154,18 +154,25 @@ class TypeChecker(
                 val type = expressionTypes(listOf(expression), 1, scope).singleOrNull()
                     ?: error("constant initializer count mismatch")
                 if (!isConstantExpression(expression, scope)) error("constant initializer is not constant")
-                declaration.type?.let { declaredType ->
-                    validateType(declaredType)
-                    requireAssignable(type, declaredType, "constant initializer", expression, scope)
+                val declaredType = declaration.type?.let { resolveLocalType(it, globals) }
+                declaredType?.let {
+                    validateType(it)
+                    requireAssignable(type, it, "constant initializer", expression, scope)
                 }
                 if (name != "_") globals.define(
-                    name, declaration.type ?: type,
+                    name, declaredType ?: type,
                     constantInteger(expression, scope), constantStringLength(expression, scope), isConstant = true,
                     rationalConstant = constantRational(expression, scope),
                     stringIdentity = constantStringIdentity(expression, scope),
                     booleanConstant = constantBoolean(expression, scope),
                     complexConstant = constantComplex(expression, scope)
                 )
+            }
+        }
+        for ((sourceFile, declaration) in declarations) {
+            if (declaration is VariableDeclaration && declaration.type != null) withFileImports(sourceFile) {
+                val resolvedType = resolveLocalType(declaration.type, globals)
+                declaration.names.filter { it != "_" }.forEach { name -> globals.define(name, resolvedType) }
             }
         }
         checkedFunctionTypes.clear()
@@ -186,12 +193,13 @@ class TypeChecker(
                 val values = expressionTypes(declaration.values, declaration.names.size, globals)
                 if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
                     error("initializer count mismatch")
-                if (declaration.type != null) {
-                    validateType(declaration.type)
-                    requireAssignableValues(values, declaration.values, declaration.type, "initializer", globals)
+                val declaredType = declaration.type?.let { resolveLocalType(it, globals) }
+                if (declaredType != null) {
+                    validateType(declaredType)
+                    requireAssignableValues(values, declaration.values, declaredType, "initializer", globals)
                 } else requireDefaultIntegerValues(values, declaration.values, "initializer", globals)
                 declaration.names.forEachIndexed { i, name ->
-                    if (name != "_") globals.define(name, declaration.type ?: defaultType(values.getOrNull(i) ?: intType))
+                    if (name != "_") globals.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType))
                 }
             }
         }
