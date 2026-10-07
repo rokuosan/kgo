@@ -408,11 +408,16 @@ class Interpreter(
                 execute(statements[index], env)
                 index++
             } catch (jump: GotoSignal) {
-                val target = statements.indexOfFirst { it is LabeledStatement && it.label == jump.label }
+                val target = statements.indexOfFirst { hasLeadingLabel(it, jump.label) }
                 if (target < 0) throw jump
                 index = target
             }
         }
+    }
+
+    private fun hasLeadingLabel(statement: Statement, label: String): Boolean = when (statement) {
+        is LabeledStatement -> statement.label == label || hasLeadingLabel(statement.statement, label)
+        else -> false
     }
 
     private fun predeclareBlockTypes(block: BlockStatement, env: Environment) {
