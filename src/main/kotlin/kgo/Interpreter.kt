@@ -2505,7 +2505,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         val leftType = (left as? GoInteger)?.type ?: if (left is Long) NamedGoType("int") else null
         val rightType = (right as? GoInteger)?.type ?: if (right is Long) NamedGoType("int") else null
-        val integerType = if (op == TokenKind.SHL || op == TokenKind.SHR) leftType else leftType ?: rightType
+        val integerType = if (op == TokenKind.SHL || op == TokenKind.SHR)
+            leftType ?: NamedGoType("int") else leftType ?: rightType
         val a = integerValue(left, op.name)
         val b = integerValue(right, op.name)
         val compare = a.compareTo(b)
