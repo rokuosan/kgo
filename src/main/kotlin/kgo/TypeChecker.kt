@@ -1457,8 +1457,7 @@ class TypeChecker(
                 requireInteger(boundType, "slice index")
                 requireValidConstantIndex(bound, null, "slice", scope)
             }
-            val receiverType = expressionType(expression.receiver, scope)
-            val receiver = underlying(receiverType)
+            val receiver = underlying(expressionType(expression.receiver, scope))
             val constantLength = when (receiver) {
                 is ArrayGoType -> receiver.length?.let { constantInteger(it, scope) }
                 is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.length?.let { constantInteger(it, scope) }
@@ -1479,7 +1478,10 @@ class TypeChecker(
             }
             when (receiver) {
                 is SliceGoType -> receiver
-                is ArrayGoType -> SliceGoType(receiver.element)
+                is ArrayGoType -> {
+                    if (!isAddressable(expression.receiver, scope)) error("cannot slice unaddressable array")
+                    SliceGoType(receiver.element)
+                }
                 is PointerGoType -> when (val pointed = underlying(receiver.element)) {
                     is ArrayGoType -> SliceGoType(pointed.element)
                     else -> error("cannot slice through this pointer")
@@ -1647,6 +1649,7 @@ class TypeChecker(
     private fun isAddressable(expression: Expression, scope: Scope): Boolean = when (expression) {
         is NameExpression -> scope.isVariable(expression.name) || dotImportedVariable(expression.name) != null
         is ParenthesizedExpression -> isAddressable(expression.expression, scope)
+        is CompositeLiteral -> true
         is UnaryExpression -> expression.operator == TokenKind.MUL &&
             underlying(expressionType(expression.operand, scope)) is PointerGoType
         is IndexExpression -> when (val receiver = underlying(expressionType(expression.receiver, scope))) {
