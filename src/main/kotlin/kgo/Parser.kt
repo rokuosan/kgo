@@ -237,6 +237,7 @@ class Parser(private val tokens: List<Token>) {
             take()
             return LabeledStatement(label, parseStatement())
         }
+        if (at(TokenKind.RBRACE) || at(TokenKind.CASE) || at(TokenKind.DEFAULT)) return EmptyStatement
         return when {
         at(TokenKind.LBRACE) -> parseBlock()
         match(TokenKind.RETURN) -> ReturnStatement(if (at(TokenKind.SEMICOLON) || at(TokenKind.RBRACE)) emptyList() else expressionList())
@@ -417,6 +418,7 @@ class Parser(private val tokens: List<Token>) {
     }
 
     private fun parseSimpleStatement(): Statement {
+        if (at(TokenKind.SEMICOLON)) return EmptyStatement
         val left = expressionList()
         if (match(TokenKind.INC)) return IncrementStatement(left.singleOrFail(), 1)
         if (match(TokenKind.DEC)) return IncrementStatement(left.singleOrFail(), -1)
