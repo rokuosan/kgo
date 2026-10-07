@@ -1984,6 +1984,14 @@ class TypeChecker {
     }
 
     private fun requireIntegerConstantRepresentable(expression: Expression, target: GoTypeSyntax, scope: Scope = globals) {
+        val shift = expression.unparenthesized() as? BinaryExpression
+        if (shift != null && shift.operator in setOf(TokenKind.SHL, TokenKind.SHR) &&
+            constantInteger(shift.right, scope) == null && isUntyped(expressionType(shift.left, scope))) {
+            val contextualType = if (underlying(target) is InterfaceGoType) defaultType(untypedInt) else target
+            if (!isInteger(contextualType)) error("left operand of shift must be integer in this context")
+            requireIntegerConstantRepresentable(shift.left, contextualType, scope)
+            return
+        }
         val targetName = (underlying(target) as? NamedGoType)?.name ?: return
         if (targetName in floatNames) {
             val value = constantRational(expression, scope) ?: return
