@@ -537,7 +537,8 @@ class Interpreter(
         operator: TokenKind,
         values: List<Any?>,
         env: Environment,
-        sourceExpressions: List<Expression>? = null
+        sourceExpressions: List<Expression>? = null,
+        declaredTypes: List<GoTypeSyntax>? = null
     ) {
         if (operator == TokenKind.DEFINE) {
             val names = targets.map { (it as? NameExpression)?.name ?: throw RuntimeGoError("short declaration targets must be names") }
@@ -549,7 +550,7 @@ class Interpreter(
                 if (env.containsLocalType(name)) throw RuntimeGoError("$name redeclared in this block")
                 val initialized = defaultConstantValue(value, sourceExpressions?.getOrNull(index), env)
                 if (env.containsLocal(name)) env.set(name, initialized)
-                else env.define(name, initialized, inferredStorageType(
+                else env.define(name, initialized, declaredTypes?.getOrNull(index) ?: inferredStorageType(
                     initialized, sourceExpressions?.getOrNull(index), env,
                     if (sourceExpressions?.size == 1) index else 0
                 ))
@@ -935,10 +936,11 @@ class Interpreter(
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
         val onlyIndexIsUsed = range.targets.size <= 1 || range.targets.getOrNull(1).isBlankIdentifier()
+        val declarationTypes = if (range.operator == TokenKind.DEFINE) rangeVariableTypes(range, env) else null
         if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
-                rangeIndexed(arrayLength, range, body, env, labels) { index -> listOf(index.toLong()) }
+                rangeIndexed(arrayLength, range, body, env, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
         }
@@ -953,7 +955,8 @@ class Interpreter(
                 if (!received.ok) break
                 if (range.targets.isNotEmpty()) {
                     val values = listOf(received.value).take(range.targets.size)
-                    assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env)
+                    assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env,
+                        declaredTypes = declarationTypes)
                 }
                 try { executeBlock(body, env) }
                 catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
@@ -971,7 +974,8 @@ class Interpreter(
                     val (cp, width) = decodeUtf8Rune(value.bytes, byteIndex)
                     if (range.targets.isNotEmpty()) {
                         val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), NamedGoType("rune"))).take(range.targets.size)
-                        assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env)
+                        assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, env,
+                            declaredTypes = declarationTypes)
                     }
                     try { executeBlock(body, env) }
                     catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
@@ -979,7 +983,7 @@ class Interpreter(
                     byteIndex += width
                 }
             }
-            is GoSlice -> rangeIndexed(value.length, range, body, env, labels) { i ->
+            is GoSlice -> rangeIndexed(value.length, range, body, env, labels, declarationTypes) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.get(i))
             }
             is GoPointer -> {
@@ -987,14 +991,14 @@ class Interpreter(
                     ?: if (!value.isNil) (value.get() as? GoArray)?.values?.size
                         ?: throw RuntimeGoError("range over pointer requires an array")
                     else throw RuntimeGoError("range over nil pointer requires a known array length")
-                rangeIndexed(arrayLength, range, body, env, labels) { index ->
+                rangeIndexed(arrayLength, range, body, env, labels, declarationTypes) { index ->
                     if (onlyIndexIsUsed) listOf(index.toLong()) else {
                         val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
                         listOf(index.toLong(), array.values[index])
                     }
                 }
             }
-            is GoArray -> rangeIndexed(value.values.size, range, body, env, labels) { i ->
+            is GoArray -> rangeIndexed(value.values.size, range, body, env, labels, declarationTypes) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
             }
             is GoMap -> {
@@ -1006,7 +1010,7 @@ class Interpreter(
                     val entryValue = if (onlyIndexIsUsed) null else value.values[key]
                     if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
                         (if (onlyIndexIsUsed) listOf(copyValue(key.value)) else listOf(copyValue(key.value), entryValue))
-                            .take(range.targets.size), env)
+                            .take(range.targets.size), env, declaredTypes = declarationTypes)
                     try { executeBlock(body, env) }
                     catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                     catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
@@ -1014,6 +1018,22 @@ class Interpreter(
             }
             else -> throw RuntimeGoError("range over this value is not implemented")
         }
+    }
+
+    private fun rangeVariableTypes(range: RangeClause, env: Environment): List<GoTypeSyntax> {
+        val source = staticExpressionType(range.expression, env)?.let(::underlying) ?: return emptyList()
+        val pair = when (source) {
+            is ArrayGoType -> NamedGoType("int") to source.element
+            is PointerGoType -> (underlying(source.element) as? ArrayGoType)?.let {
+                NamedGoType("int") to it.element
+            }
+            is SliceGoType -> NamedGoType("int") to source.element
+            is MapGoType -> source.key to source.value
+            is ChannelGoType -> null to source.element
+            NamedGoType("string") -> NamedGoType("int") to NamedGoType("rune")
+            else -> null
+        } ?: return emptyList()
+        return listOfNotNull(pair.first, pair.second).take(range.targets.size)
     }
 
     private fun Expression?.isBlankIdentifier(): Boolean = when (this) {
@@ -1252,11 +1272,13 @@ class Interpreter(
         body: BlockStatement,
         env: Environment,
         labels: Set<String>,
+        declaredTypes: List<GoTypeSyntax>?,
         values: (Int) -> List<Any?>
     ) {
         for (i in 0 until length) {
             yield()
-            if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values(i).take(range.targets.size), env)
+            if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
+                values(i).take(range.targets.size), env, declaredTypes = declaredTypes)
             try { executeBlock(body, env) }
             catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
             catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
