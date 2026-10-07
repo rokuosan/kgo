@@ -26,7 +26,7 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
     }
 
     private fun visit(path: String, importerDirectory: File, order: MutableList<GoSourcePackage>): String {
-        if (path == "fmt" || path == "math") return path
+        if (path == "fmt" || path == "math" || path == "unsafe") return path
         val directory = resolve(path, importerDirectory)
             ?: throw GoTypeError("cannot locate imported package $path")
         val identity = if (isRelativeImportPath(path)) directory.path else path
@@ -55,7 +55,7 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
         file.copy(declarations = file.declarations.map { declaration ->
             if (declaration !is ImportDeclaration) declaration else declaration.copy(imports = declaration.imports.map { spec ->
                 val path = spec.decodedPath()
-                if (path == "fmt" || path == "math") spec.copy(resolvedPath = path)
+                if (path == "fmt" || path == "math" || path == "unsafe") spec.copy(resolvedPath = path)
                 else spec.copy(resolvedPath = visit(path, importerDirectory, order))
             })
         })

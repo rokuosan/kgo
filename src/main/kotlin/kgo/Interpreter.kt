@@ -1516,6 +1516,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                     "fmt" in env.imports.dotPackages && expression.name in GoFmtPackage.exportedNames ->
                         BuiltinValue(expression.name, GoFmtPackage.functionType(expression.name))
                     "math" in env.imports.dotPackages && expression.name in GoMathPackage.exportedNames -> evaluateMathPackageMember(expression.name)
+                    "unsafe" in env.imports.dotPackages && expression.name in GoUnsafePackage.exportedNames ->
+                        BuiltinValue("unsafe.${expression.name}", GoUnsafePackage.functionType(expression.name))
                     else -> when (expression.name) {
                     "true" -> true
                     "false" -> false
@@ -1576,6 +1578,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 env.imports.packages[expression.receiver.name] == "fmt") BuiltinValue(expression.field)
             else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name] == "math") evaluateMathPackageMember(expression.field)
+            else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+                env.imports.packages[expression.receiver.name] == "unsafe")
+                BuiltinValue("unsafe.${expression.field}", GoUnsafePackage.functionType(expression.field))
             else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name]?.let(importedRuntimePackages::containsKey) == true) {
                 val path = env.imports.packages.getValue(expression.receiver.name)
@@ -1809,12 +1814,81 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         throw RuntimeGoError("unknown struct field or method: $name")
     }
 
+    private fun unsafeIntrinsicName(function: Expression, env: Environment): String? = when (val target = function.unparenthesized()) {
+        is SelectorExpression -> {
+            val alias = (target.receiver as? NameExpression)?.name ?: return null
+            if (env.contains(alias) || env.typeBinding(alias) != null || env.imports.packages[alias] != "unsafe") return null
+            target.field.takeIf { GoUnsafePackage.functionType(it) != null }
+        }
+        is NameExpression -> if (!env.contains(target.name) && env.typeBinding(target.name) == null &&
+            "unsafe" in env.imports.dotPackages && target.name in GoUnsafePackage.exportedNames) target.name else null
+        else -> null
+    }
+
+    private fun unsafeIntrinsicValue(name: String, expression: Expression, env: Environment): Long {
+        val sourceType = staticExpressionType(expression, env)
+            ?: throw RuntimeGoError("cannot determine unsafe intrinsic argument type")
+        val type = when (sourceType) {
+            NamedGoType("#untyped-bool") -> NamedGoType("bool")
+            NamedGoType("#untyped-int") -> NamedGoType("int")
+            NamedGoType("#untyped-rune") -> NamedGoType("int32")
+            NamedGoType("#untyped-float") -> NamedGoType("float64")
+            NamedGoType("#untyped-complex") -> NamedGoType("complex128")
+            NamedGoType("#untyped-string") -> NamedGoType("string")
+            else -> sourceType
+        }
+        val arrayLength: (Expression) -> BigInteger = { integerLiteral(it, env) }
+        try {
+            return when (name) {
+                "Sizeof", "Alignof" -> {
+                    val layout = GoUnsafePackage.layout(type, ::underlying, arrayLength)
+                    if (name == "Sizeof") layout.size else layout.align
+                }
+                "Offsetof" -> {
+                    val (base, fields) = selectorPath(expression)
+                        ?: throw RuntimeGoError("unsafe.Offsetof requires a struct field selector")
+                    var currentType = staticExpressionType(base, env)
+                        ?: throw RuntimeGoError("cannot determine unsafe.Offsetof base type")
+                    var offset = 0L
+                    fields.forEach { fieldName ->
+                        val field = GoUnsafePackage.fieldOffset(currentType, fieldName, ::underlying, arrayLength)
+                            ?: throw RuntimeGoError("unknown or ambiguous struct field $fieldName")
+                        offset = Math.addExact(offset, field.first)
+                        currentType = field.second
+                    }
+                    offset
+                }
+                else -> throw RuntimeGoError("undefined unsafe intrinsic $name")
+            }
+        } catch (failure: ArithmeticException) {
+            throw RuntimeGoError("unsafe layout overflows uintptr")
+        } catch (failure: IllegalArgumentException) {
+            throw RuntimeGoError(failure.message ?: "invalid unsafe layout")
+        }
+    }
+
+    private fun selectorPath(expression: Expression): Pair<Expression, List<String>>? {
+        val fields = mutableListOf<String>()
+        var current = expression
+        while (current is SelectorExpression) {
+            fields += current.field
+            current = current.receiver
+        }
+        if (fields.isEmpty()) return null
+        fields.reverse()
+        return current to fields
+    }
+
     private suspend fun call(call: CallExpression, env: Environment): Any? {
         val parenthesizedType = call.function.unparenthesized() as? TypeExpression
         if (parenthesizedType != null && call.arguments.size == 1 && !call.expandLastArgument) {
             val value = evaluate(call.arguments.single(), env)
             val source = call.arguments.single()
             return convert(resolveRuntimeType(parenthesizedType.type, env), defaultRuneValue(value, source, env))
+        }
+        unsafeIntrinsicName(call.function, env)?.let { name ->
+            val argument = call.arguments.singleOrNull() ?: throw RuntimeGoError("unsafe intrinsic requires one argument")
+            return GoInteger(unsafeIntrinsicValue(name, argument, env), NamedGoType("uintptr"))
         }
         val builtinName = (call.function as? NameExpression)?.name
         if (builtinName in setOf("len", "cap") && builtinName?.let {

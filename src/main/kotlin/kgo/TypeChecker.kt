@@ -246,6 +246,7 @@ class TypeChecker(
                         importedNames += when (standardPackageName(path)) {
                             "fmt" -> GoFmtPackage.exportedNames
                             "math" -> GoMathPackage.exportedNames
+                            "unsafe" -> GoUnsafePackage.exportedNames
                             else -> emptySet()
                         } + importedPackages[path]?.exportedNames().orEmpty()
                         null
@@ -334,6 +335,7 @@ class TypeChecker(
             val type = when (standardPackageName(path)) {
                 "fmt" -> GoFmtPackage.functionType(name)
                 "math" -> GoMathPackage.memberType(name)
+                "unsafe" -> GoUnsafePackage.functionType(name)
                 else -> null
             } ?: importedPackages[path]?.let { imported ->
                 imported.exportedFunctionType(name, path) ?: imported.exportedConstant(name, path)?.type
@@ -1600,6 +1602,7 @@ class TypeChecker(
             return when (standardPackageName(path)) {
                 "fmt" -> GoFmtPackage.functionType(expression.field) ?: error("undefined fmt identifier ${expression.field}")
                 "math" -> GoMathPackage.memberType(expression.field) ?: error("undefined math identifier ${expression.field}")
+                "unsafe" -> GoUnsafePackage.functionType(expression.field) ?: error("undefined unsafe identifier ${expression.field}")
                 else -> importedPackages[path]?.let { imported ->
                     imported.exportedFunctionType(expression.field, path) ?: imported.exportedConstant(expression.field, path)?.type
                         ?: imported.exportedVariableType(expression.field, path)
@@ -1708,7 +1711,7 @@ class TypeChecker(
     private fun importedPackageVariable(expression: SelectorExpression): Pair<String, GoTypeSyntax>? {
         val alias = (expression.receiver as? NameExpression)?.name ?: return null
         val path = packagePaths[alias] ?: return null
-        if (standardPackageName(path) in setOf("fmt", "math")) return null
+        if (standardPackageName(path) in setOf("fmt", "math", "unsafe")) return null
         return importedPackages[path]?.exportedVariableType(expression.field, path)?.let { path to it }
     }
 
@@ -1968,6 +1971,14 @@ class TypeChecker(
 
     private fun callResults(call: CallExpression, scope: Scope): List<GoTypeSyntax> {
         val target = call.function.unparenthesized()
+        val unsafeName = unsafeIntrinsicName(target, scope)
+        if (unsafeName != null) {
+            if (call.arguments.size != 1 || call.expandLastArgument) error("unsafe intrinsic requires one argument")
+            if (unsafeName == "Offsetof" && selectorPath(call.arguments.single()) == null)
+                error("unsafe.Offsetof requires a struct field selector")
+            expressionType(call.arguments.single(), scope)
+            return listOf(NamedGoType("uintptr"))
+        }
         if (target is SelectorExpression) {
             val importedType = importedPackageType(target)
             if (importedType != null) {
@@ -2489,7 +2500,7 @@ class TypeChecker(
 
     private fun standardPackageName(path: String): String? {
         return when (path) {
-            "fmt", "math" -> path
+            "fmt", "math", "unsafe" -> path
             else -> null
         }
     }
@@ -2699,6 +2710,7 @@ class TypeChecker(
                     constantInteger(expression, scope) != null
                 expression.function in setOf(NameExpression("complex"), NameExpression("real"), NameExpression("imag")) ->
                     expression.arguments.isNotEmpty() && expression.arguments.all { isConstantExpression(it, scope) }
+                expression.function is SelectorExpression || expression.function is NameExpression -> unsafeConstant(expression, scope) != null
                 else -> false
             }
         }
@@ -2781,6 +2793,7 @@ class TypeChecker(
             else -> null
         } }
         is CallExpression -> {
+            unsafeConstant(expression, scope)?.let { return it }
             val builtinLength = (expression.function == NameExpression("len") || expression.function == NameExpression("cap")) &&
                 scope.getOrNull((expression.function as NameExpression).name) == null
             val lengthConstant = if (builtinLength &&
@@ -2827,6 +2840,64 @@ class TypeChecker(
             } }.getOrNull()
         }
         else -> null
+        }
+    }
+
+    private fun unsafeIntrinsicName(function: Expression, scope: Scope): String? = when (val target = function.unparenthesized()) {
+        is SelectorExpression -> {
+            val alias = (target.receiver as? NameExpression)?.name ?: return null
+            if (scope.getOrNull(alias) != null || scope.typeBinding(alias) != null ||
+                packagePaths[alias]?.let(::standardPackageName) != "unsafe") return null
+            target.field.takeIf { GoUnsafePackage.functionType(it) != null }
+        }
+        is NameExpression -> target.name.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null &&
+            "unsafe" in dotImportPaths && GoUnsafePackage.functionType(it) != null }
+        else -> null
+    }
+
+    private fun selectorPath(expression: Expression): Pair<Expression, List<String>>? {
+        val fields = mutableListOf<String>()
+        var current = expression
+        while (current is SelectorExpression) {
+            fields += current.field
+            current = current.receiver
+        }
+        if (fields.isEmpty()) return null
+        fields.reverse()
+        return current to fields
+    }
+
+    private fun unsafeConstant(call: CallExpression, scope: Scope): BigInteger? {
+        val name = unsafeIntrinsicName(call.function, scope) ?: return null
+        if (call.arguments.size != 1 || call.expandLastArgument) return null
+        val arrayLength: (Expression) -> BigInteger = { expression ->
+            constantInteger(expression, scope) ?: throw IllegalArgumentException("array length must be constant")
+        }
+        return try {
+            val operand = call.arguments.single()
+            when (name) {
+                "Sizeof", "Alignof" -> {
+                    val type = expressionType(operand, scope).let { if (isUntyped(it)) defaultType(it) else it }
+                    val layout = GoUnsafePackage.layout(type, ::underlying, arrayLength)
+                    BigInteger.valueOf(if (name == "Sizeof") layout.size else layout.align)
+                }
+                "Offsetof" -> {
+                    val (base, fields) = selectorPath(operand) ?: return null
+                    var type = expressionType(base, scope)
+                    var offset = 0L
+                    fields.forEach { fieldName ->
+                        val field = GoUnsafePackage.fieldOffset(type, fieldName, ::underlying, arrayLength) ?: return null
+                        offset = Math.addExact(offset, field.first)
+                        type = field.second
+                    }
+                    BigInteger.valueOf(offset)
+                }
+                else -> null
+            }
+        } catch (_: ArithmeticException) {
+            error("unsafe layout overflows uintptr")
+        } catch (_: IllegalArgumentException) {
+            null
         }
     }
 
