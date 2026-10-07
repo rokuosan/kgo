@@ -103,6 +103,7 @@ class Interpreter(
     private var exportedConstantNames: Set<String> = emptySet()
     private var exportedVariableNames: Set<String> = emptySet()
     private var exportedTypeNames: Set<String> = emptySet()
+    private var packageShadowsIota = false
     private var packageIdentity: String? = null
     private lateinit var goroutines: CoroutineScope
 
@@ -165,6 +166,13 @@ class Interpreter(
         val packageName = files.first().packageName
         packageIdentity = packageIdentity ?: packageName
         val file = GoFile(packageName, files.flatMap { it.declarations })
+        packageShadowsIota = file.declarations.any { declaration -> when (declaration) {
+            is ConstantDeclaration -> "iota" in declaration.names
+            is VariableDeclaration -> "iota" in declaration.names
+            is TypeDeclaration -> declaration.name == "iota"
+            is FunctionDeclaration -> declaration.receiver == null && declaration.name == "iota"
+            else -> false
+        } }
         file.declarations.filterIsInstance<FunctionDeclaration>().forEach { function ->
             if (function.name != "_") {
                 if (function.receiver != null) methods[methodKey(function.receiver.type, function.name)] = function
@@ -1283,7 +1291,8 @@ class Interpreter(
     private suspend fun initializeConstantIn(declaration: ConstantDeclaration, target: Environment) {
         val resolvedType = declaration.type?.let { resolveRuntimeType(it, target) }
         val scope = target.child()
-        scope.define("iota", BigInteger.valueOf(declaration.iotaIndex.toLong()))
+        val iotaIsShadowed = if (target === globals) packageShadowsIota else target.binding("iota") != null
+        if (!iotaIsShadowed) scope.define("iota", BigInteger.valueOf(declaration.iotaIndex.toLong()))
         val values = expandValues(declaration.values.map { evaluate(it, scope) }, declaration.names.size)
         if (values.size != declaration.names.size) throw RuntimeGoError("constant initializer count mismatch")
         declaration.names.zip(values).forEachIndexed { index, (name, value) ->

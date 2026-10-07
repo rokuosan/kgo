@@ -141,8 +141,12 @@ class TypeChecker(
                 val declaration = binding.declaration
                 val name = declaration.names[binding.index]
                 val expression = declaration.values[binding.index]
-                val scope = globals.child().also {
-                    it.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
+                val scope = globals.child().also { initializerScope ->
+                    if ("iota" !in packageLevelNames) {
+                        initializerScope.define(
+                            "iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true
+                        )
+                    }
                 }
                 val type = expressionTypes(listOf(expression), 1, scope).singleOrNull()
                     ?: error("constant initializer count mismatch")
@@ -710,8 +714,12 @@ class TypeChecker(
                     is ConstantDeclaration -> {
                         requireUniqueNames(declaration.names, "constant declaration")
                         val declaredType = declaration.type?.let { resolveLocalType(it, scope) }
-                        val constants = scope.child().also {
-                            it.define("iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true)
+                        val constants = scope.child().also { initializerScope ->
+                            if (!initializerScope.hasBinding("iota") && "iota" !in packageLevelNames) {
+                                initializerScope.define(
+                                    "iota", untypedInt, BigInteger.valueOf(declaration.iotaIndex.toLong()), isConstant = true
+                                )
+                            }
                         }
                         val values = expressionTypes(declaration.values, declaration.names.size, constants)
                         if (values.size != declaration.names.size) error("constant initializer count mismatch")
@@ -2961,6 +2969,7 @@ class TypeChecker(
         }
         fun defineType(name: String, identity: String) { typeNames[name] = identity }
         fun typeBinding(name: String): String? = typeNames[name] ?: parent?.typeBinding(name)
+        fun hasBinding(name: String): Boolean = name in values || name in typeNames || parent?.hasBinding(name) == true
         fun containsLocal(name: String) = name in values || name in typeNames
         fun get(name: String): GoTypeSyntax = getOrNull(name) ?: throw GoTypeError("undefined: $name")
         fun getOrNull(name: String): GoTypeSyntax? = values[name] ?: parent?.getOrNull(name)
