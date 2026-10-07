@@ -1785,30 +1785,37 @@ class TypeChecker(
             }
             is StructGoType -> {
                 if (elements.isEmpty()) return
+                data class LiteralField(val name: String, val type: GoTypeSyntax, val packagePath: String?)
                 val fieldList = type.fields.flatMap { field ->
-                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { it to field.type }
-                }.filter { it.first.isNotEmpty() }
-                val fields = fieldList.toMap()
+                    field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { name ->
+                        LiteralField(name, field.type, unexportedFieldPackagePath(field, name))
+                    }
+                }.filter { it.name.isNotEmpty() }
+                val fields = fieldList.associateBy { it.name }
                 val keyed = elements.map { it.key != null }.toSet()
                 if (keyed.size > 1) error("mixture of keyed and unkeyed struct literal elements")
-                if (literalType is QualifiedGoType && keyed.singleOrNull() != true &&
-                    fieldList.any { !isExportedIdentifier(it.first) })
+                val currentPackage = packageIdentity ?: packageName
+                if (keyed.singleOrNull() != true && fieldList.any { field ->
+                        !isExportedIdentifier(field.name) &&
+                            (literalType is QualifiedGoType || field.packagePath != currentPackage)
+                    })
                     error("implicit assignment to unexported fields in struct literal")
                 if (keyed.singleOrNull() == true) {
                     val usedFields = mutableSetOf<String>()
                     elements.forEach { item ->
                         val key = (item.key as? NameExpression)?.name ?: error("struct field key must be an identifier")
                         if (key == "_") error("cannot use blank field in keyed struct literal")
-                        if (literalType is QualifiedGoType && !isExportedIdentifier(key))
-                            error("cannot refer to unexported field $key in struct literal")
                         if (!usedFields.add(key)) error("duplicate field $key in struct literal")
-                        val fieldType = fields[key] ?: error("unknown field $key")
-                        checkCompositeValue(item.value, fieldType, "struct field", scope, allowElided = false)
+                        val field = fields[key] ?: error("unknown field $key")
+                        if (!isExportedIdentifier(key) &&
+                            (literalType is QualifiedGoType || field.packagePath != currentPackage))
+                            error("cannot refer to unexported field $key in struct literal")
+                        checkCompositeValue(item.value, field.type, "struct field", scope, allowElided = false)
                     }
                 } else {
                     if (elements.size != fieldList.size) error("struct literal has ${elements.size} values for ${fieldList.size} fields")
                     elements.forEachIndexed { i, item ->
-                        checkCompositeValue(item.value, fieldList[i].second, "struct field", scope, allowElided = false)
+                        checkCompositeValue(item.value, fieldList[i].type, "struct field", scope, allowElided = false)
                     }
                 }
             }
