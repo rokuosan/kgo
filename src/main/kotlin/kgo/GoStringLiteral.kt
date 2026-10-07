@@ -39,7 +39,7 @@ internal fun decodeGoCharacterLiteral(text: String): Int {
             if (hex.length != digits || !hex.all(Char::isHexDigit))
                 throw RuntimeGoError("invalid Unicode character escape")
             val codePoint = hex.toLong(16).toInt()
-            if (codePoint !in 0..0x10ffff || codePoint in 0xd800..0xdfff)
+            if (codePoint !in 0..0x10ffff)
                 throw RuntimeGoError("invalid Unicode code point")
             codePoint
         }
@@ -84,7 +84,6 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
             'u', 'U' -> {
                 val digits = if (escaped == 'u') 4 else 8
                 val codePoint = body.substring(i, i + digits).toLong(16).toInt()
-                if (codePoint in 0xd800..0xdfff) throw RuntimeGoError("invalid Unicode code point")
                 appendCodePoint(codePoint)
                 i += digits
             }
@@ -95,7 +94,7 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
 }
 
 internal fun encodeGoCodePoint(value: Int): ByteArray {
-    val codePoint = if (value in 0..0x10ffff && value !in 0xd800..0xdfff) value else 0xfffd
+    val codePoint = if (value in 0..0x10ffff) value else 0xfffd
     return when {
         codePoint <= 0x7f -> byteArrayOf(codePoint.toByte())
         codePoint <= 0x7ff -> byteArrayOf(
@@ -117,7 +116,7 @@ internal fun encodeGoCodePoint(value: Int): ByteArray {
 }
 
 internal fun encodeGoCodePoint(value: Long): ByteArray =
-    encodeGoCodePoint(if (value in 0..0x10ffff && value !in 0xd800L..0xdfffL) value.toInt() else -1)
+    encodeGoCodePoint(if (value in 0..0x10ffff) value.toInt() else -1)
 
 internal fun encodeGoCodePoint(value: BigInteger): ByteArray =
     encodeGoCodePoint(if (value >= BigInteger.ZERO && value <= BigInteger.valueOf(0x10ffff)) value.toInt() else -1)
@@ -147,7 +146,6 @@ internal fun decodeGoUtf8Rune(bytes: ByteArray, offset: Int): Pair<Int, Int> {
         if (first != 0xe0 || second >= 0xa0) {
             val codePoint = ((first and 0x0f) shl 12) or ((second and 0x3f) shl 6) or
                 (bytes[offset + 2].toInt() and 0x3f)
-            if (codePoint in 0xd800..0xdfff) return 0xfffd to 1
             return codePoint to 3
         }
     }
