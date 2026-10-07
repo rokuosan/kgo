@@ -1002,9 +1002,10 @@ class Interpreter(
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
             }
             is GoMap -> {
-                // Snapshot key order, but read membership and values as each entry is reached.
+                // Go 1 requires map iteration order to vary unpredictably; snapshot keys,
+                // then recheck membership and read values as each entry is reached.
                 // Deleting a not-yet-reached entry must suppress that iteration value.
-                for (key in value.values.keys.toList()) {
+                for (key in value.values.keys.toList().shuffled()) {
                     yield()
                     if (!value.values.containsKey(key)) continue
                     val entryValue = if (onlyIndexIsUsed) null else value.values[key]
