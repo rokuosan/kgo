@@ -14,11 +14,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.selects.selectUnbiased
 import kotlinx.coroutines.yield
 import org.apache.commons.math3.special.BesselJ
@@ -41,6 +40,8 @@ private class GoString(val bytes: ByteArray, val type: GoTypeSyntax = NamedGoTyp
     override fun hashCode() = bytes.contentHashCode()
     override fun toString() = decodeGoUtf8Text(bytes)
 }
+
+private val goChannelCoordinator = Any()
 
 internal class GoRational private constructor(val numerator: BigInteger, val denominator: BigInteger) : Comparable<GoRational> {
     operator fun plus(other: GoRational) = of(numerator * other.denominator + other.numerator * denominator, denominator * other.denominator)
@@ -771,60 +772,38 @@ class Interpreter(
             }
         }
         val defaultIndex = statement.cases.indexOfFirst { it.communication == null }
-        val mixedChannels = operations.filterIsInstance<SelectSend>().mapTo(mutableSetOf()) { it.channel }
-            .filterTo(mutableSetOf()) { channel -> operations.any { it is SelectReceive && it.channel == channel } }
-        // A native channel may pair clauses belonging to this same select. Poll the whole
-        // select when it has mixed directions on one channel so every ready case competes.
-        suspend fun awaitSelection(cases: List<SelectOperation>): SelectSelection = selectUnbiased {
-            cases.forEach { operation ->
-                when (operation) {
-                    is SelectSend -> {
-                        val element = operation.channel.newSelectElement(operation.value)
-                        operation.channel.queue.onSend(element) {
-                            operation.channel.recordSelectSend(element)
-                            SelectSelection(operation.caseIndex, null)
-                        }
+        val selected = awaitChannelSelect(operations, defaultIndex)
+        selected.failure?.let { throw it }
+        val receive = operations.filterIsInstance<SelectReceive>().firstOrNull { it.caseIndex == selected.caseIndex }
+        executeSelectedCase(statement.cases[selected.caseIndex], env, labels, receive?.assignment, selected.received)
+    }
+
+    private suspend fun awaitChannelSelect(
+        operations: List<SelectOperation>,
+        defaultIndex: Int
+    ): SelectSelection {
+        if (operations.isEmpty() && defaultIndex < 0) awaitCancellation()
+        return suspendCancellableCoroutine { continuation ->
+            val decision = ChannelDecision { continuation.resumeWith(Result.success(it)) }
+            continuation.invokeOnCancellation { decision.cancel() }
+            val completions = mutableListOf<() -> Unit>()
+            synchronized(goChannelCoordinator) {
+                if (!continuation.isActive) return@synchronized
+                operations.shuffled().forEach { operation ->
+                    if (decision.selected) return@forEach
+                    val element = (operation as? SelectSend)?.let {
+                        GoChannelElement(copyForType(it.value, it.channel.elementType))
                     }
-                    is SelectReceive -> operation.channel.queue.onReceiveCatching { result ->
-                        SelectSelection(operation.caseIndex, operation.channel.decode(result))
-                    }
+                    operation.channel.register(
+                        ChannelWaiter(operation.channel, decision, operation.caseIndex, element),
+                        enqueue = defaultIndex < 0,
+                        completions
+                    )
                 }
+                if (!decision.selected && defaultIndex >= 0)
+                    decision.claim(defaultIndex, null, null, completions)
             }
-        }
-        while (true) {
-            for (operation in operations.shuffled()) {
-                when (operation) {
-                    is SelectSend -> when (operation.channel.trySend(operation.value)) {
-                        GoTrySendResult.CLOSED -> throw RuntimeGoError("send on closed channel")
-                        GoTrySendResult.SENT -> {
-                            executeSelectedCase(statement.cases[operation.caseIndex], env, labels)
-                            return
-                        }
-                        GoTrySendResult.NOT_READY -> Unit
-                    }
-                    is SelectReceive -> operation.channel.tryReceive()?.let { received ->
-                        executeSelectedCase(statement.cases[operation.caseIndex], env, labels, operation.assignment, received)
-                        return
-                    }
-                }
-            }
-            if (defaultIndex >= 0) {
-                executeSelectedCase(statement.cases[defaultIndex], env, labels)
-                return
-            }
-            if (operations.isEmpty()) awaitCancellation()
-            val selected = try {
-                if (mixedChannels.isEmpty()) awaitSelection(operations)
-                else { delay(1); null }
-            } catch (_: kotlinx.coroutines.channels.ClosedSendChannelException) {
-                throw RuntimeGoError("send on closed channel")
-            }
-            if (selected != null) {
-                val clause = statement.cases[selected.caseIndex]
-                val receive = operations.filterIsInstance<SelectReceive>().firstOrNull { it.caseIndex == selected.caseIndex }
-                executeSelectedCase(clause, env, labels, receive?.assignment, selected.received)
-                return
-            }
+            completions.forEach { it() }
         }
     }
 
@@ -4137,7 +4116,6 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private data class MethodExpressionValue(val receiverType: GoTypeSyntax, val name: String, val type: GoTypeSyntax)
     private data class GoMultiValue(val values: List<Any?>)
     private data class GoReceiveResult(val value: Any?, val ok: Boolean)
-    private enum class GoTrySendResult { SENT, NOT_READY, CLOSED }
     private data class MapLookupResult(val value: Any?, val ok: Boolean)
     private data class GoAssertionResult(val value: Any?, val ok: Boolean, val dynamicType: GoTypeSyntax)
     private data class GoInterfaceValue(
@@ -4163,10 +4141,49 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
         var recovered: Boolean = false
     }
-    private data class SelectSelection(val caseIndex: Int, val received: GoReceiveResult?)
+    private data class SelectSelection(
+        val caseIndex: Int,
+        val received: GoReceiveResult?,
+        val failure: RuntimeGoError? = null
+    )
     private sealed interface SelectOperation { val caseIndex: Int; val channel: GoChannel }
     private data class SelectSend(override val caseIndex: Int, override val channel: GoChannel, val value: Any?) : SelectOperation
     private data class SelectReceive(override val caseIndex: Int, override val channel: GoChannel, val assignment: AssignmentStatement?) : SelectOperation
+    private inner class ChannelDecision(private val complete: (SelectSelection) -> Unit) {
+        var selected = false
+            private set
+        val waiters = mutableListOf<ChannelWaiter>()
+
+        fun claim(
+            caseIndex: Int,
+            received: GoReceiveResult?,
+            failure: RuntimeGoError?,
+            completions: MutableList<() -> Unit>
+        ): Boolean {
+            if (selected) return false
+            selected = true
+            waiters.toList().forEach { it.channel.removeWaiter(it) }
+            waiters.clear()
+            val selection = SelectSelection(caseIndex, received, failure)
+            completions += { complete(selection) }
+            return true
+        }
+
+        fun cancel() {
+            synchronized(goChannelCoordinator) {
+                if (selected) return
+                selected = true
+                waiters.toList().forEach { it.channel.removeWaiter(it) }
+                waiters.clear()
+            }
+        }
+    }
+    private inner class ChannelWaiter(
+        val channel: GoChannel,
+        val decision: ChannelDecision,
+        val caseIndex: Int,
+        val sendElement: GoChannelElement?
+    )
     private inner class GoArray(
         val elementType: GoTypeSyntax,
         val values: MutableList<Any?>,
@@ -4307,93 +4324,157 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     }
     private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)
     private class GoCell(var value: Any?)
+    private inner class GoChannelState {
+        val buffer = mutableListOf<GoChannelElement>()
+        val senders = mutableListOf<ChannelWaiter>()
+        val receivers = mutableListOf<ChannelWaiter>()
+        var closed = false
+    }
     private inner class GoChannel(
         val elementType: GoTypeSyntax,
         val capacity: Int,
         val namedType: String? = null,
         val type: GoTypeSyntax? = null,
         val direction: ChannelDirection = ChannelDirection.SEND_RECEIVE,
-        val queue: Channel<GoChannelElement> = Channel(capacity),
-        private val buffered: AtomicInteger = AtomicInteger(0),
+        private val state: GoChannelState = GoChannelState(),
         private val identity: Any = Any(),
         val packagePath: String? = packageIdentity
     ) {
         fun retype(element: GoTypeSyntax, direction: ChannelDirection, name: String?, type: GoTypeSyntax,
                    packagePath: String? = packageIdentity) =
-            GoChannel(element, capacity, name, type, direction, queue, buffered, identity, packagePath)
+            GoChannel(element, capacity, name, type, direction, state, identity, packagePath)
 
         override fun equals(other: Any?) = other is GoChannel && identity === other.identity
         override fun hashCode() = System.identityHashCode(identity)
+
         suspend fun send(value: Any?) {
-            val element = GoChannelElement(copyForType(value, elementType))
-            try {
-                queue.send(element)
-            } catch (_: kotlinx.coroutines.channels.ClosedSendChannelException) {
-                throw RuntimeGoError("send on closed channel")
+            suspendCancellableCoroutine { continuation ->
+                val decision = ChannelDecision { selection ->
+                    continuation.resumeWith(selection.failure?.let { Result.failure(it) } ?: Result.success(Unit))
+                }
+                continuation.invokeOnCancellation { decision.cancel() }
+                val completions = mutableListOf<() -> Unit>()
+                synchronized(goChannelCoordinator) {
+                    if (continuation.isActive) register(
+                        ChannelWaiter(this, decision, 0, GoChannelElement(copyForType(value, elementType))),
+                        enqueue = true,
+                        completions
+                    )
+                }
+                completions.forEach { it() }
             }
-            element.recordSent(buffered, capacity > 0)
         }
-        suspend fun receive(): GoReceiveResult {
-            val result = queue.receiveCatching()
-            return decode(result)
-        }
-        fun trySend(value: Any?): GoTrySendResult {
-            val element = GoChannelElement(copyForType(value, elementType))
-            val result = queue.trySend(element)
-            if (result.isClosed) return GoTrySendResult.CLOSED
-            if (!result.isSuccess) return GoTrySendResult.NOT_READY
-            element.recordSent(buffered, capacity > 0)
-            return GoTrySendResult.SENT
-        }
-        fun newSelectElement(value: Any?) = GoChannelElement(copyForType(value, elementType))
-        fun recordSelectSend(element: GoChannelElement) = element.recordSent(buffered, capacity > 0)
-        fun tryReceive(): GoReceiveResult? {
-            val result = queue.tryReceive()
-            if (result.isFailure && !result.isClosed) return null
-            return decode(result)
-        }
-        fun decode(result: kotlinx.coroutines.channels.ChannelResult<GoChannelElement>): GoReceiveResult {
-            if (result.isSuccess) {
-                val element = result.getOrThrow()
-                element.recordReceived(buffered, capacity > 0)
-                return GoReceiveResult(copyForType(element.value, elementType), true)
+
+        suspend fun receive(): GoReceiveResult = suspendCancellableCoroutine { continuation ->
+            val decision = ChannelDecision { continuation.resumeWith(Result.success(it.received!!)) }
+            continuation.invokeOnCancellation { decision.cancel() }
+            val completions = mutableListOf<() -> Unit>()
+            synchronized(goChannelCoordinator) {
+                if (continuation.isActive) register(ChannelWaiter(this, decision, 0, null), enqueue = true, completions)
             }
-            return GoReceiveResult(zeroValue(elementType), false)
+            completions.forEach { it() }
         }
+
+        fun register(waiter: ChannelWaiter, enqueue: Boolean, completions: MutableList<() -> Unit>) {
+            if (waiter.sendElement == null) registerReceive(waiter, enqueue, completions)
+            else registerSend(waiter, enqueue, completions)
+        }
+
+        private fun registerSend(waiter: ChannelWaiter, enqueue: Boolean, completions: MutableList<() -> Unit>) {
+            if (waiter.decision.selected) return
+            if (state.closed) {
+                waiter.decision.claim(waiter.caseIndex, null, RuntimeGoError("send on closed channel"), completions)
+                return
+            }
+            val receiver = takeEligible(state.receivers, waiter.decision)
+            if (receiver != null) {
+                waiter.decision.claim(waiter.caseIndex, null, null, completions)
+                receiver.decision.claim(receiver.caseIndex,
+                    GoReceiveResult(copyForType(waiter.sendElement!!.value, receiver.channel.elementType), true), null, completions)
+            } else if (capacity > state.buffer.size) {
+                state.buffer += waiter.sendElement!!
+                waiter.decision.claim(waiter.caseIndex, null, null, completions)
+            } else if (enqueue) addWaiter(state.senders, waiter)
+        }
+
+        private fun registerReceive(waiter: ChannelWaiter, enqueue: Boolean, completions: MutableList<() -> Unit>) {
+            if (waiter.decision.selected) return
+            if (state.buffer.isNotEmpty()) {
+                val element = state.buffer.removeAt(0)
+                waiter.decision.claim(waiter.caseIndex,
+                    GoReceiveResult(copyForType(element.value, elementType), true), null, completions)
+                refillBuffer(completions)
+                return
+            }
+            val sender = takeEligible(state.senders, waiter.decision)
+            if (sender != null) {
+                waiter.decision.claim(waiter.caseIndex,
+                    GoReceiveResult(copyForType(sender.sendElement!!.value, elementType), true), null, completions)
+                sender.decision.claim(sender.caseIndex, null, null, completions)
+            } else if (state.closed) {
+                waiter.decision.claim(waiter.caseIndex, GoReceiveResult(zeroValue(elementType), false), null, completions)
+            } else if (enqueue) addWaiter(state.receivers, waiter)
+        }
+
+        private fun refillBuffer(completions: MutableList<() -> Unit>) {
+            while (!state.closed && state.buffer.size < capacity) {
+                val sender = takeEligible(state.senders, null) ?: break
+                state.buffer += sender.sendElement!!
+                sender.decision.claim(sender.caseIndex, null, null, completions)
+            }
+        }
+
+        private fun addWaiter(queue: MutableList<ChannelWaiter>, waiter: ChannelWaiter) {
+            queue += waiter
+            waiter.decision.waiters += waiter
+        }
+
+        private fun takeEligible(queue: MutableList<ChannelWaiter>, excluded: ChannelDecision?): ChannelWaiter? {
+            var index = 0
+            while (index < queue.size) {
+                val waiter = queue[index]
+                if (waiter.decision.selected) {
+                    queue.removeAt(index)
+                    waiter.decision.waiters.remove(waiter)
+                } else if (waiter.decision !== excluded) {
+                    queue.removeAt(index)
+                    waiter.decision.waiters.remove(waiter)
+                    return waiter
+                } else index++
+            }
+            return null
+        }
+
+        fun removeWaiter(waiter: ChannelWaiter) {
+            state.senders.remove(waiter)
+            state.receivers.remove(waiter)
+            waiter.decision.waiters.remove(waiter)
+        }
+
         fun close() {
-            if (!queue.close()) throw RuntimeGoError("close of closed channel")
-        }
-        fun len() = if (capacity == 0) 0L else buffered.get().coerceIn(0, capacity).toLong()
-    }
-    private class GoChannelElement(val value: Any?) {
-        private var state = PENDING
-
-        @Synchronized
-        fun recordSent(buffered: AtomicInteger, countable: Boolean) {
-            if (state == PENDING) {
-                state = BUFFERED
-                if (countable) buffered.incrementAndGet()
-            }
-        }
-
-        @Synchronized
-        fun recordReceived(buffered: AtomicInteger, countable: Boolean) {
-            when (state) {
-                PENDING -> state = RECEIVED_DIRECTLY
-                BUFFERED -> {
-                    state = RECEIVED_FROM_BUFFER
-                    if (countable) buffered.decrementAndGet()
+            val completions = mutableListOf<() -> Unit>()
+            synchronized(goChannelCoordinator) {
+                if (state.closed) throw RuntimeGoError("close of closed channel")
+                state.closed = true
+                while (state.buffer.isNotEmpty()) {
+                    val receiver = takeEligible(state.receivers, null) ?: break
+                    val element = state.buffer.removeAt(0)
+                    receiver.decision.claim(receiver.caseIndex,
+                        GoReceiveResult(copyForType(element.value, receiver.channel.elementType), true), null, completions)
+                }
+                (state.senders + state.receivers).shuffled().forEach { waiter ->
+                    if (waiter.decision.selected) return@forEach
+                    if (waiter.sendElement != null)
+                        waiter.decision.claim(waiter.caseIndex, null, RuntimeGoError("send on closed channel"), completions)
+                    else waiter.decision.claim(waiter.caseIndex, GoReceiveResult(zeroValue(elementType), false), null, completions)
                 }
             }
+            completions.forEach { it() }
         }
 
-        private companion object {
-            const val PENDING = 0
-            const val BUFFERED = 1
-            const val RECEIVED_DIRECTLY = 2
-            const val RECEIVED_FROM_BUFFER = 3
-        }
+        fun len(): Long = synchronized(goChannelCoordinator) { state.buffer.size.toLong() }
     }
+    private class GoChannelElement(val value: Any?)
     private class ReturnSignal(val values: List<Any?>, val runeConstants: List<Boolean> = emptyList()) : RuntimeException(null, null, false, false)
     private class BreakSignal(val label: String?) : RuntimeException(null, null, false, false)
     private class ContinueSignal(val label: String?) : RuntimeException(null, null, false, false)
