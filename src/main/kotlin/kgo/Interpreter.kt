@@ -1844,7 +1844,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             is MethodValue -> {
                 val values = target.owner.invoke(target.function, args, target.receiver, expandedVariadic = expandLastArgument,
                     panicState = panicState, deferredCall = deferredCall)
-                return if (values.isEmpty()) null else if (values.size == 1) values.single() else GoMultiValue(values)
+                val importPath = target.owner.packageIdentity
+                val exportedValues = if (target.owner !== this && importPath != null &&
+                    target.function.resultTypes.size == values.size) values.mapIndexed { index, value ->
+                    val resultType = target.owner.externalizeRuntimeType(target.function.resultTypes[index], importPath)
+                    externalizeImportedResult(value, resultType, target.owner)
+                } else values
+                return if (exportedValues.isEmpty()) null else if (exportedValues.size == 1) exportedValues.single() else GoMultiValue(exportedValues)
             }
             is RuntimeErrorMethodValue -> {
                 if (args.isNotEmpty()) throw RuntimeGoError("Error expects no arguments")
