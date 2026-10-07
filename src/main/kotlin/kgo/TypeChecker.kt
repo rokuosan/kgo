@@ -1014,7 +1014,7 @@ class TypeChecker(
                 if (source.direction == ChannelDirection.SEND_ONLY) error("cannot range over send-only channel")
                 null to source.element
             }
-            is NamedGoType -> if (source.name == "string") predeclaredIntType to predeclaredIntType else error("cannot range over ${source.name}")
+            is NamedGoType -> if (source.name == "string") predeclaredIntType to predeclaredInt32Type else error("cannot range over ${source.name}")
             else -> error("cannot range over this type")
         }
         if (source is ChannelGoType && range.targets.size > 1) error("range over channel permits one iteration variable")
@@ -2600,10 +2600,10 @@ class TypeChecker(
         canonicalPredeclaredAlias(type) == predeclaredUint8Type
 
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
-        canonicalPredeclaredAlias(type) == predeclaredIntType
+        canonicalPredeclaredAlias(type) == predeclaredInt32Type
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
-        canonicalPredeclaredAlias(type) == predeclaredIntType
+        canonicalPredeclaredAlias(type) == predeclaredInt32Type
 
     private fun validateType(type: GoTypeSyntax, active: Set<String> = emptySet(), indirect: Boolean = false) {
         when (type) {
@@ -3224,13 +3224,14 @@ class TypeChecker(
             "#predeclared-float32", "#predeclared-float64", "#predeclared-string",
             "#predeclared-complex64", "#predeclared-complex128" -> type
             "#predeclared-int", "#predeclared-uint8" -> type
+            "#predeclared-int32" -> NamedGoType("int32")
             "#predeclared-uint32" -> NamedGoType("uint32")
             "#predeclared-uint64" -> NamedGoType("uint64")
             "#predeclared-uintptr" -> NamedGoType("uintptr")
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
                     "byte" -> predeclaredUint8Type
-                    "rune" -> predeclaredIntType
+                    "rune" -> predeclaredInt32Type
                     "error" -> errorInterfaceType
                     else -> type
                 }
@@ -3296,7 +3297,7 @@ class TypeChecker(
     }
     private fun defaultType(type: GoTypeSyntax) = when (type) {
         untypedInt -> predeclaredIntType
-        untypedRune -> predeclaredIntType
+        untypedRune -> predeclaredInt32Type
         untypedFloat -> predeclaredFloat64Type
         untypedComplex -> predeclaredComplex128Type
         untypedString -> predeclaredStringType
@@ -3307,7 +3308,7 @@ class TypeChecker(
     private fun canonicalPredeclaredAlias(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         byteType -> if ("byte" !in typeDeclarations) predeclaredUint8Type else type
         NamedGoType("uint8") -> if ("uint8" !in typeDeclarations) predeclaredUint8Type else type
-        runeType -> if ("rune" !in typeDeclarations) predeclaredIntType else type
+        runeType -> if ("rune" !in typeDeclarations) predeclaredInt32Type else type
         intType -> if ("int" !in typeDeclarations) predeclaredIntType else type
         NamedGoType("error") -> if ("error" !in typeDeclarations) predeclaredErrorType else type
         boolType -> if ("bool" !in typeDeclarations) predeclaredBoolType else type
@@ -3316,6 +3317,7 @@ class TypeChecker(
         stringType -> if ("string" !in typeDeclarations) predeclaredStringType else type
         NamedGoType("complex64") -> if ("complex64" !in typeDeclarations) predeclaredComplex64Type else type
         NamedGoType("complex128") -> if ("complex128" !in typeDeclarations) predeclaredComplex128Type else type
+        NamedGoType("int32") -> if ("int32" !in typeDeclarations) predeclaredInt32Type else type
         NamedGoType("uint32") -> if ("uint32" !in typeDeclarations) predeclaredUint32Type else type
         NamedGoType("uint64") -> if ("uint64" !in typeDeclarations) predeclaredUint64Type else type
         NamedGoType("uintptr") -> if ("uintptr" !in typeDeclarations) predeclaredUintptrType else type
@@ -3444,6 +3446,7 @@ class TypeChecker(
         private val nilType = NamedGoType("#nil")
         private val intType = NamedGoType("int")
         private val predeclaredIntType = NamedGoType("#predeclared-int")
+        private val predeclaredInt32Type = NamedGoType("#predeclared-int32")
         private val predeclaredUint8Type = NamedGoType("#predeclared-uint8")
         private val predeclaredErrorType = NamedGoType("#predeclared-error")
         private val predeclaredBoolType = NamedGoType("#predeclared-bool")
@@ -3460,7 +3463,7 @@ class TypeChecker(
         private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(stringType))))
-        private val integerNames = setOf("#predeclared-int", "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
+        private val integerNames = setOf("#predeclared-int", "#predeclared-int32", "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val floatNames = setOf("#predeclared-float32", "#predeclared-float64", "float32", "float64")
         private val complexNames = setOf("#predeclared-complex64", "#predeclared-complex128", "complex64", "complex128")
         private val builtinTypes = integerNames + floatNames + complexNames + setOf("bool", "string")
