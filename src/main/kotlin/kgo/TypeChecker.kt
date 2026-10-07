@@ -306,7 +306,7 @@ class TypeChecker(
                 QualifiedGoType(importPath, current.name) else current
             is PointerGoType -> PointerGoType(visit(current.element))
             is SliceGoType -> SliceGoType(visit(current.element))
-            is ArrayGoType -> ArrayGoType(current.length, visit(current.element))
+            is ArrayGoType -> ArrayGoType(current.length?.let(::externalizeArrayLength), visit(current.element))
             is MapGoType -> MapGoType(visit(current.key), visit(current.value))
             is ChannelGoType -> ChannelGoType(visit(current.element), current.direction)
             is StructGoType -> StructGoType(current.fields.map { field ->
@@ -329,6 +329,11 @@ class TypeChecker(
         }
         return visit(type)
     }
+
+    private fun externalizeArrayLength(expression: Expression): Expression =
+        constantInteger(expression)?.let { value ->
+            LiteralExpression(Token(TokenKind.INT, value.toString(), Position(0, 1, 1)))
+        } ?: expression
 
     private fun dotImportedIdentifierType(name: String): Pair<String, GoTypeSyntax>? {
         dotImportPaths.forEach { path ->

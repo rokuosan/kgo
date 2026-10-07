@@ -2390,7 +2390,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is NamedGoType -> if (typeDefinitions.containsKey(type.name)) QualifiedGoType(importPath, type.name) else type
         is PointerGoType -> PointerGoType(externalizeRuntimeType(type.element, importPath))
         is SliceGoType -> SliceGoType(externalizeRuntimeType(type.element, importPath))
-        is ArrayGoType -> ArrayGoType(type.length, externalizeRuntimeType(type.element, importPath))
+        is ArrayGoType -> ArrayGoType(type.length?.let(::externalizeRuntimeArrayLength),
+            externalizeRuntimeType(type.element, importPath))
         is MapGoType -> MapGoType(externalizeRuntimeType(type.key, importPath), externalizeRuntimeType(type.value, importPath))
         is ChannelGoType -> ChannelGoType(externalizeRuntimeType(type.element, importPath), type.direction)
         is StructGoType -> StructGoType(type.fields.map { field ->
@@ -2414,6 +2415,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         )
         is QualifiedGoType -> type
     }
+
+    private fun externalizeRuntimeArrayLength(expression: Expression): Expression =
+        runCatching { integerLiteral(expression) }.getOrNull()?.let { value ->
+            LiteralExpression(Token(TokenKind.INT, value.toString(), Position(0, 1, 1)))
+        } ?: expression
 
     private fun externalizeImportedResult(value: Any?, type: GoTypeSyntax, owner: Interpreter): Any? {
         val importPath = owner.packageIdentity ?: return copyForType(value, type)
