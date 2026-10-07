@@ -2967,6 +2967,11 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 if (low < 0 || high < low || high > bytes.size) throw RuntimeGoError("string slice bounds out of range")
                 GoString(bytes.copyOfRange(low, high), receiver.type)
             }
+            is GoNilValue -> if (underlying(receiver.type) is SliceGoType) {
+                val high = highValue?.let { collectionIndex(it, "slice index") } ?: 0
+                if (low != 0 || high != 0) throw RuntimeGoError("slice bounds out of range")
+                receiver
+            } else throw RuntimeGoError("cannot slice this value")
             else -> throw RuntimeGoError("cannot slice this value")
         }
     }
