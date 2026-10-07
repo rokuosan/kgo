@@ -240,6 +240,9 @@ class Interpreter(private val output: (String) -> Unit = { print(it) }) {
         RuntimeTarget({ globals.get(name) }, { globals.set(name, it) }, type)
     } else null
 
+    private fun exportedVariablePointer(name: String): GoPointer? =
+        if (name in exportedVariableNames) globals.pointer(name) else null
+
     private fun methodDeclaration(type: GoTypeSyntax, name: String): Pair<Interpreter, FunctionDeclaration>? {
         methods[methodKey(type, name)]?.let { return this to it }
         val base = (type as? PointerGoType)?.element ?: type
@@ -1427,16 +1430,15 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private suspend fun addressOf(expression: Expression, env: Environment): GoPointer = when (expression) {
         is NameExpression -> env.imports.dotPackages.firstNotNullOfOrNull { path ->
-            importedRuntimePackages[path]?.exportedVariableTarget(expression.name)
-        }?.let { target -> GoPointer.reference(target.get, target.set, target.type) } ?: env.pointer(expression.name)
+            importedRuntimePackages[path]?.exportedVariablePointer(expression.name)
+        } ?: env.pointer(expression.name)
         is SelectorExpression -> {
-            val target = if (expression.receiver is NameExpression && !env.contains(expression.receiver.name)) {
+            val pointer = if (expression.receiver is NameExpression && !env.contains(expression.receiver.name)) {
                 env.imports.packages[expression.receiver.name]?.let { path ->
-                    importedRuntimePackages[path]?.exportedVariableTarget(expression.field)
+                    importedRuntimePackages[path]?.exportedVariablePointer(expression.field)
                 }
             } else null
-            target?.let { GoPointer.reference(it.get, it.set, it.type) }
-                ?: pointerToStructField(evaluate(expression.receiver, env), expression.field)
+            pointer ?: pointerToStructField(evaluate(expression.receiver, env), expression.field)
         }
         is IndexExpression -> {
             val receiver = evaluate(expression.receiver, env)
