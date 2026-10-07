@@ -2562,8 +2562,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is BigInteger -> NamedGoType("int")
         is GoMap -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: MapGoType(value.keyType, value.valueType)
         is FunctionValue -> value.type ?: value.owner.checkedFunctionType(value.function)
-        is MethodValue -> value.owner.checkedFunctionType(value.function)
-        is RuntimeErrorMethodValue -> FunctionGoType(emptyList(), listOf(NamedGoType("string")))
+        is MethodValue -> value.type ?: value.owner.checkedFunctionType(value.function).let { signature ->
+            if (value.owner !== this) value.owner.packageIdentity?.let {
+                value.owner.externalizeRuntimeType(signature, it) as FunctionGoType
+            } ?: signature else signature
+        }
+        is RuntimeErrorMethodValue -> value.type ?: FunctionGoType(emptyList(), listOf(NamedGoType("string")))
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> NamedGoType("int")
@@ -2996,8 +3000,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         else if (value is GoChannel && actual is ChannelGoType)
             value.retype(actual.element, actual.direction, namedTypeName(type), type, namedTypePackage(type))
         else if (value is FunctionValue && actual is FunctionGoType) value.copy(type = type)
-        else if (value is MethodValue && actual is FunctionGoType) value
-        else if (value is RuntimeErrorMethodValue && actual is FunctionGoType) value
+        else if (value is MethodValue && actual is FunctionGoType) value.copy(type = type)
+        else if (value is RuntimeErrorMethodValue && actual is FunctionGoType) value.copy(type = type)
         else if (value is MethodExpressionValue && actual is FunctionGoType) value.copy(type = type)
         else if (value is GoStruct && actual is StructGoType) {
             val fields = linkedMapOf<String, Any?>()
@@ -3151,8 +3155,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         is FunctionGoType -> when (value) {
             is FunctionValue -> value.copy(type = type)
-            is MethodValue -> value
-            is RuntimeErrorMethodValue -> value
+            is MethodValue -> value.copy(type = type)
+            is RuntimeErrorMethodValue -> value.copy(type = type)
             is MethodExpressionValue -> value.copy(type = type)
             is BuiltinValue -> value.copy(type = type)
             null, is GoNilValue -> GoNilValue(type)
@@ -4361,7 +4365,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     )
     private data class BuiltinValue(val name: String, val type: GoTypeSyntax? = null)
     private data class TypeValue(val type: GoTypeSyntax)
-    private data class MethodValue(val function: FunctionDeclaration, val receiver: Any?, val owner: Interpreter)
+    private data class MethodValue(
+        val function: FunctionDeclaration,
+        val receiver: Any?,
+        val owner: Interpreter,
+        val type: GoTypeSyntax? = null
+    )
     private data class MethodExpressionValue(val receiverType: GoTypeSyntax, val name: String, val type: GoTypeSyntax)
     private data class GoMultiValue(val values: List<Any?>)
     private data class GoReceiveResult(val value: Any?, val ok: Boolean)
@@ -4386,7 +4395,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     )
     private class PanicState(var activePanic: PanicSignal? = null, var recoverAllowed: Boolean = false)
     private data class GoRuntimeErrorValue(val message: String)
-    private data class RuntimeErrorMethodValue(val receiver: GoRuntimeErrorValue)
+    private data class RuntimeErrorMethodValue(val receiver: GoRuntimeErrorValue, val type: GoTypeSyntax? = null)
     private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
         var recovered: Boolean = false
     }
