@@ -35,7 +35,7 @@ internal object GoUnsafePackage {
             "bool", "int8", "uint8" -> Layout(1, 1)
             "int16", "uint16" -> Layout(2, 2)
             "int32", "uint32", "float32" -> Layout(4, 4)
-            "int64", "uint64", "int", "uint", "uintptr", "float64" -> Layout(8, 8)
+            "#predeclared-int", "int64", "uint64", "int", "uint", "uintptr", "float64" -> Layout(8, 8)
             "complex64" -> Layout(8, 4)
             "complex128" -> Layout(16, 8)
             "string" -> Layout(16, 8)

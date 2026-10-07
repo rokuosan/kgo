@@ -998,7 +998,8 @@ class Interpreter(
 
     private fun canonicalAliasType(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         NamedGoType("byte") -> if (!typeDefinitions.containsKey("byte")) NamedGoType("uint8") else type
-        NamedGoType("rune") -> if (!typeDefinitions.containsKey("rune")) NamedGoType("int32") else type
+        NamedGoType("rune") -> if (!typeDefinitions.containsKey("rune")) predeclaredIntRuntimeType else type
+        NamedGoType("int") -> if (!typeDefinitions.containsKey("int")) predeclaredIntRuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
         is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
@@ -1069,7 +1070,7 @@ class Interpreter(
                     yield()
                     val (cp, width) = decodeUtf8Rune(value.bytes, byteIndex)
                     if (range.targets.isNotEmpty()) {
-                        val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), NamedGoType("int32"))).take(range.targets.size)
+                        val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), predeclaredIntRuntimeType)).take(range.targets.size)
                         assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, loopEnv,
                             declaredTypes = declarationTypes)
                     }
@@ -1127,7 +1128,7 @@ class Interpreter(
             is SliceGoType -> NamedGoType("int") to source.element
             is MapGoType -> source.key to source.value
             is ChannelGoType -> null to source.element
-            NamedGoType("string") -> NamedGoType("int") to NamedGoType("int32")
+            NamedGoType("string") -> NamedGoType("int") to predeclaredIntRuntimeType
             else -> null
         } ?: return emptyList()
         return listOfNotNull(pair.first, pair.second).take(range.targets.size)
@@ -1857,7 +1858,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         val type = when (sourceType) {
             NamedGoType("#untyped-bool") -> NamedGoType("bool")
             NamedGoType("#untyped-int") -> NamedGoType("int")
-            NamedGoType("#untyped-rune") -> NamedGoType("int32")
+            NamedGoType("#untyped-rune") -> predeclaredIntRuntimeType
             NamedGoType("#untyped-float") -> NamedGoType("float64")
             NamedGoType("#untyped-complex") -> NamedGoType("complex128")
             NamedGoType("#untyped-string") -> NamedGoType("string")
@@ -2409,7 +2410,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         is NamedGoType -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> NamedGoType("uint8")
-            "rune" -> NamedGoType("int32")
+            "rune" -> predeclaredIntRuntimeType
             "error" -> errorInterfaceType
             else -> type
         }
@@ -2554,7 +2555,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         is GoBoolean -> value.type
         is GoInteger -> when {
             value.type == NamedGoType("byte") && !typeDefinitions.containsKey("byte") -> NamedGoType("uint8")
-            value.type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") -> NamedGoType("int32")
+            value.type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") -> predeclaredIntRuntimeType
             else -> value.type
         }
         is GoRational -> NamedGoType("float64")
@@ -3259,11 +3260,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         (underlying(type) as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
-        type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") ||
-            type == NamedGoType("int32") && !typeDefinitions.containsKey("int32")
+        canonicalAliasType(type) == predeclaredIntRuntimeType
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
-        !typeDefinitions.containsKey("rune") && !typeDefinitions.containsKey("int32") &&
-            canonicalAliasType(type) == NamedGoType("int32")
+        canonicalAliasType(type) == predeclaredIntRuntimeType
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
         setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
@@ -3334,7 +3333,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
         "int8", "uint8", "byte" -> 8
         "int16", "uint16" -> 16
-        "int32", "uint32", "rune" -> 32
+        "int32", "uint32" -> 32
         else -> 64
     }
 
@@ -4113,7 +4112,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private fun defaultConstantValue(value: Any?, expression: Expression? = null, env: Environment? = null): Any? = when {
         value == null -> null
         value is BigInteger && expression != null && env != null && isRuneConstantExpression(expression, env) ->
-            GoInteger(value.longValueExact(), NamedGoType("int32"))
+            GoInteger(value.longValueExact(), predeclaredIntRuntimeType)
         value is GoRational -> value.toDouble()
         value is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), NamedGoType("complex128"))
         else -> defaultIntegerValue(value)
@@ -4121,10 +4120,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun defaultRuneValue(value: Any?, expression: Expression?, env: Environment): Any? =
         if (value is BigInteger && expression != null && isRuneConstantExpression(expression, env))
-            GoInteger(value.longValueExact(), NamedGoType("int32")) else value
+            GoInteger(value.longValueExact(), predeclaredIntRuntimeType) else value
 
     private fun asRuneValue(value: Any?): Any? = if (value is BigInteger)
-        GoInteger(value.longValueExact(), NamedGoType("int32")) else value
+        GoInteger(value.longValueExact(), predeclaredIntRuntimeType) else value
 
     private fun isRuneConstantExpression(expression: Expression, env: Environment): Boolean =
         integerConstantKind(expression, env) == 2
@@ -4753,7 +4752,8 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private class FallthroughSignal : RuntimeException(null, null, false, false)
 
     companion object {
-        private val integerTypeNames = setOf("int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
+        private val predeclaredIntRuntimeType = NamedGoType("#predeclared-int")
+        private val integerTypeNames = setOf("#predeclared-int", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")
