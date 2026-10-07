@@ -196,7 +196,9 @@ class Lexer(private val source: String) {
     private fun peekOrNull(): Char? = source.getOrNull(offset)
     private fun advance() {
         if (offset >= source.length) return
+        val start = position()
         val cp = source.codePointAt(offset)
+        if (cp == 0) throw ScanError("illegal character NUL", start)
         val count = Character.charCount(cp)
         offset += count
         val byteCount = when {
