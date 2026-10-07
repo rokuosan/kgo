@@ -4,7 +4,7 @@ import java.math.BigInteger
 
 /** Go 1.0 unsafe intrinsics and the 64-bit data layout used by this JVM target. */
 internal object GoUnsafePackage {
-    private val uintptr = NamedGoType("uintptr")
+    private val uintptr = NamedGoType("#predeclared-uintptr")
     private val any = InterfaceGoType(emptyList())
 
     private val functions = setOf("Sizeof", "Alignof", "Offsetof")

@@ -1008,6 +1008,9 @@ class Interpreter(
         NamedGoType("string") -> if (!typeDefinitions.containsKey("string")) predeclaredStringRuntimeType else type
         NamedGoType("complex64") -> if (!typeDefinitions.containsKey("complex64")) predeclaredComplex64RuntimeType else type
         NamedGoType("complex128") -> if (!typeDefinitions.containsKey("complex128")) predeclaredComplex128RuntimeType else type
+        NamedGoType("uint32") -> if (!typeDefinitions.containsKey("uint32")) predeclaredUInt32RuntimeType else type
+        NamedGoType("uint64") -> if (!typeDefinitions.containsKey("uint64")) predeclaredUInt64RuntimeType else type
+        NamedGoType("uintptr") -> if (!typeDefinitions.containsKey("uintptr")) predeclaredUintptrRuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
         is ArrayGoType -> ArrayGoType(type.length, canonicalAliasType(type.element))
@@ -1923,7 +1926,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
         unsafeIntrinsicName(call.function, env)?.let { name ->
             val argument = call.arguments.singleOrNull() ?: throw RuntimeGoError("unsafe intrinsic requires one argument")
-            return GoInteger(unsafeIntrinsicValue(name, argument, env), NamedGoType("uintptr"))
+            return GoInteger(unsafeIntrinsicValue(name, argument, env), predeclaredUintptrRuntimeType)
         }
         val builtinName = (call.function as? NameExpression)?.name
         if (builtinName in setOf("len", "cap") && builtinName?.let {
@@ -2436,6 +2439,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             "#predeclared-string" -> NamedGoType("string")
             "#predeclared-complex64" -> NamedGoType("complex64")
             "#predeclared-complex128" -> NamedGoType("complex128")
+            "#predeclared-uint32" -> NamedGoType("uint32")
+            "#predeclared-uint64" -> NamedGoType("uint64")
+            "#predeclared-uintptr" -> NamedGoType("uintptr")
             else -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
@@ -4798,7 +4804,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         private val predeclaredStringRuntimeType = NamedGoType("#predeclared-string")
         private val predeclaredComplex64RuntimeType = NamedGoType("#predeclared-complex64")
         private val predeclaredComplex128RuntimeType = NamedGoType("#predeclared-complex128")
-        private val integerTypeNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
+        private val predeclaredUInt32RuntimeType = NamedGoType("#predeclared-uint32")
+        private val predeclaredUInt64RuntimeType = NamedGoType("#predeclared-uint64")
+        private val predeclaredUintptrRuntimeType = NamedGoType("#predeclared-uintptr")
+        private val integerTypeNames = setOf("#predeclared-int", "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")

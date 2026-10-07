@@ -2122,7 +2122,7 @@ class TypeChecker(
             if (unsafeName == "Offsetof" && selectorPath(call.arguments.single()) == null)
                 error("unsafe.Offsetof requires a struct field selector")
             expressionType(call.arguments.single(), scope)
-            return listOf(NamedGoType("uintptr"))
+            return listOf(predeclaredUintptrType)
         }
         if (target is SelectorExpression) {
             val importedType = importedPackageType(target, scope)
@@ -2351,7 +2351,7 @@ class TypeChecker(
                 val count = constantInteger(shiftExpression, scope)
                     ?: error("shift count must be a non-negative integer constant or unsigned integer")
                 if (count.signum() < 0) error("negative shift count")
-                requireIntegerConstantRepresentable(shiftExpression, NamedGoType("uint64"), scope)
+                requireIntegerConstantRepresentable(shiftExpression, predeclaredUint64Type, scope)
             } else if (!isUnsignedInteger(right)) {
                 error("shift count must have unsigned integer type")
             }
@@ -3224,6 +3224,9 @@ class TypeChecker(
             "#predeclared-float32", "#predeclared-float64", "#predeclared-string",
             "#predeclared-complex64", "#predeclared-complex128" -> type
             "#predeclared-int", "#predeclared-uint8" -> type
+            "#predeclared-uint32" -> NamedGoType("uint32")
+            "#predeclared-uint64" -> NamedGoType("uint64")
+            "#predeclared-uintptr" -> NamedGoType("uintptr")
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
                     "byte" -> predeclaredUint8Type
@@ -3313,6 +3316,9 @@ class TypeChecker(
         stringType -> if ("string" !in typeDeclarations) predeclaredStringType else type
         NamedGoType("complex64") -> if ("complex64" !in typeDeclarations) predeclaredComplex64Type else type
         NamedGoType("complex128") -> if ("complex128" !in typeDeclarations) predeclaredComplex128Type else type
+        NamedGoType("uint32") -> if ("uint32" !in typeDeclarations) predeclaredUint32Type else type
+        NamedGoType("uint64") -> if ("uint64" !in typeDeclarations) predeclaredUint64Type else type
+        NamedGoType("uintptr") -> if ("uintptr" !in typeDeclarations) predeclaredUintptrType else type
         else -> type
     }
     private fun requireBoolean(type: GoTypeSyntax, context: String) { if (!isBoolean(type)) error("$context must be boolean") }
@@ -3446,12 +3452,15 @@ class TypeChecker(
         private val predeclaredStringType = NamedGoType("#predeclared-string")
         private val predeclaredComplex64Type = NamedGoType("#predeclared-complex64")
         private val predeclaredComplex128Type = NamedGoType("#predeclared-complex128")
+        private val predeclaredUint32Type = NamedGoType("#predeclared-uint32")
+        private val predeclaredUint64Type = NamedGoType("#predeclared-uint64")
+        private val predeclaredUintptrType = NamedGoType("#predeclared-uintptr")
         private val byteType = NamedGoType("byte")
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(stringType))))
-        private val integerNames = setOf("#predeclared-int", "#predeclared-uint8", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
+        private val integerNames = setOf("#predeclared-int", "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val floatNames = setOf("#predeclared-float32", "#predeclared-float64", "float32", "float64")
         private val complexNames = setOf("#predeclared-complex64", "#predeclared-complex128", "complex64", "complex128")
         private val builtinTypes = integerNames + floatNames + complexNames + setOf("bool", "string")

@@ -6,6 +6,8 @@ internal object GoMathPackage {
     private val float32 = NamedGoType("#predeclared-float32")
     private val int = NamedGoType("#predeclared-int")
     private val bool = NamedGoType("#predeclared-bool")
+    private val uint32 = NamedGoType("#predeclared-uint32")
+    private val uint64 = NamedGoType("#predeclared-uint64")
     private val integerConstants = setOf(
         "MaxInt8", "MinInt8", "MaxInt16", "MinInt16", "MaxInt32", "MinInt32", "MaxInt64", "MinInt64",
         "MaxUint8", "MaxUint16", "MaxUint32", "MaxUint64"
@@ -68,10 +70,10 @@ internal object GoMathPackage {
         put("Pow10", FunctionGoType(listOf(ParameterSyntax(null, int)), listOf(float64)))
         put("Nextafter", FunctionGoType(List(2) { ParameterSyntax(null, float64) }, listOf(float64)))
         put("Lgamma", FunctionGoType(listOf(ParameterSyntax(null, float64)), listOf(float64, int)))
-        put("Float32bits", FunctionGoType(listOf(ParameterSyntax(null, float32)), listOf(NamedGoType("uint32"))))
-        put("Float32frombits", FunctionGoType(listOf(ParameterSyntax(null, NamedGoType("uint32"))), listOf(float32)))
-        put("Float64bits", FunctionGoType(listOf(ParameterSyntax(null, float64)), listOf(NamedGoType("uint64"))))
-        put("Float64frombits", FunctionGoType(listOf(ParameterSyntax(null, NamedGoType("uint64"))), listOf(float64)))
+        put("Float32bits", FunctionGoType(listOf(ParameterSyntax(null, float32)), listOf(uint32)))
+        put("Float32frombits", FunctionGoType(listOf(ParameterSyntax(null, uint32)), listOf(float32)))
+        put("Float64bits", FunctionGoType(listOf(ParameterSyntax(null, float64)), listOf(uint64)))
+        put("Float64frombits", FunctionGoType(listOf(ParameterSyntax(null, uint64)), listOf(float64)))
     }
 
     val exportedNames: Set<String> get() = constants.keys + functions.keys
