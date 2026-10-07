@@ -90,5 +90,5 @@ Bodyless function and method declarations are parsed and type-checked,
 but their external implementations cannot be linked by the interpreter.
 Go features added after Go 1.0, such as generics and later literal syntax, are
 out of scope. The project builds and runs on JDK 27 with Gradle
-9.8.1 and Kotlin 2.4.20. Kotlin currently emits JVM 26 bytecode, which runs on
+9.7.0 and Kotlin 2.4.20. Kotlin currently emits JVM 26 bytecode, which runs on
 JDK 27. `kotlinx.coroutines` provides the goroutine runtime.
