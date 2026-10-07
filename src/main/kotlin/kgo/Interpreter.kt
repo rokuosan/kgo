@@ -3299,7 +3299,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
 
     private fun makeSize(value: Any?, operation: String): Int {
         val size = number(value, operation)
-        if (size > Int.MAX_VALUE) throw RuntimeGoError("$operation out of range")
+        if (size < Int.MIN_VALUE || size > Int.MAX_VALUE) throw RuntimeGoError("$operation out of range")
         return size.toInt()
     }
 
