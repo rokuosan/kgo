@@ -4624,7 +4624,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun defaultConstantValue(value: Any?, expression: Expression? = null, env: Environment? = null): Any? = when {
         value == null -> null
         value is BigInteger && expression != null && env != null && isRuneConstantExpression(expression, env) ->
-            GoInteger(value.longValueExact(), predeclaredIntRuntimeType)
+            GoInteger(value.longValueExact(), predeclaredInt32RuntimeType)
         value is BigInteger -> defaultIntegerValue(value)
         value is GoRational -> GoFloat(value.toDouble(), predeclaredFloat64RuntimeType)
         value is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), predeclaredComplex128RuntimeType)
