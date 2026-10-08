@@ -158,9 +158,9 @@ internal object GoPackageDependencies {
         is BinaryExpression -> expressionReferences(expression.left, locals, resolveType, callReferences = callReferences) +
             expressionReferences(expression.right, locals, resolveType, callReferences = callReferences)
         is CallExpression -> expressionReferences(expression.function, locals, resolveType, callReferences = callReferences) +
-            expression.arguments.flatMap { expressionReferences(it, locals, resolveType, callReferences = callReferences) } +
-            callReferences(expression.function, locals)
-        is SelectorExpression -> expressionReferences(expression.receiver, locals, resolveType, callReferences = callReferences)
+            expression.arguments.flatMap { expressionReferences(it, locals, resolveType, callReferences = callReferences) }
+        is SelectorExpression -> expressionReferences(expression.receiver, locals, resolveType, callReferences = callReferences) +
+            callReferences(expression, locals)
         is IndexExpression -> expressionReferences(expression.receiver, locals, resolveType, callReferences = callReferences) +
             expressionReferences(expression.index, locals, resolveType, callReferences = callReferences)
         is SliceExpression -> expressionReferences(expression.receiver, locals, resolveType, callReferences = callReferences) +
