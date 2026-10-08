@@ -2561,8 +2561,26 @@ class TypeChecker(
         leftExpression: Expression?,
         rightExpression: Expression?,
         scope: Scope
-    ): Boolean = assignable(left, right) || constantIntegerAssignable(left, right, leftExpression, scope) ||
-        assignable(right, left) || constantIntegerAssignable(right, left, rightExpression, scope)
+    ): Boolean = constantOperandAssignable(left, right, leftExpression, scope) ||
+        constantOperandAssignable(right, left, rightExpression, scope)
+
+    private fun constantOperandAssignable(
+        from: GoTypeSyntax,
+        to: GoTypeSyntax,
+        expression: Expression?,
+        scope: Scope
+    ): Boolean {
+        if (assignable(from, to)) {
+            if (!isUntyped(from) || expression == null) return true
+            return try {
+                requireIntegerConstantRepresentable(expression, to, scope)
+                true
+            } catch (_: GoTypeError) {
+                false
+            }
+        }
+        return constantIntegerAssignable(from, to, expression, scope)
+    }
 
     private fun constantIntegerAssignable(from: GoTypeSyntax, to: GoTypeSyntax, expression: Expression?, scope: Scope): Boolean {
         if (expression == null || !isUntyped(from) || !isInteger(to)) return false
