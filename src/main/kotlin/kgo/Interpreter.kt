@@ -2646,7 +2646,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         is NamedGoType -> when (type.name) {
-            "#predeclared-bool" -> predeclaredBoolRuntimeType
+            "#predeclared-bool" -> NamedGoType("bool")
             "#predeclared-float32" -> NamedGoType("float32")
             "#predeclared-float64" -> NamedGoType("float64")
             "#predeclared-string" -> NamedGoType("string")
@@ -3280,8 +3280,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             is PointerGoType -> GoPointer.nil(actual.element, type)
             is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
             else -> null
-        } else if (value is GoBoolean && actual == predeclaredBoolRuntimeType) GoBoolean(value.value, type)
-        else if (value is Boolean && actual == predeclaredBoolRuntimeType) GoBoolean(value, type)
+        } else if (value is GoBoolean &&
+            (actual == NamedGoType("bool") || actual == predeclaredBoolRuntimeType)) GoBoolean(value.value, type)
+        else if (value is Boolean &&
+            (actual == NamedGoType("bool") || actual == predeclaredBoolRuntimeType)) GoBoolean(value, type)
         else if (value is GoString && actual == NamedGoType("string")) GoString(value.bytes.copyOf(), type)
         else if (value is GoPointer && actual is PointerGoType) value.retype(actual.element, type)
         else if (value is GoArray && actual is ArrayGoType)

@@ -1146,7 +1146,7 @@ class TypeChecker(
                         requireUniqueNames(names, "receive declaration")
                         if (names.none { it != "_" }) error("receive declaration must introduce a variable")
                         names.forEachIndexed { i, name ->
-                            if (name != "_") caseScope.define(name, if (i == 0) defaultType(channel.element) else boolType,
+                            if (name != "_") caseScope.define(name, if (i == 0) defaultType(channel.element) else predeclaredBoolType,
                                 trackUsage = true)
                         }
                     } else {
@@ -1156,7 +1156,7 @@ class TypeChecker(
                         }
                         if (targets.size !in 1..2) error("invalid receive assignment")
                         targets.first()?.let { requireAssignable(channel.element, it, "receive assignment") }
-                        if (targets.size == 2) targets[1]?.let { requireAssignable(boolType, it, "receive status") }
+                        if (targets.size == 2) targets[1]?.let { requireAssignable(predeclaredBoolType, it, "receive status") }
                     }
                 }
                 else -> error("invalid select communication")
@@ -1505,15 +1505,15 @@ class TypeChecker(
             }
             if (expression is UnaryExpression && expression.operator == TokenKind.ARROW) {
                 val channel = underlying(expressionType(expression.operand, scope)) as? ChannelGoType ?: error("receive requires a channel")
-                return if (arity == 2) listOf(channel.element, boolType) else listOf(channel.element)
+                return if (arity == 2) listOf(channel.element, predeclaredBoolType) else listOf(channel.element)
             }
             if (expression is TypeAssertionExpression) {
                 val asserted = expressionType(expression, scope)
-                return if (arity == 2) listOf(asserted, boolType) else listOf(asserted)
+                return if (arity == 2) listOf(asserted, predeclaredBoolType) else listOf(asserted)
             }
             if (expression is IndexExpression && arity == 2) {
                 val map = underlying(expressionType(expression.receiver, scope)) as? MapGoType
-                if (map != null) return listOf(map.value, boolType)
+                if (map != null) return listOf(map.value, predeclaredBoolType)
             }
         }
         return expressions.map { expressionType(it, scope) }
@@ -2615,7 +2615,7 @@ class TypeChecker(
 
     private fun comparisonResultType(left: Expression?, right: Expression?, scope: Scope): GoTypeSyntax =
         if (left != null && right != null && isConstantExpression(left, scope) && isConstantExpression(right, scope))
-            untypedBool else boolType
+            untypedBool else predeclaredBoolType
 
     private fun requireSameOperands(
         left: GoTypeSyntax,
@@ -3475,7 +3475,7 @@ class TypeChecker(
     private fun underlying(type: GoTypeSyntax, seen: Set<String> = emptySet()): GoTypeSyntax = when (type) {
         is NamedGoType -> when (type.name) {
             "#predeclared-error" -> errorInterfaceType
-            "#predeclared-bool" -> predeclaredBoolType
+            "#predeclared-bool" -> boolType
             "#predeclared-float32", "#predeclared-float64", "#predeclared-string",
             "#predeclared-complex64", "#predeclared-complex128" -> type
             "#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32",
@@ -3483,7 +3483,6 @@ class TypeChecker(
             "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr" -> type
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
-                    "bool" -> predeclaredBoolType
                     "byte" -> predeclaredUint8Type
                     "rune" -> predeclaredIntType
                     "error" -> errorInterfaceType
@@ -3753,7 +3752,7 @@ class TypeChecker(
         private val predeclaredUintptrType = NamedGoType("#predeclared-uintptr")
         private val byteType = predeclaredUint8Type
         private val runeType = NamedGoType("rune")
-        private val boolType = predeclaredBoolType
+        private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(predeclaredStringType))))
         private val integerNames = setOf("#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32", "#predeclared-int64", "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
