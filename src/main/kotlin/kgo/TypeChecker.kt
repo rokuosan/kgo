@@ -2620,12 +2620,12 @@ class TypeChecker(
             } else if (!isComparable(operandLeft) || !isComparable(operandRight)) {
                 error("cannot compare values of type $operandLeft and $operandRight")
             }
-            return comparisonResultType(comparisonContext)
+            return comparisonResultType(comparisonContext, leftExpression, rightExpression, scope)
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
             if (!((isOrderedNumeric(operandLeft) && isOrderedNumeric(operandRight)) || (isString(operandLeft) && isString(operandRight)))) error("invalid ordered comparison")
             requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
-            return comparisonResultType(comparisonContext)
+            return comparisonResultType(comparisonContext, leftExpression, rightExpression, scope)
         }
         if (operator == TokenKind.ADD && isString(operandLeft) && isString(operandRight)) {
             requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
@@ -2687,8 +2687,14 @@ class TypeChecker(
         }
     }
 
-    private fun comparisonResultType(expectedType: GoTypeSyntax? = null): GoTypeSyntax =
-        expectedType?.takeIf(::isBoolean) ?: predeclaredBoolType
+    private fun comparisonResultType(
+        expectedType: GoTypeSyntax?, left: Expression?, right: Expression?, scope: Scope
+    ): GoTypeSyntax {
+        expectedType?.takeIf(::isBoolean)?.let { return it }
+        val constantComparison = left != null && right != null &&
+            isConstantExpression(left, scope) && isConstantExpression(right, scope)
+        return if (constantComparison) untypedBool else predeclaredBoolType
+    }
 
     private fun isComparisonExpression(expression: Expression): Boolean =
         (expression.unparenthesized() as? BinaryExpression)?.operator in setOf(
