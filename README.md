@@ -51,8 +51,8 @@ intrinsics and `Pointer` using a fixed 64-bit Go data layout on the JVM.
 Intrinsic arguments are type-checked but not evaluated, and their `uintptr`
 results can be used as constants. Pointer and `uintptr` conversions use
 interpreter-managed addresses.
-The `runtime` import exposes the Go 1.0 `Error` interface, including its
-`RuntimeError()` marker method for distinguishing run-time panic values.
+The `runtime` import exposes the Go 1.0 `Error` interface with its
+`String() string` method for run-time panic values.
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
 an incomplete subset of the Go 1.0 type system. The Go 1.0 specification leaves
