@@ -1776,6 +1776,23 @@ class Interpreter(
                 type.results.map { resolveDependencyType(it, scopes) }
             )
         }
+        function.parameters.forEachIndexed { index, name ->
+            name?.takeIf { it != "_" }?.let { parameter ->
+                functionScope[parameter] = function.parameterTypes.getOrNull(index)
+                    ?.let { resolveDependencyType(it, listOf(functionScope)) }
+            }
+        }
+        function.receiver?.let { receiver ->
+            receiver.name?.takeIf { it != "_" }?.let { name ->
+                functionScope[name] = resolveDependencyType(receiver.type, listOf(functionScope))
+            }
+        }
+        function.resultNames.forEachIndexed { index, name ->
+            name?.takeIf { it != "_" }?.let { result ->
+                functionScope[result] = function.resultTypes.getOrNull(index)
+                    ?.let { resolveDependencyType(it, listOf(functionScope)) }
+            }
+        }
         fun infer(
             expression: Expression, scopes: List<MutableMap<String, GoTypeSyntax?>>, resultIndex: Int = 0
         ): GoTypeSyntax? {
