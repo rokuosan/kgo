@@ -1148,7 +1148,10 @@ class TypeChecker(
         val source = underlying(expressionType(range.expression, scope))
         val keyAndValue = when (source) {
             is ArrayGoType -> predeclaredIntType to source.element
-            is PointerGoType -> error("cannot range over this pointer type")
+            is PointerGoType -> when (val pointed = underlying(source.element)) {
+                is ArrayGoType -> predeclaredIntType to pointed.element
+                else -> error("cannot range over this pointer type")
+            }
             is SliceGoType -> predeclaredIntType to source.element
             is MapGoType -> source.key to source.value
             is ChannelGoType -> {

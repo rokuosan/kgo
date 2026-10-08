@@ -1210,14 +1210,18 @@ class Interpreter(
         if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
-                // Go does not evaluate an array range expression when only the index is used
-                // and its length is constant; calls and receives make len non-constant.
+                // Go does not evaluate an array or pointer-to-array range expression when
+                // only the index is used and its length is constant; calls and receives make
+                // len non-constant, so those range expressions are evaluated.
                 rangeIndexed(arrayLength, effectiveRange, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
         }
         val evaluated = copyValue(evaluate(range.expression, env))
-        val value = evaluated
+        val pointerToArray = (evaluated as? GoPointer)?.takeIf { pointer ->
+            pointer.pointeeType?.let { underlying(it) is ArrayGoType } == true || (!pointer.isNil && pointer.get() is GoArray)
+        }
+        val value = if (pointerToArray == null) evaluated else pointerToArray
         when (value) {
             is GoChannel -> while (true) {
                 val received = value.receive()
@@ -1234,6 +1238,18 @@ class Interpreter(
             is GoNilValue -> when (val type = underlying(value.type)) {
                 is SliceGoType, is MapGoType -> Unit
                 is ChannelGoType -> awaitCancellation()
+                is PointerGoType -> {
+                    val arrayType = underlying(type.element) as? ArrayGoType
+                        ?: throw RuntimeGoError("range over this pointer type is not implemented")
+                    val length = staticRangeArrayLength(range.expression, env)
+                        ?: throw RuntimeGoError("range over pointer requires an array with a known length")
+                    rangeIndexed(length, effectiveRange, body, loopEnv, labels, declarationTypes) { index ->
+                        if (onlyIndexIsUsed) listOf(index.toLong()) else {
+                            val array = GoPointer.nil(arrayType, value.type).get() as GoArray
+                            listOf(index.toLong(), copyValue(array.values[index]))
+                        }
+                    }
+                }
                 else -> throw RuntimeGoError("range over this value is not implemented")
             }
             is GoString -> {
@@ -1256,7 +1272,16 @@ class Interpreter(
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), copyValue(value.get(i)))
             }
             is GoPointer -> {
-                throw RuntimeGoError("cannot range over pointer")
+                val arrayLength = staticRangeArrayLength(range.expression, env)
+                    ?: if (!value.isNil) (value.get() as? GoArray)?.values?.size
+                        ?: throw RuntimeGoError("range over pointer requires an array")
+                    else throw RuntimeGoError("range over nil pointer requires a known array length")
+                rangeIndexed(arrayLength, effectiveRange, body, loopEnv, labels, declarationTypes) { index ->
+                    if (onlyIndexIsUsed) listOf(index.toLong()) else {
+                        val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
+                        listOf(index.toLong(), copyValue(array.values[index]))
+                    }
+                }
             }
             is GoArray -> rangeIndexed(value.values.size, effectiveRange, body, loopEnv, labels, declarationTypes) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), copyValue(value.values[i]))
@@ -1285,6 +1310,9 @@ class Interpreter(
         val source = staticExpressionType(range.expression, env)?.let(::underlying) ?: return emptyList()
         val pair = when (source) {
             is ArrayGoType -> predeclaredIntRuntimeType to source.element
+            is PointerGoType -> (underlying(source.element) as? ArrayGoType)?.let {
+                predeclaredIntRuntimeType to it.element
+            }
             is SliceGoType -> predeclaredIntRuntimeType to source.element
             is MapGoType -> source.key to source.value
             is ChannelGoType -> null to source.element
