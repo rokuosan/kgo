@@ -112,17 +112,8 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
 
 private data class GoExactComplex(val real: GoRational, val imaginary: GoRational)
 private class GoGoroutineRuntime(private val scope: CoroutineScope) {
-    private val initializationComplete = CompletableDeferred<Unit>()
-
     fun launch(task: suspend () -> Unit) {
-        scope.launch {
-            initializationComplete.await()
-            task()
-        }
-    }
-
-    fun start() {
-        initializationComplete.complete(Unit)
+        scope.launch { task() }
     }
 }
 private data class RuntimeImports(val packages: Map<String, String> = emptyMap(), val dotPackages: Set<String> = emptySet())
@@ -236,7 +227,6 @@ class Interpreter(
                     initialization.onAwait { it }
                 }
                 if (goroutineFailure.isCompleted) throw goroutineFailure.await()
-                goroutineRuntime.start()
                 val mainExecution = async { invoke(main, emptyList()) }
                 select<Unit> {
                     goroutineFailure.onAwait { throw it }
