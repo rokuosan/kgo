@@ -398,7 +398,13 @@ class Interpreter(
                     val name = resultNames.getOrNull(i)
                     val normalized = if (returned.runeConstants.getOrNull(i) == true &&
                         underlying(signature.results[i]) is InterfaceGoType) asRuneValue(value) else value
-                    if (name != null && name != "_") env.set(name, normalized)
+                    val sourceExpression = returned.sourceExpressions.getOrNull(i)
+                        ?: returned.sourceExpressions.singleOrNull()?.takeIf { returned.values.size > 1 }
+                    val assigned = if (underlying(signature.results[i]) is InterfaceGoType)
+                        boxInterfaceAssignment(normalized, signature.results[i], sourceExpression, env,
+                            if (returned.sourceExpressions.size == 1 && returned.values.size > 1) i else 0)
+                    else normalized
+                    if (name != null && name != "_") env.set(name, assigned)
                 }
             }
             defersRun = true
@@ -518,7 +524,7 @@ class Interpreter(
                 val runeConstants = if (values.size == statement.values.size) statement.values.mapIndexed { index, expression ->
                     values.getOrNull(index) is BigInteger && isRuneConstantExpression(expression, env)
                 } else List(values.size) { false }
-                throw ReturnSignal(values, runeConstants)
+                throw ReturnSignal(values, runeConstants, statement.values)
             }
             is ExpressionStatement -> evaluate(statement.expression, env)
             is AssignmentStatement -> assign(statement, env)
@@ -1420,10 +1426,14 @@ class Interpreter(
             expressions, names.size, env, resolvedType?.let { type -> List(expressions.size) { type } }
         ), names.size)
         if (values.isNotEmpty() && values.size != names.size) throw RuntimeGoError("initializer count mismatch")
+        val sharedExpression = expressions.singleOrNull()?.takeIf { values.size > 1 }
         names.forEachIndexed { i, name ->
             val value = if (values.isNotEmpty()) values[i].let {
-                val sourceExpression = expressions.getOrNull(i)
-                if (resolvedType != null) convert(resolvedType, defaultRuneValue(it, sourceExpression, env))
+                val sourceExpression = expressions.getOrNull(i) ?: sharedExpression
+                val resultIndex = if (sharedExpression != null) i else 0
+                if (resolvedType != null && underlying(resolvedType) is InterfaceGoType)
+                    boxInterfaceAssignment(it, resolvedType, sourceExpression, env, resultIndex)
+                else if (resolvedType != null) convert(resolvedType, defaultRuneValue(it, sourceExpression, env))
                 else defaultConstantValue(it, sourceExpression, env)
             }
             else if (resolvedType != null) zeroValue(resolvedType) else GoInteger(0L, NamedGoType("int"))
@@ -5021,7 +5031,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         fun len(): Long = synchronized(goChannelCoordinator) { state.buffer.size.toLong() }
     }
     private class GoChannelElement(val value: Any?)
-    private class ReturnSignal(val values: List<Any?>, val runeConstants: List<Boolean> = emptyList()) : RuntimeException(null, null, false, false)
+    private class ReturnSignal(
+        val values: List<Any?>,
+        val runeConstants: List<Boolean> = emptyList(),
+        val sourceExpressions: List<Expression> = emptyList()
+    ) : RuntimeException(null, null, false, false)
     private class BreakSignal(val label: String?) : RuntimeException(null, null, false, false)
     private class ContinueSignal(val label: String?) : RuntimeException(null, null, false, false)
     private class GotoSignal(val label: String) : RuntimeException(null, null, false, false)
