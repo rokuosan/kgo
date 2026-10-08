@@ -1283,6 +1283,7 @@ class TypeChecker(
         val name = (underlying(type) as? NamedGoType)?.name ?: return null
         if (name in floatNames) {
             val value = constantRational(expression, scope) ?: constantInteger(expression, scope)?.let(GoRational::of)
+                ?: constantComplex(expression, scope)?.takeIf { it.imaginary == GoRational.ZERO }?.real
                 ?: return null
             return constantConvertedRationalIdentity(value, type)
         }
