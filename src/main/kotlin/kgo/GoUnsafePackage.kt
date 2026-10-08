@@ -32,10 +32,11 @@ internal object GoUnsafePackage {
         arrayLength: (Expression) -> BigInteger
     ): Layout = when (val actual = underlying(type)) {
         is NamedGoType -> when (actual.name) {
-            "bool", "#predeclared-uint8", "int8", "uint8" -> Layout(1, 1)
-            "int16", "uint16" -> Layout(2, 2)
-            "int32", "uint32", "float32", "#predeclared-float32" -> Layout(4, 4)
-            "#predeclared-int", "int64", "uint64", "int", "uint", "uintptr", "float64", "#predeclared-float64" -> Layout(8, 8)
+            "bool", "#predeclared-int8", "#predeclared-uint8", "int8", "uint8" -> Layout(1, 1)
+            "#predeclared-int16", "#predeclared-uint16", "int16", "uint16" -> Layout(2, 2)
+            "#predeclared-int32", "#predeclared-uint32", "int32", "uint32", "float32", "#predeclared-float32" -> Layout(4, 4)
+            "#predeclared-int", "#predeclared-int64", "#predeclared-uint", "#predeclared-uint64", "#predeclared-uintptr",
+            "int64", "uint64", "int", "uint", "uintptr", "float64", "#predeclared-float64" -> Layout(8, 8)
             "complex64", "#predeclared-complex64" -> Layout(8, 4)
             "complex128", "#predeclared-complex128" -> Layout(16, 8)
             "string", "#predeclared-string" -> Layout(16, 8)
