@@ -162,9 +162,19 @@ class Interpreter(
     private lateinit var goroutines: CoroutineScope
     private lateinit var goroutineRuntime: GoGoroutineRuntime
 
-    fun run(file: GoFile) = run(listOf(file), emptyList())
+    fun run(file: GoFile) = run(listOf(file))
 
-    fun run(files: List<GoFile>) = run(files, emptyList())
+    fun run(files: List<GoFile>) {
+        val checker = TypeChecker()
+        checker.checkFiles(files)
+        run(
+            files,
+            emptyList(),
+            rootTypeDefinitions = checker.runtimeTypeDefinitions(),
+            rootFunctionTypes = checker.runtimeFunctionTypes(),
+            rootVariableInitializationOrder = checker.runtimeVariableInitializationOrder()
+        )
+    }
 
     internal fun run(
         files: List<GoFile>,
