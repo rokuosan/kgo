@@ -1610,6 +1610,9 @@ class Interpreter(
             }
             if (receiver is GoNilValue && underlying(receiver.type) is MapGoType) {
                 val mapType = underlying(receiver.type) as MapGoType
+                val mapIndex = if (underlying(mapType.key) is InterfaceGoType)
+                    boxInterfaceAssignment(key, mapType.key, index.index, env) else key
+                mapKey(mapIndex, mapType.key)
                 return listOf(MapLookupResult(zeroValue(mapType.value), false))
             }
         }
