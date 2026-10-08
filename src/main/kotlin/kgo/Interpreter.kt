@@ -1310,7 +1310,7 @@ class Interpreter(
             is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.element
             is SliceGoType -> receiver.element
             is MapGoType -> receiver.value
-            is NamedGoType -> if (receiver.name == "string") NamedGoType("byte") else null
+            is NamedGoType -> if (receiver.name == "string") predeclaredUInt8RuntimeType else null
             else -> null
         }
         is SliceExpression -> {
@@ -3345,7 +3345,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             is GoString -> {
                 val i = collectionIndex(rawIndex, "index")
                 if (i !in receiver.bytes.indices) throw RuntimeGoError("string index out of range")
-                GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), NamedGoType("byte"))
+                GoInteger((receiver.bytes[i].toInt() and 0xff).toLong(), predeclaredUInt8RuntimeType)
             }
             else -> throw RuntimeGoError("cannot index this value")
         }
@@ -3675,7 +3675,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val inferredDestinationType = when (sourceValue) {
             is GoSlice -> SliceGoType(sourceValue.elementType)
             is GoNilValue -> underlying(sourceValue.type).takeIf { it is SliceGoType }
-            is GoString -> SliceGoType(NamedGoType("byte"))
+            is GoString -> SliceGoType(predeclaredUInt8RuntimeType)
             else -> null
         }
         val destinationType = when (destinationValue) {

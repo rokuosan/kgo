@@ -3750,7 +3750,7 @@ class TypeChecker(
         private val predeclaredUint32Type = NamedGoType("#predeclared-uint32")
         private val predeclaredUint64Type = NamedGoType("#predeclared-uint64")
         private val predeclaredUintptrType = NamedGoType("#predeclared-uintptr")
-        private val byteType = NamedGoType("byte")
+        private val byteType = predeclaredUint8Type
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
