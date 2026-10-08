@@ -410,7 +410,7 @@ class Interpreter(
                 }
             }
             defersRun = true
-            env.runDefers(deferredRecoverAllowed)
+            env.runDefers()
             val values = when {
                 returned.values.isEmpty() && resultNames.isNotEmpty() && resultNames.all { it != null } ->
                     resultNames.mapIndexed { i, name ->
@@ -445,7 +445,7 @@ class Interpreter(
         } finally {
             try {
                 if (!defersRun && currentCoroutineContext().isActive)
-                    env.runDefers(deferredRecoverAllowed)
+                    env.runDefers()
             } finally {
                 if (panicState.activePanic == null && priorActivePanic != null && !priorActivePanic.recovered)
                     panicState.activePanic = priorActivePanic
