@@ -72,11 +72,6 @@ class TypeChecker(
         this.packageIdentity = sourceImportPath ?: packageName
         if (packageName == "_") error("package name cannot be _")
         if (files.any { it.packageName != packageName }) error("source files declare different package names")
-        files.forEach { file ->
-            val initCount = file.declarations.filterIsInstance<FunctionDeclaration>()
-                .count { it.receiver == null && it.name == "init" }
-            if (initCount > 1) error("multiple init functions in one source file")
-        }
         val declarations = files.flatMap { file -> file.declarations.map { file to it } }
         sourceFilesByVariable.clear()
         sourceFilesByFunction.clear()
