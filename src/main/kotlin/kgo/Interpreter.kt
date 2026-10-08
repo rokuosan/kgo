@@ -572,7 +572,7 @@ class Interpreter(
                     ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = adaptCallArguments(call, target,
-                    evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call)), env)
+                    evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call, env)), env)
                 goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState(), environment = env) }
             }
             is DeferStatement -> {
@@ -580,7 +580,7 @@ class Interpreter(
                     ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = adaptCallArguments(call, target,
-                    evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call)), env)
+                    evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call, env)), env)
                 env.defer { call(target, arguments, call.expandLastArgument, env.panicState, deferredCall = true, environment = env) }
             }
             is BranchStatement -> when (statement.kind) {
@@ -2095,7 +2095,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             staticRangeArrayLength(call.arguments.single(), env)?.let { return it.toLong() }
         }
         val target = evaluate(call.function, env)
-        val rawArgs = evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call))
+        val rawArgs = evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call, env))
         val args = adaptCallArguments(call, target, rawArgs, env).let { arguments ->
             if (target is TypeValue && arguments.size == 1 && call.arguments.size == 1 && !call.expandLastArgument)
                 listOf(defaultRuneValue(arguments.single(), call.arguments.single(), env))
@@ -2199,10 +2199,29 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         else -> emptyList()
     }
 
-    private fun runtimeCallArgumentTypes(target: Any?, call: CallExpression): List<GoTypeSyntax> =
-        if (target is BuiltinValue && target.name == "make")
-            List(call.arguments.size) { predeclaredIntRuntimeType }
-        else callParameterTypes(target)
+    private fun runtimeCallArgumentTypes(target: Any?, call: CallExpression, env: Environment): List<GoTypeSyntax> {
+        if (target !is BuiltinValue) return callParameterTypes(target)
+        return when (target.name) {
+            "make" -> List(call.arguments.size) { predeclaredIntRuntimeType }
+            "append" -> {
+                val slice = call.arguments.firstOrNull()?.let { staticExpressionType(it, env) }
+                    ?.let(::underlying) as? SliceGoType ?: return emptyList()
+                List(call.arguments.size) { index ->
+                    when {
+                        index == 0 -> slice
+                        call.expandLastArgument && index == call.arguments.lastIndex -> SliceGoType(slice.element)
+                        else -> slice.element
+                    }
+                }
+            }
+            "delete" -> {
+                val map = call.arguments.firstOrNull()?.let { staticExpressionType(it, env) }
+                    ?.let(::underlying) as? MapGoType ?: return emptyList()
+                List(call.arguments.size) { index -> if (index == 1) map.key else map }
+            }
+            else -> emptyList()
+        }
+    }
 
     private suspend fun evaluateCallArguments(
         call: CallExpression, env: Environment, expectedTypes: List<GoTypeSyntax> = emptyList()
