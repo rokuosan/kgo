@@ -1205,12 +1205,12 @@ class Interpreter(
         // Keep that scope separate so a same-named variable in the enclosing block
         // is shadowed, and reuse the new bindings across Go 1.0 loop iterations.
         val loopEnv = if (range.operator == TokenKind.DEFINE) env.child() else env
-        if (onlyIndexIsUsed) {
+        if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
                 // Go does not evaluate an array or pointer-to-array range expression when
-                // only the index is used and its length is constant. Function calls and
-                // channel receives in the expression do not change its statically known length.
+                // only the index is used and its length is constant; calls and receives make
+                // len non-constant, so those range expressions are evaluated.
                 rangeIndexed(arrayLength, effectiveRange, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
