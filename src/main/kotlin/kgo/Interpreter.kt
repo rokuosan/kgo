@@ -5370,7 +5370,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
     }
     private class GoLocation(val get: () -> Any?, val set: (Any?) -> Unit)
-    private class GoCell(var value: Any?)
+    private class GoCell(@Volatile var value: Any?)
     private inner class GoChannelState {
         val buffer = mutableListOf<GoChannelElement>()
         val senders = mutableListOf<ChannelWaiter>()
