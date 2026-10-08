@@ -1012,16 +1012,6 @@ class Interpreter(
         }
     }
 
-    private fun compatibleRuntimeType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
-        if (sameRuntimeType(left, right)) return true
-        val canonicalLeft = canonicalAliasType(left)
-        val canonicalRight = canonicalAliasType(right)
-        fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType &&
-            (!type.name.startsWith("#") || type.name.startsWith("#predeclared-"))
-        if (isNamed(canonicalLeft) == isNamed(canonicalRight)) return false
-        return sameRuntimeType(underlying(canonicalLeft), underlying(canonicalRight))
-    }
-
     private fun runtimeChannelAssignable(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
         val canonicalFrom = canonicalAliasType(from)
         val canonicalTo = canonicalAliasType(to)
