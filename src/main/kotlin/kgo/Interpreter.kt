@@ -111,7 +111,22 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
 
 private data class GoExactComplex(val real: GoRational, val imaginary: GoRational)
 private class GoGoroutineRuntime(private val scope: CoroutineScope) {
-    fun launch(task: suspend () -> Unit) = scope.launch { task() }
+    // Go 1.0 delays goroutines started during package initialization until all packages finish.
+    private var initializing = true
+    private val pending = mutableListOf<suspend () -> Unit>()
+
+    @Synchronized
+    fun launch(task: suspend () -> Unit) {
+        if (initializing) pending += task else scope.launch { task() }
+    }
+
+    @Synchronized
+    fun startAfterInitialization() {
+        check(initializing)
+        initializing = false
+        pending.forEach { task -> scope.launch { task() } }
+        pending.clear()
+    }
 }
 private data class RuntimeImports(val packages: Map<String, String> = emptyMap(), val dotPackages: Set<String> = emptySet())
 private val untypedRuneRuntimeType = NamedGoType("#untyped-rune")
@@ -195,6 +210,7 @@ class Interpreter(
                     packageVariableInitializationOrder = rootVariableInitializationOrder
                     preparePackage(files)
                     initializePackage(files)
+                    goroutineRuntime.startAfterInitialization()
                     functions["main"] ?: throw RuntimeGoError("main function not found")
                 }
                 val main = select<FunctionDeclaration> {
