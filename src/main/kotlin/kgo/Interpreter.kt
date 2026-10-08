@@ -1084,10 +1084,10 @@ class Interpreter(
         // Keep that scope separate so a same-named variable in the enclosing block
         // is shadowed, and reuse the new bindings across Go 1.0 loop iterations.
         val loopEnv = if (range.operator == TokenKind.DEFINE) env.child() else env
-        if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
+        if (onlyIndexIsUsed) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
-                // A constant-length array range with only the index does not evaluate the array expression.
+                // Go does not evaluate a constant-length array expression when only the index is used.
                 rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
