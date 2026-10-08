@@ -283,6 +283,7 @@ class TypeChecker(
                             "fmt" -> GoFmtPackage.exportedNames
                             "math" -> GoMathPackage.exportedNames
                             "unsafe" -> GoUnsafePackage.exportedNames
+                            "runtime" -> GoRuntimePackage.exportedTypes
                             else -> emptySet()
                         } + importedPackages[path]?.exportedNames().orEmpty()
                         val collision = dotImportedNames.firstOrNull { !importedNames.add(it) }
@@ -408,6 +409,9 @@ class TypeChecker(
         if (standardPackageName(path) == "unsafe" && name in GoUnsafePackage.exportedTypes) {
             usedDotImportPaths += path
             QualifiedGoType(path, name)
+        } else if (standardPackageName(path) == "runtime" && name in GoRuntimePackage.exportedTypes) {
+            usedDotImportPaths += path
+            QualifiedGoType(path, name)
         } else importedPackages[path]?.takeIf { it.hasExportedType(name) }?.let {
             usedDotImportPaths += path
             QualifiedGoType(path, name)
@@ -419,6 +423,8 @@ class TypeChecker(
         if (scope.getOrNull(alias) != null || scope.typeBinding(alias) != null) return null
         val path = importedPackagePath(alias) ?: return null
         if (standardPackageName(path) == "unsafe" && expression.field in GoUnsafePackage.exportedTypes)
+            return QualifiedGoType(path, expression.field)
+        if (standardPackageName(path) == "runtime" && expression.field in GoRuntimePackage.exportedTypes)
             return QualifiedGoType(path, expression.field)
         return importedPackages[path]?.takeIf { it.hasExportedType(expression.field) }
             ?.let { QualifiedGoType(path, expression.field) }
@@ -1725,6 +1731,9 @@ class TypeChecker(
                         error("type unsafe.${expression.field} is not an expression")
                     GoUnsafePackage.memberType(expression.field) ?: error("undefined unsafe identifier ${expression.field}")
                 }
+                "runtime" -> if (expression.field in GoRuntimePackage.exportedTypes)
+                    error("type runtime.${expression.field} is not an expression")
+                else error("undefined runtime identifier ${expression.field}")
                 else -> importedPackages[path]?.let { imported ->
                     imported.exportedFunctionType(expression.field, path) ?: imported.exportedConstant(expression.field, path)?.type
                         ?: imported.exportedVariableType(expression.field, path)
@@ -2014,6 +2023,8 @@ class TypeChecker(
         is QualifiedGoType -> {
             val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
             if (standardPackageName(path) == "unsafe" && type.name == "Pointer")
+                return QualifiedGoType(path, type.name)
+            if (standardPackageName(path) == "runtime" && type.name in GoRuntimePackage.exportedTypes)
                 return QualifiedGoType(path, type.name)
             if (importedPackages[path]?.hasExportedType(type.name) != true)
                 error("undefined imported type ${type.packageName}.${type.name}")
@@ -2763,6 +2774,7 @@ class TypeChecker(
             is QualifiedGoType -> {
                 val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
                 if (standardPackageName(path) == "unsafe" && type.name == "Pointer") return
+                if (standardPackageName(path) == "runtime" && type.name in GoRuntimePackage.exportedTypes) return
                 if (importedPackages[path]?.hasExportedType(type.name) != true)
                     error("undefined imported type ${type.packageName}.${type.name}")
             }
@@ -2805,7 +2817,7 @@ class TypeChecker(
 
     private fun standardPackageName(path: String): String? {
         return when (path) {
-            "fmt", "math", "unsafe" -> path
+            "fmt", "math", "runtime", "unsafe" -> path
             else -> null
         }
     }
@@ -3379,7 +3391,8 @@ class TypeChecker(
         is QualifiedGoType -> importedPackages[type.packageName]?.let { imported ->
             imported.externalizeType(imported.underlying(NamedGoType(type.name)), type.packageName)
         } ?: if (type.packageName == "unsafe" && type.name == "Pointer")
-            PointerGoType(InterfaceGoType(emptyList())) else type
+            PointerGoType(InterfaceGoType(emptyList())) else GoRuntimePackage.type(type.name)
+            .takeIf { type.packageName == "runtime" } ?: type
         else -> type
     }
     private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType &&

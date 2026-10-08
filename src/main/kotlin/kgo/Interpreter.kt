@@ -2118,7 +2118,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 binding?.value is TypeValue -> binding.value.type
                 binding == null -> env.imports.dotPackages.firstOrNull { path ->
                     target.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
-                        path == "unsafe" && target.name in GoUnsafePackage.exportedTypes
+                        path == "unsafe" && target.name in GoUnsafePackage.exportedTypes ||
+                        path == "runtime" && target.name in GoRuntimePackage.exportedTypes
                 }?.let { path -> QualifiedGoType(path, target.name) }
                     ?: target.name.takeIf { it in builtinTypes }?.let(::NamedGoType)
                 else -> null
@@ -2128,6 +2129,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val alias = (target.receiver as? NameExpression)?.name
             val path = alias?.takeIf { !env.contains(it) && env.typeBinding(it) == null }?.let(env.imports.packages::get)
             if (path == "unsafe" && target.field in GoUnsafePackage.exportedTypes)
+                QualifiedGoType(path, target.field)
+            else if (path == "runtime" && target.field in GoRuntimePackage.exportedTypes)
                 QualifiedGoType(path, target.field)
             else if (path != null && target.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
                 QualifiedGoType(path, target.field) else null
@@ -2566,7 +2569,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 imported.externalizeRuntimeType(imported.underlying(definition), type.packageName)
             }
         } ?: if (type.packageName == "unsafe" && type.name == "Pointer")
-            PointerGoType(InterfaceGoType(emptyList())) else type
+            PointerGoType(InterfaceGoType(emptyList())) else GoRuntimePackage.type(type.name)
+            .takeIf { type.packageName == "runtime" } ?: type
         else -> type
     }
 
