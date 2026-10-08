@@ -15,7 +15,9 @@ internal fun decodeGoCharacterLiteral(text: String): Int {
     if (body.first() != '\\') {
         if (body.codePointCount(0, body.length) != 1)
             throw RuntimeGoError("character literal must contain one Unicode code point")
-        return body.codePointAt(0)
+        return body.codePointAt(0).also {
+            if (!isUnicodeScalarValue(it)) throw RuntimeGoError("invalid Unicode code point")
+        }
     }
     val escape = body.substring(1)
     return when (escape.firstOrNull()) {
@@ -39,7 +41,7 @@ internal fun decodeGoCharacterLiteral(text: String): Int {
             if (hex.length != digits || !hex.all(Char::isHexDigit))
                 throw RuntimeGoError("invalid Unicode character escape")
             val codePoint = hex.toLong(16).toInt()
-            if (codePoint !in 0..0x10ffff)
+            if (!isUnicodeScalarValue(codePoint))
                 throw RuntimeGoError("invalid Unicode code point")
             codePoint
         }
@@ -56,6 +58,9 @@ internal fun decodeGoCharacterLiteral(text: String): Int {
 
 private fun Char.isHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
+private fun isUnicodeScalarValue(codePoint: Int): Boolean =
+    codePoint in 0..0x10ffff && codePoint !in 0xd800..0xdfff
+
 internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
     if (text.length < 2) throw RuntimeGoError("invalid string literal")
     if (text.first() == '`') return text.substring(1, text.length - 1).replace("\r", "")
@@ -69,6 +74,7 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
         if (c != '\\') {
             val codePoint = if (Character.isHighSurrogate(c) && i < body.length && Character.isLowSurrogate(body[i]))
                 Character.toCodePoint(c, body[i++]) else c.code
+            if (!isUnicodeScalarValue(codePoint)) throw RuntimeGoError("invalid Unicode code point")
             appendCodePoint(codePoint)
             continue
         }
@@ -85,7 +91,7 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
             'u', 'U' -> {
                 val digits = if (escaped == 'u') 4 else 8
                 val codePoint = body.substring(i, i + digits).toLong(16).toInt()
-                if (codePoint !in 0..0x10ffff)
+                if (!isUnicodeScalarValue(codePoint))
                     throw RuntimeGoError("invalid Unicode code point")
                 appendCodePoint(codePoint)
                 i += digits
