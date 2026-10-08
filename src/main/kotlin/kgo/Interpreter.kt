@@ -1610,14 +1610,16 @@ class Interpreter(
         declarations: List<T>,
         names: (T) -> List<String>,
         expressions: (T) -> List<Expression>,
-        includeFunctionDependencies: Boolean
+        includeFunctionDependencies: Boolean,
+        referenceNames: (T, Expression) -> Set<String> = { _, expression -> expressionNames(expression) }
     ): List<T> {
         val declarationByName = mutableMapOf<String, Int>()
         declarations.forEachIndexed { index, declaration -> names(declaration).forEach { name ->
             if (name != "_") declarationByName[name] = index
         } }
         val dependencies = declarations.indices.map { index ->
-            val refs = expressions(declarations[index]).flatMapTo(linkedSetOf(), ::expressionNames)
+            val declaration = declarations[index]
+            val refs = expressions(declaration).flatMapTo(linkedSetOf()) { referenceNames(declaration, it) }
             if (includeFunctionDependencies) addFunctionDependencies(refs)
             refs.mapNotNullTo(linkedSetOf()) { declarationByName[it] }
         }
@@ -1641,7 +1643,10 @@ class Interpreter(
             initializations,
             { initialization -> initialization.indices.map(initialization.declaration.names::get) },
             PackageVariableInitialization::initializerExpressions,
-            includeFunctionDependencies = true
+            includeFunctionDependencies = true,
+            referenceNames = { initialization, expression ->
+                withRuntimeImports(declarationImports[initialization.declaration]) { expressionNames(expression) }
+            }
         )
     }
 
@@ -1652,33 +1657,68 @@ class Interpreter(
             val name = pending.removeFirst()
             if (!visited.add(name)) continue
             val function = functions[name] ?: continue
-            val functionReferences = GoPackageDependencies.functionReferences(function)
+            val functionReferences = withRuntimeImports(functionImports[function]) {
+                GoPackageDependencies.functionReferences(function) { literal ->
+                    runCatching { resolveRuntimeType(literal.type, globals) }.getOrNull()
+                }
+            }
             functionReferences.filter { it !in references && it in functions }.forEach(pending::addLast)
             references += functionReferences
         }
     }
 
-    private fun expressionNames(expression: Expression): Set<String> = when (expression) {
+    private fun expressionNames(expression: Expression, expectedType: GoTypeSyntax? = null): Set<String> = when (expression) {
         is NameExpression -> setOf(expression.name)
         is LiteralExpression, is TypeExpression -> emptySet()
         is UnaryExpression -> expressionNames(expression.operand)
         is BinaryExpression -> expressionNames(expression.left) + expressionNames(expression.right)
-        is CallExpression -> expressionNames(expression.function) + expression.arguments.flatMap(::expressionNames)
+        is CallExpression -> expressionNames(expression.function) + expression.arguments.flatMap { expressionNames(it) }
         is SelectorExpression -> expressionNames(expression.receiver)
         is IndexExpression -> expressionNames(expression.receiver) + expressionNames(expression.index)
-        is SliceExpression -> expressionNames(expression.receiver) + listOfNotNull(expression.low, expression.high).flatMap(::expressionNames)
+        is SliceExpression -> expressionNames(expression.receiver) + listOfNotNull(expression.low, expression.high).flatMap { expressionNames(it) }
         is TypeAssertionExpression -> expressionNames(expression.receiver)
         is TypeSwitchGuardExpression -> expressionNames(expression.receiver)
         is ParenthesizedExpression -> expressionNames(expression.expression)
-        is CompositeLiteral -> expression.elements.flatMapTo(linkedSetOf()) { element ->
-            (element.key?.let(::expressionNames) ?: emptySet()) + expressionNames(element.value)
-        }
-        is ElidedCompositeLiteral -> expression.elements.flatMapTo(linkedSetOf()) { element ->
-            (element.key?.let(::expressionNames) ?: emptySet()) + expressionNames(element.value)
-        }
-        is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
-            expression.parameters, expression.resultNames, expression.body
+        is CompositeLiteral -> referencedCompositeElements(
+            expression.elements, runCatching { resolveRuntimeType(expression.type, globals) }.getOrNull()
         )
+        is ElidedCompositeLiteral -> referencedCompositeElements(expression.elements, expectedType)
+        is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
+            expression.parameters, expression.resultNames, expression.body,
+            compositeType = { literal -> runCatching { resolveRuntimeType(literal.type, globals) }.getOrNull() }
+        )
+    }
+
+    private fun referencedCompositeElements(elements: List<CompositeElement>, type: GoTypeSyntax?): Set<String> {
+        val resolvedType = type?.let { runCatching { resolveRuntimeType(it, globals) }.getOrDefault(it) }
+        val actual = when (val unwrapped = resolvedType?.let(::underlying)) {
+            is PointerGoType -> underlying(unwrapped.element)
+            else -> unwrapped
+        }
+        val fields = (actual as? StructGoType)?.fields?.flatMap { field ->
+            field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { it to field.type }
+        }.orEmpty()
+        return elements.flatMapIndexed { index, element ->
+            val valueType = when (actual) {
+                is ArrayGoType -> actual.element
+                is SliceGoType -> actual.element
+                is MapGoType -> actual.value
+                is StructGoType -> {
+                    val fieldName = (element.key as? NameExpression)?.name
+                    if (fieldName == null) fields.getOrNull(index)?.second
+                    else fields.firstOrNull { it.first == fieldName }?.second
+                }
+                else -> null
+            }
+            listOfNotNull(element.key.takeUnless { actual is StructGoType }, element.value)
+                .flatMap { expressionNames(it, valueType) }
+        }.toSet()
+    }
+
+    private inline fun <T> withRuntimeImports(imports: RuntimeImports?, action: () -> T): T {
+        val previous = globals.imports
+        if (imports != null) globals.imports = imports
+        return try { action() } finally { globals.imports = previous }
     }
 
     private suspend fun evaluateRhs(
