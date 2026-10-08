@@ -1691,16 +1691,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                         throw RuntimeGoError("invalid memory address or nil pointer dereference")
                     MethodValue(method, receiver, owner)
                 } else if (receiver is GoInterfaceValue) {
-                    val (owner, method) = methodDeclaration(receiver.dynamicType, expression.field)
-                        ?: throw RuntimeGoError("unknown interface method: ${expression.field}")
-                    val pointerReceiver = method.receiver?.type is PointerGoType
-                    val boundReceiver = when {
-                        pointerReceiver && receiver.value is GoPointer -> receiver.value
-                        pointerReceiver -> throw RuntimeGoError("interface value does not contain a pointer receiver")
-                        receiver.value is GoPointer -> copyValue(dereference(receiver.value))
-                        else -> copyValue(receiver.value)
-                    }
-                    MethodValue(method, boundReceiver, owner)
+                    // The dynamic type may satisfy the interface through a promoted method.
+                    (receiver.implementationOwner ?: this)
+                        .selectStructMember(receiver.value, expression.field, expression.receiver, env)
                 } else {
                     selectStructMember(receiver, expression.field, expression.receiver, env)
                 }
@@ -1818,7 +1811,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val method: FunctionDeclaration?,
             val receiver: Any?,
             val runtimeError: GoRuntimeErrorValue? = null,
-            val methodOwner: Interpreter? = null
+            val methodOwner: Interpreter? = null,
+            val resolvedMember: Any? = null
         )
         var level = listOf(Node(receiver, emptySet()))
         while (level.isNotEmpty()) {
@@ -1834,11 +1828,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
                 val current = dereference(node.value)
                 if (current is GoInterfaceValue) {
-                    if (current.value is GoRuntimeErrorValue && name == "Error")
-                        candidates += Candidate(null, null, current, current.value)
-                    else (current.implementationOwner ?: this).methodDeclaration(current.dynamicType, name)?.let { (owner, method) ->
-                        candidates += Candidate(null, method, current, methodOwner = owner)
-                    }
+                    val member = if (current.value is GoRuntimeErrorValue && name == "Error")
+                        RuntimeErrorMethodValue(current.value)
+                    else (current.implementationOwner ?: this)
+                        .selectStructMember(current.value, name, receiverExpression, env)
+                    candidates += Candidate(null, null, current, resolvedMember = member)
                     return@forEach
                 }
                 val struct = current as? GoStruct
@@ -1870,6 +1864,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             if (candidates.isNotEmpty()) {
                 if (candidates.size != 1) throw RuntimeGoError("ambiguous selector $name")
                 val candidate = candidates.single()
+                candidate.resolvedMember?.let { return it }
                 candidate.owner?.let { owner -> return owner.fields[name] }
                 candidate.runtimeError?.let { return RuntimeErrorMethodValue(it) }
                 val method = candidate.method ?: throw RuntimeGoError("unknown selector $name")
