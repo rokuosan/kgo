@@ -2511,7 +2511,16 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     importedRuntimePackages[path]?.exportedVariablePointer(expression.field)
                 }
             } else null
-            pointer ?: pointerToStructField(evaluateStructReceiver(expression.receiver, env), expression.field)
+            pointer ?: run {
+                val receiverType = staticExpressionType(expression.receiver, env)
+                    ?: throw RuntimeGoError("cannot determine addressable field receiver")
+                val receiverPointer = if (underlying(receiverType) is PointerGoType) {
+                    evaluate(expression.receiver, env) as? GoPointer
+                        ?: throw RuntimeGoError("field receiver is not a pointer")
+                } else addressOf(expression.receiver, env)
+                unsafeAddress(receiverPointer)
+                pointerToStructField(receiverPointer, expression.field)
+            }
         }
         is IndexExpression -> {
             val receiver = evaluateIndexReceiver(expression.receiver, env)
