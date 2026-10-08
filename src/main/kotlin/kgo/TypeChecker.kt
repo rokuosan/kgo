@@ -1377,6 +1377,7 @@ class TypeChecker(
         var sawDefault = false
         var sawNil = false
         val seenTypes = mutableListOf<GoTypeSyntax>()
+        val guardUsage = statement.guard.name?.takeIf { it != "_" }?.let(switchScope::newUsageGroup)
         statement.clauses.forEach { clause ->
             if (clause.types == null) {
                 if (sawDefault) error("multiple default cases in type switch")
@@ -1399,7 +1400,7 @@ class TypeChecker(
             val singleType = clause.types?.singleOrNull()?.takeUnless { it == NamedGoType("nil") }
                 ?.let { resolveLocalType(it, switchScope) }
             if (statement.guard.name != null && statement.guard.name != "_")
-                caseScope.define(statement.guard.name, singleType ?: interfaceType, trackUsage = true)
+                caseScope.define(statement.guard.name, singleType ?: interfaceType, usageGroup = guardUsage)
             inLabelBlock(clause) {
                 withLocalTypeScope {
                     clause.statements.forEachIndexed { index, child ->
@@ -3428,13 +3429,13 @@ class TypeChecker(
             booleanConstant: Boolean? = null,
             isFunction: Boolean = false,
             complexConstant: ConstantComplexValue? = null,
-            trackUsage: Boolean = false
+            trackUsage: Boolean = false,
+            usageGroup: LocalUsage? = null
         ) {
             values[name] = type
-            if (trackUsage && localUsage != null) {
-                LocalUsage(name).also {
+            if ((trackUsage || usageGroup != null) && localUsage != null) {
+                (usageGroup ?: LocalUsage(name).also(localUsage::add)).also {
                     trackedLocals[name] = it
-                    localUsage += it
                 }
             } else trackedLocals.remove(name)
             if (isFunction) functionNames += name else functionNames -= name
@@ -3456,6 +3457,9 @@ class TypeChecker(
         fun markUsed(name: String) {
             if (name in values) trackedLocals[name]?.used = true
             else parent?.markUsed(name)
+        }
+        fun newUsageGroup(name: String): LocalUsage? = localUsage?.let { usage ->
+            LocalUsage(name).also(usage::add)
         }
         fun unusedLocalVariable(): String? = localUsage?.firstOrNull { !it.used }?.name
         fun isVariable(name: String): Boolean = if (name in values)
