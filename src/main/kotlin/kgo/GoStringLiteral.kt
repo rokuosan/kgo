@@ -96,9 +96,7 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
 }
 
 internal fun encodeGoCodePoint(value: Int): ByteArray {
-    // Go 1.1 began rejecting surrogate halves. Go 1.0 still encoded them as
-    // three-byte UTF-8 sequences, so preserve that behavior for this language version.
-    val codePoint = if (value in 0..0x10ffff) value else 0xfffd
+    val codePoint = if (value in 0..0x10ffff && value !in 0xd800..0xdfff) value else 0xfffd
     return when {
         codePoint <= 0x7f -> byteArrayOf(codePoint.toByte())
         codePoint <= 0x7ff -> byteArrayOf(
