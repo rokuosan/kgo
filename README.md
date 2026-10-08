@@ -21,8 +21,8 @@ slicing, and ranging. Named struct, scalar, array, slice, map, channel, and
 function types retain method receiver information for value and pointer
 receiver dispatch. Method expressions on named types, pointers, and interfaces
 expose the receiver as their first function argument.
-Bound method values are not part of Go 1.0; use a function literal to capture a
-receiver in a function value.
+Bound method values evaluate and save their receiver when the selector is
+evaluated; the resulting function value can be called later.
 Array and struct comparisons use Go value equality, including when they are used
 as map keys. Arrays and structs copy at value-transfer points; slices, maps,
 channels, and pointers keep their reference semantics.
