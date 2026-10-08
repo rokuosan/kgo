@@ -813,7 +813,7 @@ class Interpreter(
                 val path = env.imports.packages[target.receiver.name]
                 if (path != null) importedRuntimePackages[path]?.exportedVariableTarget(target.field)?.let { return it }
             }
-            val receiver = evaluateStructReceiver(target.receiver, env)
+            val receiver = evaluateAssignmentStructReceiver(target.receiver, env)
             val type = staticExpressionType(target, env)
             RuntimeTarget(
                 { pointerToStructField(receiver, target.field).get() },
@@ -836,6 +836,35 @@ class Interpreter(
         }
         else -> throw RuntimeGoError("invalid assignment target")
     }
+
+    /**
+     * Prepare a struct-field assignment receiver without triggering bounds checks
+     * for an indexed aggregate until the assignment itself is performed.
+     */
+    private suspend fun evaluateAssignmentStructReceiver(expression: Expression, env: Environment): Any? =
+        when (val target = expression.unparenthesized()) {
+            is IndexExpression -> {
+                val receiver = evaluateIndexReceiver(target.receiver, env)
+                val key = collectionIndex(evaluate(target.index, env, runtimeIndexType(receiver)), "index")
+                val type = staticExpressionType(target, env)
+                val location = when (receiver) {
+                    is GoSlice -> RuntimeTarget({ receiver.get(key) }, { receiver.set(key, it) }, type)
+                    is GoArray -> RuntimeTarget({ arrayElement(receiver, key) }, { setArrayElement(receiver, key, it) }, type)
+                    is GoPointer -> RuntimeTarget({
+                        arrayElement(pointedArray(receiver), key)
+                    }, {
+                        setArrayElement(pointedArray(receiver), key, it)
+                    }, type)
+                    else -> return evaluateStructReceiver(expression, env)
+                }
+                GoPointer.reference(location.get, location.set, type)
+            }
+            is SelectorExpression -> {
+                val location = resolveTarget(target, env)
+                GoPointer.reference(location.get, location.set, location.type)
+            }
+            else -> evaluateStructReceiver(expression, env)
+        }
 
     private suspend fun evaluateAssignmentReceiver(expression: Expression, env: Environment): Any? {
         val dereference = expression.unparenthesized() as? UnaryExpression
