@@ -406,7 +406,7 @@ class Interpreter(
                 ?: throw RuntimeGoError("invalid variadic function signature")
             val extras = arguments.drop(fixedCount)
             val variadicSlice = if (extras.isEmpty()) GoNilValue(sliceType) else
-                GoSlice(sliceType.element, extras.mapTo(mutableListOf(), ::copyValue), 0, extras.size, extras.size,
+                GoSlice(sliceType.element, extras.mapTo(mutableListOf()) { copyForType(it, sliceType.element) }, 0, extras.size, extras.size,
                     type = sliceType)
             arguments.take(fixedCount) + variadicSlice
         }
@@ -2874,7 +2874,25 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun runtimeCallArgumentTypes(target: Any?, call: CallExpression, env: Environment): List<GoTypeSyntax> {
-        if (target !is BuiltinValue) return callParameterTypes(target)
+        if (target !is BuiltinValue) {
+            val parameterTypes = callParameterTypes(target)
+            val variadic = when (target) {
+                is FunctionValue -> target.function.variadic
+                is MethodValue -> target.function.variadic
+                is MethodExpressionValue -> (target.type as? FunctionGoType)?.parameters?.lastOrNull()?.variadic == true
+                else -> false
+            }
+            if (!variadic) return parameterTypes.take(call.arguments.size)
+            val variadicIndex = parameterTypes.lastIndex
+            val sliceType = parameterTypes.lastOrNull() as? SliceGoType ?: return parameterTypes
+            return List(call.arguments.size) { index ->
+                when {
+                    call.expandLastArgument && index == call.arguments.lastIndex -> sliceType
+                    index >= variadicIndex -> sliceType.element
+                    else -> parameterTypes.getOrNull(index) ?: sliceType.element
+                }
+            }
+        }
         return when (target.name) {
             "make" -> List(call.arguments.size) { predeclaredIntRuntimeType }
             "append" -> {
