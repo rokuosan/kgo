@@ -4347,13 +4347,25 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val identity = pointer.locationIdentity ?: throw RuntimeGoError("pointer has no address")
         synchronized(unsafeAddressByLocation) {
             return unsafeAddressByLocation.getOrPut(identity) {
-                val address = nextUnsafeAddress
-                nextUnsafeAddress = Math.addExact(nextUnsafeAddress, 8L)
+                val layout = pointer.pointeeType?.let { type ->
+                    runCatching {
+                        GoUnsafePackage.layout(type, ::underlying) { integerLiteral(it, globals) }
+                    }.getOrNull()
+                }
+                val alignment = layout?.align ?: 8L
+                val address = alignUnsafeAddress(nextUnsafeAddress, alignment)
+                val reservedSize = maxOf(8L, layout?.size ?: 8L)
+                nextUnsafeAddress = alignUnsafeAddress(Math.addExact(address, reservedSize), 8L)
                 unsafePointerByAddress[address] = pointer
                 registerUnsafeSubaddresses(pointer, address, mutableSetOf())
                 address
             }
         }
+    }
+
+    private fun alignUnsafeAddress(address: Long, alignment: Long): Long {
+        val remainder = address % alignment
+        return if (remainder == 0L) address else Math.addExact(address, alignment - remainder)
     }
 
     private fun registerUnsafeSubaddresses(pointer: GoPointer, base: Long, ancestors: MutableSet<String>) {
