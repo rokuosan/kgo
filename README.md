@@ -11,7 +11,8 @@ built-ins are supported for represented numeric types.
 `panic` and `recover` unwind deferred calls per goroutine, and `recover` succeeds
 only when called directly from a deferred function.
 Package constants and variables initialize in dependency order, including
-dependencies reached through package functions.
+dependencies reached through package functions, methods, method values, and
+promoted methods.
 Numeric constant expressions retain exact integer and rational values until a
 concrete numeric type is selected.
 Composite literals, structs, arrays, slices, maps, indexing, slicing, and their
