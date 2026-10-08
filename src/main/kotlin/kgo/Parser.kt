@@ -195,13 +195,6 @@ class Parser(private val tokens: List<Token>) {
 
     private fun parseTypeDeclaration(): TypeDeclaration {
         val name = expect(TokenKind.IDENT).lexeme
-        if ((at(TokenKind.STRUCT) || at(TokenKind.INTERFACE)) && tokens.getOrNull(index + 1)?.kind != TokenKind.LBRACE) {
-            return when (take().kind) {
-                TokenKind.STRUCT -> TypeDeclaration(name, StructGoType(emptyList()), incomplete = true)
-                TokenKind.INTERFACE -> TypeDeclaration(name, InterfaceGoType(emptyList()), incomplete = true)
-                else -> error("unreachable")
-            }
-        }
         return TypeDeclaration(name, parseType())
     }
 
