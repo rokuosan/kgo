@@ -4971,37 +4971,37 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         private val addresses = mutableMapOf<String, GoPointer>()
         var functionResultTypes: List<GoTypeSyntax> = parent?.functionResultTypes.orEmpty()
         fun child() = Environment(this, deferredCalls, panicState, imports)
-        fun containsLocal(name: String) = values.containsKey(name)
-        fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
+        @Synchronized fun containsLocal(name: String) = values.containsKey(name)
+        @Synchronized fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
             values[name] = type?.let { copyForType(value, it) } ?: copyValue(value)
             if (type != null) types[name] = type
         }
-        fun defineConstant(name: String, value: Any?, type: GoTypeSyntax? = null) {
+        @Synchronized fun defineConstant(name: String, value: Any?, type: GoTypeSyntax? = null) {
             define(name, value, type)
             constants += name
         }
-        fun isConstant(name: String): Boolean = if (name in values) name in constants else parent?.isConstant(name) == true
-        fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
-        fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
-        fun binding(name: String): Lookup? = when {
+        @Synchronized fun isConstant(name: String): Boolean = if (name in values) name in constants else parent?.isConstant(name) == true
+        @Synchronized fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
+        @Synchronized fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
+        @Synchronized fun binding(name: String): Lookup? = when {
             values.containsKey(name) -> Lookup(values[name])
             name in namedTypes -> Lookup(TypeValue(namedTypes.getValue(name)))
             else -> parent?.binding(name)
         }
-        fun getOrNull(name: String): Any? = lookup(name)?.value
-        fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
-        fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
-        fun defineType(name: String, type: NamedGoType) { namedTypes[name] = type }
-        fun clearLocalTypes() { namedTypes.clear() }
-        fun typeBinding(name: String): NamedGoType? = namedTypes[name] ?: parent?.typeBinding(name)
-        fun containsLocalType(name: String) = name in namedTypes
-        fun pointer(name: String): GoPointer {
+        @Synchronized fun getOrNull(name: String): Any? = lookup(name)?.value
+        @Synchronized fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
+        @Synchronized fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
+        @Synchronized fun defineType(name: String, type: NamedGoType) { namedTypes[name] = type }
+        @Synchronized fun clearLocalTypes() { namedTypes.clear() }
+        @Synchronized fun typeBinding(name: String): NamedGoType? = namedTypes[name] ?: parent?.typeBinding(name)
+        @Synchronized fun containsLocalType(name: String) = name in namedTypes
+        @Synchronized fun pointer(name: String): GoPointer {
             val owner = owner(name) ?: throw RuntimeGoError("undefined: $name")
             return owner.addresses.getOrPut(name) {
                 GoPointer.reference({ owner.get(name) }, { owner.set(name, it) }, owner.types[name] ?: runtimeType(owner.get(name)))
             }
         }
-        private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
+        @Synchronized private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
         suspend fun runDefers(allowRecover: Boolean = false) {
             val panicAtStart = panicState.activePanic
@@ -5035,7 +5035,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 panicState.activePanic = panicAtStart
             panicFromDefer?.takeUnless { it.recovered }?.let { throw it }
         }
-        fun set(name: String, value: Any?) {
+        @Synchronized fun set(name: String, value: Any?) {
             if (values.containsKey(name)) {
                 val type = types[name]
                 val assigned = type?.let { copyForType(value, it) } ?: copyValue(value)
