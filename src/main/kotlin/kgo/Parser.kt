@@ -55,7 +55,7 @@ class Parser(private val tokens: List<Token>) {
             val receiverType: GoTypeSyntax
             if (match(TokenKind.MUL)) {
                 receiverName = null
-                receiverType = PointerGoType(parseType())
+                receiverType = PointerGoType(NamedGoType(expect(TokenKind.IDENT).lexeme))
             } else {
                 val first = expect(TokenKind.IDENT).lexeme
                 if (current().kind == TokenKind.RPAREN) {
@@ -63,7 +63,9 @@ class Parser(private val tokens: List<Token>) {
                     receiverType = NamedGoType(first)
                 } else {
                     receiverName = first
-                    receiverType = parseType()
+                    val pointer = match(TokenKind.MUL)
+                    val baseType = NamedGoType(expect(TokenKind.IDENT).lexeme)
+                    receiverType = if (pointer) PointerGoType(baseType) else baseType
                 }
             }
             expect(TokenKind.RPAREN)
@@ -622,7 +624,8 @@ class Parser(private val tokens: List<Token>) {
             val type: GoTypeSyntax
             if (at(TokenKind.MUL)) {
                 names = emptyList()
-                type = parseType()
+                take()
+                type = PointerGoType(parseTypeName())
             } else {
                 val first = expect(TokenKind.IDENT).lexeme
                 if (match(TokenKind.PERIOD)) {
@@ -669,6 +672,12 @@ class Parser(private val tokens: List<Token>) {
         }
         expect(TokenKind.RBRACE)
         return InterfaceGoType(methods, embedded)
+    }
+
+    private fun parseTypeName(): GoTypeSyntax {
+        val name = expect(TokenKind.IDENT).lexeme
+        return if (match(TokenKind.PERIOD)) QualifiedGoType(name, expect(TokenKind.IDENT).lexeme)
+            else NamedGoType(name)
     }
 
     private fun asExpression(statement: Statement): Expression =
