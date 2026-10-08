@@ -1253,7 +1253,7 @@ class Interpreter(
                 // Go 1 leaves map iteration order unspecified. Snapshot keys, then
                 // recheck membership and read values as each entry is reached so
                 // deleting an unreached entry suppresses that iteration value.
-                for (key in value.values.keys.toList().shuffled()) {
+                for (key in value.snapshot().keys.shuffled()) {
                     yield()
                     if (!value.values.containsKey(key)) continue
                     val entryValue = if (onlyIndexIsUsed) null else value.values[key]
@@ -2691,7 +2691,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             else concatenateFormatted(encodeGoUtf8Text("&"), formatValueBytes(value.get()))
         is GoSlice -> joinFormatted(value.toList().map(::formatValueBytes), "[", " ", "]")
         is GoArray -> joinFormatted(value.values.map(::formatValueBytes), "[", " ", "]")
-        is GoMap -> joinFormatted(value.values.entries.map { (key, item) ->
+        is GoMap -> joinFormatted(value.snapshot().entries.map { (key, item) ->
             concatenateFormatted(formatValueBytes(key.value), encodeGoUtf8Text(":"), formatValueBytes(item))
         }, "map[", " ", "]")
         is GoStruct -> joinFormatted(value.fieldSnapshot().values.map(::formatValueBytes), "{", " ", "}")
@@ -4844,7 +4844,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoArray -> value.values.joinToString(prefix = "[", postfix = "]") { stringify(it) }
-        is GoMap -> value.values.entries.joinToString(prefix = "map[", postfix = "]") { "${stringify(it.key.value)}:${stringify(it.value)}" }
+        is GoMap -> value.snapshot().entries.joinToString(prefix = "map[", postfix = "]") { "${stringify(it.key.value)}:${stringify(it.value)}" }
         is GoStruct -> value.fieldSnapshot().values.joinToString(prefix = "{", postfix = "}") { stringify(it) }
         else -> value.toString()
     }
@@ -5272,11 +5272,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val keyType: GoTypeSyntax,
         val valueType: GoTypeSyntax,
         val elementZero: Any?,
-        val values: MutableMap<GoMapKey, Any?>,
+        values: MutableMap<GoMapKey, Any?>,
         val namedType: String? = null,
         val type: GoTypeSyntax? = null,
         val packagePath: String? = packageIdentity
     ) {
+        val values: MutableMap<GoMapKey, Any?> = Collections.synchronizedMap(values)
+        fun snapshot(): Map<GoMapKey, Any?> = synchronized(values) { LinkedHashMap(values) }
         fun retype(key: GoTypeSyntax, value: GoTypeSyntax, name: String?, type: GoTypeSyntax,
                    packagePath: String? = packageIdentity) =
             GoMap(key, value, zeroValue(value), values, name, type, packagePath)
