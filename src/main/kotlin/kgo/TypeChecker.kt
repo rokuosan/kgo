@@ -3214,7 +3214,8 @@ class TypeChecker(
                 else -> null
             }
             when {
-                target != null -> expression.arguments.size == 1 && isConstantExpression(expression.arguments.single(), scope)
+                target != null -> expression.arguments.size == 1 && isConstantValueType(target) &&
+                    isConstantExpression(expression.arguments.single(), scope)
                 expression.function == NameExpression("len") || expression.function == NameExpression("cap") ->
                     constantInteger(expression, scope) != null
                 expression.function in setOf(NameExpression("complex"), NameExpression("real"), NameExpression("imag")) ->
@@ -3225,6 +3226,9 @@ class TypeChecker(
         }
         else -> false
     }
+
+    private fun isConstantValueType(type: GoTypeSyntax): Boolean =
+        isBoolean(type) || isNumeric(type) || isString(type)
 
     private fun constantRational(expression: Expression, scope: Scope = globals): GoRational? = when (expression) {
         is NameExpression -> scope.constantRational(expression.name) ?: if (scope.getOrNull(expression.name) == null)
