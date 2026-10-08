@@ -3562,6 +3562,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             (actual == NamedGoType("bool") || actual == predeclaredBoolRuntimeType)) GoBoolean(value, type)
         else if (value is GoString && actual == NamedGoType("string")) GoString(value.bytes.copyOf(), type)
         else if (value is GoPointer && actual is PointerGoType) value.retype(actual.element, type)
+        else if (value is GoNilValue && actual is SliceGoType) GoNilValue(type)
+        else if (value is GoNilValue && actual is MapGoType) GoNilValue(type)
+        else if (value is GoNilValue && actual is ChannelGoType) GoNilValue(type)
+        else if (value is GoNilValue && actual is FunctionGoType) GoNilValue(type)
         else if (value is GoArray && actual is ArrayGoType)
             GoArray(actual.element, value.valueSnapshot().mapTo(mutableListOf()) { copyForType(it, actual.element) },
                 namedTypeName(type), type, namedTypePackage(type))
