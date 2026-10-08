@@ -1461,7 +1461,9 @@ class TypeChecker(
         return arguments.map { expressionType(it, scope) }
     }
 
-    private fun expressionType(expression: Expression, scope: Scope): GoTypeSyntax = when (expression) {
+    private fun expressionType(
+        expression: Expression, scope: Scope, expectedType: GoTypeSyntax? = null
+    ): GoTypeSyntax = when (expression) {
         is NameExpression -> scope.getOrNull(expression.name)?.also { scope.markUsed(expression.name) } ?: when {
             scope.typeBinding(expression.name) != null || typeDeclarations.containsKey(expression.name) ||
                 dotImportedType(expression.name) != null || isBuiltinType(expression.name) ->
@@ -1485,7 +1487,7 @@ class TypeChecker(
             TokenKind.STRING -> untypedString
             else -> error("invalid literal")
         }
-        is ParenthesizedExpression -> expressionType(expression.expression, scope)
+        is ParenthesizedExpression -> expressionType(expression.expression, scope, expectedType)
         is FunctionLiteralExpression -> {
             val parameters = expression.parameters.map { it.copy(type = resolveLocalType(it.type, scope)) }
             val results = expression.results.map { resolveLocalType(it, scope) }
@@ -1538,7 +1540,11 @@ class TypeChecker(
             FunctionGoType(parameters, results)
         }
         is UnaryExpression -> {
-            val operand = expressionType(expression.operand, scope)
+            val operandContext = expectedType?.takeIf {
+                expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.XOR) &&
+                    containsNonConstantUntypedShift(expression.operand, scope)
+            }
+            val operand = expressionType(expression.operand, scope, operandContext)
             when (expression.operator) {
                 TokenKind.ADD, TokenKind.SUB -> { if (!isNumeric(operand)) error("unary operator requires numeric operand"); operand }
                 TokenKind.NOT -> { requireBoolean(operand, "!"); operand }
@@ -1557,9 +1563,43 @@ class TypeChecker(
                 else -> error("invalid unary operator")
             }
         }
-        is BinaryExpression -> checkBinaryType(
-            expressionType(expression.left, scope), expression.operator, expressionType(expression.right, scope), expression.left, expression.right, scope
-        )
+        is BinaryExpression -> {
+            val left = expressionType(expression.left, scope)
+            val right = expressionType(expression.right, scope)
+            if (expression.operator in setOf(TokenKind.SHL, TokenKind.SHR)) {
+                val shiftContext = if (nonConstantUntypedShift(expression, scope) != null && expectedType != null) {
+                    if (underlying(expectedType) is InterfaceGoType) defaultType(untypedInt)
+                    else expectedType
+                } else null
+                val contextualLeft = if (shiftContext == null) left else {
+                    if (!isInteger(shiftContext)) error("left operand of shift must be integer in this context")
+                    requireIntegerConstantRepresentable(expression.left, shiftContext, scope)
+                    shiftContext
+                }
+                checkBinaryType(contextualLeft, expression.operator, right, expression.left, expression.right, scope)
+            } else {
+                val leftHasShift = containsNonConstantUntypedShift(expression.left, scope)
+                val rightHasShift = containsNonConstantUntypedShift(expression.right, scope)
+                val leftContext = when {
+                    !leftHasShift -> null
+                    !rightHasShift && !isUntyped(right) -> right
+                    expectedType != null -> expectedType
+                    else -> null
+                }
+                val rightContext = when {
+                    !rightHasShift -> null
+                    !leftHasShift && !isUntyped(left) -> left
+                    expectedType != null -> expectedType
+                    else -> null
+                }
+                checkBinaryType(
+                    if (leftContext == null) left else expressionType(expression.left, scope, leftContext),
+                    expression.operator,
+                    if (rightContext == null) right else expressionType(expression.right, scope, rightContext),
+                    expression.left, expression.right, scope
+                )
+            }
+        }
         is CallExpression -> {
             val results = callResults(expression, scope)
             if (results.size != 1) error("multiple-value call used in single-value context")
@@ -2495,12 +2535,16 @@ class TypeChecker(
                 requireIntegerConstantRepresentable(expression, defaultType(untypedInt), scope)
             } else error("left operand of shift must be integer in this context")
         }
-        val integralFloatConstant = constantIntegerAssignable(from, to, expression, scope)
+        val contextualFrom = if (expression != null && containsNonConstantUntypedShift(expression, scope)) {
+            val contextualType = if (underlying(to) is InterfaceGoType) defaultType(untypedInt) else to
+            expressionType(expression, scope, contextualType)
+        } else from
+        val integralFloatConstant = constantIntegerAssignable(contextualFrom, to, expression, scope)
         val comparisonResultAssignable = (expression?.unparenthesized() as? BinaryExpression)?.operator in
             setOf(TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ) &&
-            isBoolean(from) && isBoolean(to)
-        if (!assignable(from, to) && !integralFloatConstant && !comparisonResultAssignable)
-            error("cannot use $from as $to in $context")
+            isBoolean(contextualFrom) && isBoolean(to)
+        if (!assignable(contextualFrom, to) && !integralFloatConstant && !comparisonResultAssignable)
+            error("cannot use $contextualFrom as $to in $context")
         expression?.let { requireIntegerConstantRepresentable(it, to, scope) }
     }
 
@@ -2508,6 +2552,33 @@ class TypeChecker(
         val shift = expression.unparenthesized() as? BinaryExpression ?: return null
         if (shift.operator !in setOf(TokenKind.SHL, TokenKind.SHR) || !isUntyped(expressionType(shift.left, scope))) return null
         return shift.takeUnless { isConstantExpression(it.right, scope) }
+    }
+
+    private fun containsNonConstantUntypedShift(expression: Expression, scope: Scope): Boolean = when (expression) {
+        is ParenthesizedExpression -> containsNonConstantUntypedShift(expression.expression, scope)
+        is UnaryExpression -> containsNonConstantUntypedShift(expression.operand, scope)
+        is BinaryExpression -> nonConstantUntypedShift(expression, scope) != null ||
+            containsNonConstantUntypedShift(expression.left, scope) ||
+            containsNonConstantUntypedShift(expression.right, scope)
+        is CallExpression -> containsNonConstantUntypedShift(expression.function, scope) ||
+            expression.arguments.any { containsNonConstantUntypedShift(it, scope) }
+        is SelectorExpression -> containsNonConstantUntypedShift(expression.receiver, scope)
+        is IndexExpression -> containsNonConstantUntypedShift(expression.receiver, scope) ||
+            containsNonConstantUntypedShift(expression.index, scope)
+        is SliceExpression -> containsNonConstantUntypedShift(expression.receiver, scope) ||
+            listOfNotNull(expression.low, expression.high).any { containsNonConstantUntypedShift(it, scope) }
+        is TypeAssertionExpression -> containsNonConstantUntypedShift(expression.receiver, scope)
+        is TypeSwitchGuardExpression -> containsNonConstantUntypedShift(expression.receiver, scope)
+        is CompositeLiteral -> expression.elements.any { element ->
+            (element.key?.let { containsNonConstantUntypedShift(it, scope) } ?: false) ||
+                containsNonConstantUntypedShift(element.value, scope)
+        }
+        is ElidedCompositeLiteral -> expression.elements.any { element ->
+            (element.key?.let { containsNonConstantUntypedShift(it, scope) } ?: false) ||
+                containsNonConstantUntypedShift(element.value, scope)
+        }
+        is FunctionLiteralExpression -> false
+        is NameExpression, is LiteralExpression, is TypeExpression -> false
     }
 
     private fun requireIntegerConstantRepresentable(expression: Expression, target: GoTypeSyntax, scope: Scope = globals) {

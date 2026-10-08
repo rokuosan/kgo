@@ -1605,7 +1605,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 copyForType(pointer.get(), pointedType)
             }
             TokenKind.ARROW -> receiveResult(evaluate(expression.operand, env)).value
-            else -> unary(expression.operator, evaluate(expression.operand, env))
+            else -> unary(expression.operator, evaluate(expression.operand, env,
+                expectedType.takeIf { expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.XOR) }))
         }
         is BinaryExpression -> {
             val shift = expression.takeIf { it.operator == TokenKind.SHL || it.operator == TokenKind.SHR }
@@ -1613,9 +1614,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val constantShift = untypedShiftLeft && isRuntimeConstantExpression(expression.right, env)
             val directShiftContext = if (untypedShiftLeft && !constantShift)
                 expectedType?.takeUnless { underlying(it) is InterfaceGoType } ?: predeclaredIntRuntimeType else null
-            val leftShiftContext = if (shift == null && isNonConstantUntypedShiftRuntimeExpression(expression.left, env))
+            val leftShiftContext = if (shift == null && containsNonConstantUntypedShiftRuntimeExpression(expression.left, env))
                 contextualIntegerType(expression.right, env) ?: expectedType else null
-            val rightShiftContext = if (shift == null && isNonConstantUntypedShiftRuntimeExpression(expression.right, env))
+            val rightShiftContext = if (shift == null && containsNonConstantUntypedShiftRuntimeExpression(expression.right, env))
                 contextualIntegerType(expression.left, env) ?: expectedType else null
             val left = copyValue(evaluate(expression.left, env, leftShiftContext))
             if (expression.operator == TokenKind.LAND || expression.operator == TokenKind.LOR) {
@@ -4370,10 +4371,32 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
     }
 
-    private fun isNonConstantUntypedShiftRuntimeExpression(expression: Expression, env: Environment): Boolean {
-        val shift = expression.unparenthesized() as? BinaryExpression ?: return false
-        return shift.operator in setOf(TokenKind.SHL, TokenKind.SHR) &&
-            isUntypedIntegerRuntimeExpression(shift.left, env) && !isRuntimeConstantExpression(shift.right, env)
+    private fun containsNonConstantUntypedShiftRuntimeExpression(expression: Expression, env: Environment): Boolean = when (expression) {
+        is ParenthesizedExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.expression, env)
+        is UnaryExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.operand, env)
+        is BinaryExpression -> (expression.operator in setOf(TokenKind.SHL, TokenKind.SHR) &&
+            isUntypedIntegerRuntimeExpression(expression.left, env) && !isRuntimeConstantExpression(expression.right, env)) ||
+            containsNonConstantUntypedShiftRuntimeExpression(expression.left, env) ||
+            containsNonConstantUntypedShiftRuntimeExpression(expression.right, env)
+        is CallExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.function, env) ||
+            expression.arguments.any { containsNonConstantUntypedShiftRuntimeExpression(it, env) }
+        is SelectorExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.receiver, env)
+        is IndexExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.receiver, env) ||
+            containsNonConstantUntypedShiftRuntimeExpression(expression.index, env)
+        is SliceExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.receiver, env) ||
+            listOfNotNull(expression.low, expression.high).any { containsNonConstantUntypedShiftRuntimeExpression(it, env) }
+        is TypeAssertionExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.receiver, env)
+        is TypeSwitchGuardExpression -> containsNonConstantUntypedShiftRuntimeExpression(expression.receiver, env)
+        is CompositeLiteral -> expression.elements.any { element ->
+            (element.key?.let { containsNonConstantUntypedShiftRuntimeExpression(it, env) } ?: false) ||
+                containsNonConstantUntypedShiftRuntimeExpression(element.value, env)
+        }
+        is ElidedCompositeLiteral -> expression.elements.any { element ->
+            (element.key?.let { containsNonConstantUntypedShiftRuntimeExpression(it, env) } ?: false) ||
+                containsNonConstantUntypedShiftRuntimeExpression(element.value, env)
+        }
+        is FunctionLiteralExpression -> false
+        is NameExpression, is LiteralExpression, is TypeExpression -> false
     }
 
     private fun importedConstantType(expression: Expression, env: Environment): GoTypeSyntax? {
