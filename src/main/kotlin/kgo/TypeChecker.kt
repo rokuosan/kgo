@@ -2207,6 +2207,9 @@ class TypeChecker(
     private fun resolveLocalType(type: GoTypeSyntax, scope: Scope): GoTypeSyntax = when (type) {
         is NamedGoType -> scope.typeBinding(type.name)?.let(::NamedGoType) ?: dotImportedType(type.name) ?: type
         is QualifiedGoType -> {
+            if (type.packageName in packagePaths &&
+                (scope.getOrNull(type.packageName) != null || scope.typeBinding(type.packageName) != null))
+                error("${type.packageName} is not a package")
             val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
             if (standardPackageName(path) == "unsafe" && type.name == "Pointer")
                 return QualifiedGoType(path, type.name)
