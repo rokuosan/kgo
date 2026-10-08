@@ -5283,13 +5283,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         values: MutableMap<GoMapKey, Any?>,
         val namedType: String? = null,
         val type: GoTypeSyntax? = null,
-        val packagePath: String? = packageIdentity
+        val packagePath: String? = packageIdentity,
+        reuseSynchronizedValues: Boolean = false
     ) {
-        val values: MutableMap<GoMapKey, Any?> = Collections.synchronizedMap(values)
+        val values: MutableMap<GoMapKey, Any?> = if (reuseSynchronizedValues) values else Collections.synchronizedMap(values)
         fun snapshot(): Map<GoMapKey, Any?> = synchronized(values) { LinkedHashMap(values) }
         fun retype(key: GoTypeSyntax, value: GoTypeSyntax, name: String?, type: GoTypeSyntax,
                    packagePath: String? = packageIdentity) =
-            GoMap(key, value, zeroValue(value), values, name, type, packagePath)
+            GoMap(key, value, zeroValue(value), values, name, type, packagePath, reuseSynchronizedValues = true)
     }
     private inner class GoMapKey(val value: Any?) {
         override fun equals(other: Any?) = this === other || other is GoMapKey && goEqual(value, other.value)
