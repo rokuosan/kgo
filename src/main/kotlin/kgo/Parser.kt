@@ -144,7 +144,6 @@ class Parser(private val tokens: List<Token>) {
         if (!match(TokenKind.LPAREN)) return listOf(parseVariableSpec())
         val declarations = mutableListOf<VariableDeclaration>()
         while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             declarations += parseVariableSpec(grouped = true)
         }
         expect(TokenKind.RPAREN)
@@ -158,10 +157,7 @@ class Parser(private val tokens: List<Token>) {
         var previousType: GoTypeSyntax? = null
         var previousValues: List<Expression> = emptyList()
         while (true) {
-            if (grouped && match(TokenKind.SEMICOLON)) {
-                if (at(TokenKind.RPAREN)) break
-                continue
-            }
+            if (grouped && at(TokenKind.RPAREN)) break
             val names = parseNameList()
             var type: GoTypeSyntax? = null
             if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) type = parseType()
@@ -191,7 +187,6 @@ class Parser(private val tokens: List<Token>) {
         }
         val declarations = mutableListOf<TypeDeclaration>()
         while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             declarations += parseTypeDeclaration()
             semicolonOrClose(TokenKind.RPAREN)
         }
