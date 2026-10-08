@@ -1693,27 +1693,74 @@ class Interpreter(
             PackageVariableInitialization::initializerExpressions,
             includeFunctionDependencies = true,
             referenceNames = { initialization, expression ->
-                withRuntimeImports(declarationImports[initialization.declaration]) { expressionNames(expression) }
+                withRuntimeImports(declarationImports[initialization.declaration]) {
+                    GoPackageDependencies.expressionReferences(
+                        expression,
+                        resolveType = { type -> runCatching { underlying(resolveRuntimeType(type, globals)) }.getOrNull() },
+                        callReferences = ::methodCallDependencies
+                    )
+                }
             }
         )
     }
 
     private fun addFunctionDependencies(references: MutableSet<String>) {
-        val pending = ArrayDeque(references.filter { it in functions })
+        fun dependencyFunction(key: String): FunctionDeclaration? = when {
+            key.startsWith(packageMethodDependencyPrefix) -> methods[key.removePrefix(packageMethodDependencyPrefix)]
+            else -> functions[key]
+        }
+        val pending = ArrayDeque(references.filter { dependencyFunction(it) != null })
         val visited = mutableSetOf<String>()
         while (pending.isNotEmpty()) {
             val name = pending.removeFirst()
             if (!visited.add(name)) continue
-            val function = functions[name] ?: continue
-            val functionReferences = withRuntimeImports(functionImports[function]) {
-                GoPackageDependencies.functionReferences(function) { type ->
-                    runCatching { resolveRuntimeType(type, globals) }.getOrNull()
+            val function = dependencyFunction(name) ?: continue
+            val localTypes = buildMap {
+                function.parameters.forEachIndexed { index, parameterName ->
+                    val type = function.parameterTypes.getOrNull(index) ?: return@forEachIndexed
+                    parameterName?.let { put(it, runCatching { resolveRuntimeType(type, globals) }.getOrDefault(type)) }
+                }
+                function.receiver?.let { receiver ->
+                    receiver.name?.let { put(it, runCatching { resolveRuntimeType(receiver.type, globals) }.getOrDefault(receiver.type)) }
                 }
             }
-            functionReferences.filter { it !in references && it in functions }.forEach(pending::addLast)
+            val functionReferences = withRuntimeImports(functionImports[function]) {
+                GoPackageDependencies.functionReferences(
+                    function,
+                    resolveType = { type -> runCatching { underlying(resolveRuntimeType(type, globals)) }.getOrNull() },
+                    callReferences = { call, locals -> methodCallDependencies(call, locals, localTypes) }
+                )
+            }
+            functionReferences.filter { it !in references && dependencyFunction(it) != null }.forEach(pending::addLast)
             references += functionReferences
         }
     }
+
+    private fun methodCallDependencies(
+        expression: Expression,
+        locals: Set<String> = emptySet(),
+        localTypes: Map<String, GoTypeSyntax> = emptyMap()
+    ): Set<String> {
+        val selector = expression.unparenthesized() as? SelectorExpression ?: return emptySet()
+        val receiver = selector.receiver.unparenthesized()
+        val localReceiverType = (receiver as? NameExpression)?.takeIf { it.name in locals }
+            ?.let { localTypes[it.name] }
+        if (receiver is NameExpression && receiver.name in locals && localReceiverType == null) return emptySet()
+        val receiverType = when (receiver) {
+            is NameExpression -> localReceiverType ?: globals.typeBinding(receiver.name)
+                ?: staticExpressionType(receiver, globals)
+            else -> staticExpressionType(receiver, globals)
+        } ?: return emptySet()
+        val resolvedMethod = methodDeclaration(receiverType, selector.field)
+            ?: (if (receiverType is PointerGoType) null
+                else methodDeclaration(PointerGoType(receiverType), selector.field))
+            ?: return emptySet()
+        val (owner, method) = resolvedMethod
+        if (owner !== this) return emptySet()
+        return setOf(packageMethodDependencyPrefix + methodKey(method.receiver?.type ?: return emptySet(), method.name))
+    }
+
+    private val packageMethodDependencyPrefix = "\u0000method:"
 
     private fun expressionNames(expression: Expression, expectedType: GoTypeSyntax? = null): Set<String> = when (expression) {
         is NameExpression -> setOf(expression.name)
