@@ -3457,7 +3457,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         canonicalAliasType(type) == predeclaredInt32RuntimeType
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
-        setOf("#predeclared-uint8", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+        setOf(
+            "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
+            "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
+        )
 
     private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
 
