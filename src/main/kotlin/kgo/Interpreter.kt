@@ -2259,7 +2259,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             is RuntimeErrorMethodValue -> {
                 if (args.isNotEmpty()) throw RuntimeGoError("${target.name} expects no arguments")
                 return if (target.name == "Error")
-                    GoString(target.receiver.message.toByteArray(Charsets.UTF_8), NamedGoType("string"))
+                    GoString(target.receiver.message.toByteArray(Charsets.UTF_8), predeclaredStringRuntimeType)
                 else null
             }
             is MethodExpressionValue -> {
@@ -2784,7 +2784,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             } ?: signature else signature
         }
         is RuntimeErrorMethodValue -> value.type ?: if (value.name == "Error")
-            FunctionGoType(emptyList(), listOf(NamedGoType("string"))) else FunctionGoType(emptyList(), emptyList())
+            FunctionGoType(emptyList(), listOf(predeclaredStringRuntimeType)) else FunctionGoType(emptyList(), emptyList())
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> NamedGoType("int")
