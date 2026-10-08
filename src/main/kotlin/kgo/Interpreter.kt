@@ -908,10 +908,14 @@ class Interpreter(
         val scope = env.child()
         statement.init?.let { execute(it, scope) }
         val tag = statement.tag?.let { copyValue(evaluate(it, scope)) } ?: if (statement.tag == null) true else null
+        val caseExpectedType = statement.tag?.let { expression ->
+            staticExpressionType(expression, scope)?.let { resolveRuntimeType(it, scope) }
+                ?: runtimeType(defaultConstantValue(tag, expression, scope))
+        } ?: predeclaredBoolRuntimeType
         var selected = -1
         for ((clauseIndex, clause) in statement.clauses.withIndex()) {
             if (clause.expressions?.any { expression ->
-                    val caseValue = copyValue(evaluate(expression, scope))
+                    val caseValue = copyValue(evaluate(expression, scope, caseExpectedType))
                     val (comparedCase, comparedTag) = interfaceComparisonOperands(
                         expression, caseValue, statement.tag, tag, scope
                     )
