@@ -2526,6 +2526,13 @@ class TypeChecker(
     private fun requireAssignable(
         from: GoTypeSyntax, to: GoTypeSyntax, context: String, expression: Expression? = null, scope: Scope = globals
     ) {
+        if (expression != null && isUntyped(from) && underlying(to) is InterfaceGoType &&
+            interfaceMethods(to).isEmpty()) {
+            if (!isConstantExpression(expression, scope))
+                error("untyped value is not assignable to $to in $context")
+            requireIntegerConstantRepresentable(expression, defaultType(from), scope)
+            return
+        }
         if (expression != null && nonConstantUntypedShift(expression, scope) != null) {
             if (isInteger(to)) {
                 requireIntegerConstantRepresentable(expression, to, scope)
