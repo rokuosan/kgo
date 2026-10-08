@@ -3836,7 +3836,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val values = when (val source = sourceValue) {
             is GoSlice -> {
                 if (!sameRuntimeType(destinationType.element, source.elementType)) throw RuntimeGoError("copy slice element types do not match")
-                source.toList()
+                source.toList().map { copyForType(it, source.elementType) }
             }
             is GoNilValue -> {
                 val sourceType = underlying(source.type) as? SliceGoType
