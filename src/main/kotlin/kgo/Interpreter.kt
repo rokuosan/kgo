@@ -2062,7 +2062,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     }
                     return@forEach
                 }
-                if (name in struct.fields) candidates += Candidate(struct, null, node.value)
+                if (name in struct.fields && isStructFieldAccessible(node.staticType, name))
+                    candidates += Candidate(struct, null, node.value)
                 val receiverType = (node.value as? GoPointer)?.pointeeType ?: runtimeType(current)
                 receiverType?.let { methodDeclaration(it, name) }?.let { (owner, method) ->
                     candidates += Candidate(null, method, node.value, methodOwner = owner)
@@ -4054,6 +4055,19 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             if (it is PointerGoType) it.element else it
         } else null
         return field.packagePath ?: (embeddedType as? QualifiedGoType)?.packageName ?: packageIdentity
+    }
+
+    private fun isStructFieldAccessible(type: GoTypeSyntax?, name: String): Boolean {
+        if (GoUnicode6.isExportedIdentifier(name)) return true
+        val structType = when (type) {
+            is PointerGoType -> underlying(type.element)
+            null -> return false
+            else -> underlying(type)
+        } as? StructGoType ?: return false
+        val field = structType.fields.firstOrNull { candidate ->
+            candidate.names.ifEmpty { listOf(embeddedFieldName(candidate.type)) }.contains(name)
+        } ?: return false
+        return unexportedFieldPackagePath(field, name) == packageIdentity
     }
 
     private fun structFieldSlots(type: StructGoType): List<RuntimeStructField> =

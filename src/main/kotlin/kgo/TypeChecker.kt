@@ -1932,9 +1932,7 @@ class TypeChecker(
                     is StructGoType -> {
                         actual.fields.forEach { field ->
                             val fieldNames = field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
-                            val externalNamedType = (node.type as? PointerGoType)?.element as? QualifiedGoType
-                                ?: node.type as? QualifiedGoType
-                            val fieldIsVisible = externalNamedType == null || isExportedIdentifier(expression.field)
+                            val fieldIsVisible = isStructFieldAccessible(field, expression.field)
                             if (fieldIsVisible && expression.field in fieldNames) candidates += Candidate(field.type)
                         }
                         val method = methodType(node.type, expression.field)
@@ -3284,6 +3282,9 @@ class TypeChecker(
         } else null
         return field.packagePath ?: (embeddedType as? QualifiedGoType)?.packageName ?: packageIdentity ?: packageName
     }
+
+    private fun isStructFieldAccessible(field: StructFieldSyntax, name: String): Boolean =
+        isExportedIdentifier(name) || unexportedFieldPackagePath(field, name) == (packageIdentity ?: packageName)
 
     private fun sameArrayLength(left: Expression?, right: Expression?): Boolean {
         if (left == null || right == null) return left == null && right == null
