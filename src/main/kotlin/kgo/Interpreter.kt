@@ -561,10 +561,8 @@ class Interpreter(
                 val channel = evaluate(statement.channel, env)
                 val value = evaluate(statement.value, env, channelElementType(channel, statement.channel, env))
                 when (channel) {
-                    is GoChannel -> channel.send(
-                        if (underlying(channel.elementType) is InterfaceGoType)
-                            defaultConstantValue(value, statement.value, env) else value
-                    )
+                    is GoChannel -> channel.send(if (underlying(channel.elementType) is InterfaceGoType)
+                        boxInterfaceAssignment(value, channel.elementType, statement.value, env) else value)
                     is GoNilValue -> if (underlying(channel.type) is ChannelGoType) awaitCancellation() else throw RuntimeGoError("send on non-channel")
                     else -> throw RuntimeGoError("send on non-channel")
                 }
@@ -819,7 +817,7 @@ class Interpreter(
                         channelElementType(channelValue, communication.channel, env))
                     val channel = selectChannelOrNull(channelValue) ?: return@mapIndexedNotNull null
                     val value = if (underlying(channel.elementType) is InterfaceGoType)
-                        defaultConstantValue(sendValue, communication.value, env) else sendValue
+                        boxInterfaceAssignment(sendValue, channel.elementType, communication.value, env) else sendValue
                     SelectSend(caseIndex, channel, copyForType(value, channel.elementType))
                 }
                 is ExpressionStatement -> {
