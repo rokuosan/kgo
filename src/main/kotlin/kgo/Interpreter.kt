@@ -1751,13 +1751,62 @@ class Interpreter(
                 ?: staticExpressionType(receiver, globals)
             else -> staticExpressionType(receiver, globals)
         } ?: return emptySet()
-        val resolvedMethod = methodDeclaration(receiverType, selector.field)
+        val method = methodForDependency(receiverType, selector.field)
             ?: (if (receiverType is PointerGoType) null
-                else methodDeclaration(PointerGoType(receiverType), selector.field))
+                else methodForDependency(PointerGoType(receiverType), selector.field))
             ?: return emptySet()
-        val (owner, method) = resolvedMethod
-        if (owner !== this) return emptySet()
         return setOf(packageMethodDependencyPrefix + methodKey(method.receiver?.type ?: return emptySet(), method.name))
+    }
+
+    private fun methodForDependency(type: GoTypeSyntax, name: String): FunctionDeclaration? {
+        val target = runtimePackageMethodKey(name)
+        if (target !in runtimeMethodSet(type)) return null
+        data class SearchNode(val type: GoTypeSyntax, val pointer: Boolean, val ancestors: Set<String>)
+        var level = listOf(SearchNode(type, type is PointerGoType, emptySet()))
+        while (level.isNotEmpty()) {
+            val candidates = mutableListOf<FunctionDeclaration?>()
+            val fieldsAtDepth = mutableSetOf<String>()
+            val next = mutableListOf<SearchNode>()
+            level.forEach { node ->
+                val named = (node.type as? PointerGoType)?.element ?: node.type
+                val nodeUnderlying = underlying(named)
+                val direct = methodDeclaration(node.type, name)
+                val alternateType = when {
+                    node.type is PointerGoType -> node.type.element
+                    node.pointer -> PointerGoType(node.type)
+                    else -> null
+                }
+                val alternate = alternateType?.let { methodDeclaration(it, name) }
+                listOfNotNull(direct, alternate).forEach { (owner, method) ->
+                    if (runtimePackageMethodKey(method.name) == target)
+                        candidates += method.takeIf { owner === this }
+                }
+                when (nodeUnderlying) {
+                    is InterfaceGoType -> if (target in interfaceMethodsRuntime(nodeUnderlying)) candidates += null
+                    is StructGoType -> {
+                        nodeUnderlying.fields.forEach { field ->
+                            field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
+                                .filter { it.isNotEmpty() }
+                                .forEach { fieldName -> fieldsAtDepth += runtimeSelectorPackageKey(field, fieldName) }
+                        }
+                        nodeUnderlying.fields.filter { it.names.isEmpty() }.forEach { field ->
+                            val embedded = field.type
+                            val key = embedded.toString()
+                            if (key !in node.ancestors) next += SearchNode(
+                                embedded,
+                                node.pointer || embedded is PointerGoType,
+                                node.ancestors + key
+                            )
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+            if (target in fieldsAtDepth) return null
+            if (candidates.isNotEmpty()) return candidates.singleOrNull()
+            level = next
+        }
+        return null
     }
 
     private val packageMethodDependencyPrefix = "\u0000method:"
