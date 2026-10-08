@@ -3481,7 +3481,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             in integerTypeNames -> {
                 val converted = when (value) {
-                    is GoPointer -> if (underlying(type) == NamedGoType("uintptr")) unsafeAddress(value)
+                    is GoPointer -> if ((underlying(type) as? NamedGoType)?.name in setOf("#predeclared-uintptr", "uintptr")) unsafeAddress(value)
                         else throw RuntimeGoError("cannot convert pointer to $type")
                     is Long -> value
                     is GoInteger -> value.value
