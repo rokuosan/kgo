@@ -1270,6 +1270,11 @@ class TypeChecker(
 
     private fun constantRealValue(expression: Expression, scope: Scope): GoRational? =
         constantRational(expression, scope) ?: constantInteger(expression, scope)?.let(GoRational::of)
+            ?: if (expressionType(expression, scope) == untypedComplex) {
+                constantComplex(expression, scope)?.let { value ->
+                    if (value.imaginary.numerator.signum() == 0) value.real else null
+                }
+            } else null
 
     private fun constantBoolean(expression: Expression, scope: Scope = globals): Boolean? = when (expression) {
         is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.constantBoolean(expression.name)
@@ -2365,9 +2370,18 @@ class TypeChecker(
             }
             "complex" -> {
                 requireCount(name, args, 2, types.size)
-                if (types.any { !isFloatArgument(it) }) error("complex arguments must be floating-point values")
-                val first = types[0]
-                val second = types[1]
+                val argumentTypes = types.mapIndexed { index, type ->
+                    if (type != untypedComplex) type else {
+                        val value = constantComplex(args[index], scope)
+                            ?: error("complex arguments must be floating-point values")
+                        if (value.imaginary.numerator.signum() != 0)
+                            error("complex arguments must be floating-point values")
+                        untypedFloat
+                    }
+                }
+                if (argumentTypes.any { !isFloatArgument(it) }) error("complex arguments must be floating-point values")
+                val first = argumentTypes[0]
+                val second = argumentTypes[1]
                 if (!isUntyped(first) && !isUntyped(second) && !sameType(first, second))
                     error("complex arguments must have the same type")
                 val typed = listOf(first, second).firstOrNull { !isUntyped(it) }

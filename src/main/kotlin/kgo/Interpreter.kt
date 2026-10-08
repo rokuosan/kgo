@@ -2208,7 +2208,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
                 "complex" -> {
                     if (args.size != 2) throw RuntimeGoError("complex expects two arguments")
-                    if (args.all { it is BigInteger || it is GoRational })
+                    if (args.all { value ->
+                            value is BigInteger || value is GoRational ||
+                                value is GoExactComplex && value.imaginary.numerator.signum() == 0
+                        })
                         return GoExactComplex(exactRational(args[0]), exactRational(args[1]))
                     val type = if (args.filterIsInstance<GoFloat>().any { underlying(it.type) == NamedGoType("float32") })
                         predeclaredComplex64RuntimeType else predeclaredComplex128RuntimeType
@@ -3877,6 +3880,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is BigInteger -> GoRational.of(value)
         is GoInteger -> GoRational.of(integerValue(value, "constant arithmetic"))
         is Long -> GoRational.of(BigInteger.valueOf(value))
+        is GoExactComplex -> if (value.imaginary.numerator.signum() == 0) value.real
+            else throw RuntimeGoError("complex constant is not real")
         else -> typeError("constant arithmetic", value)
     }
 
@@ -4329,6 +4334,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is BigInteger -> value.toDouble()
         is GoRational -> value.toDouble()
         is GoInteger -> integerAsDouble(value)
+        is GoExactComplex -> if (value.imaginary.numerator.signum() == 0) value.real.toDouble()
+            else throw RuntimeGoError("complex value is not real")
         is Double -> value
         is GoFloat -> value.value
         is GoComplex -> value.real
