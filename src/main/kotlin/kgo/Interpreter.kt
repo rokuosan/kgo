@@ -4470,8 +4470,27 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 ?: pointers.firstOrNull { candidate ->
                     candidate.pointeeType?.let { sameRuntimeType(it, elementType) } == true
                 }
+                ?: pointers.firstOrNull { candidate ->
+                    candidate.pointeeType?.let { sameUnsafeScalarRepresentation(it, elementType) } == true
+                }
             return pointer?.retype(elementType, pointerType) ?: GoPointer.address(address, elementType, pointerType)
         }
+    }
+
+    private fun sameUnsafeScalarRepresentation(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
+        fun representation(type: GoTypeSyntax): Pair<String, Int>? {
+            val name = (underlying(type) as? NamedGoType)?.name ?: return null
+            return when {
+                name in integerTypeNames -> "integer" to integerBitWidth(type)
+                name in setOf("float32", "#predeclared-float32") -> "float" to 32
+                name in setOf("float64", "#predeclared-float64") -> "float" to 64
+                name in setOf("complex64", "#predeclared-complex64") -> "complex" to 64
+                name in setOf("complex128", "#predeclared-complex128") -> "complex" to 128
+                name in setOf("bool", "#predeclared-bool") -> "boolean" to 8
+                else -> null
+            }
+        }
+        return representation(left)?.let { it == representation(right) } == true
     }
 
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
