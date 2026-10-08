@@ -2465,8 +2465,9 @@ class TypeChecker(
                 val type = underlying(types[0])
                 val string = isString(types[0])
                 val pointerToArray = type is PointerGoType && underlying(type.element) is ArrayGoType
-                if ((name == "cap" && string) || (!string && !pointerToArray && type !is SliceGoType &&
-                        type !is ArrayGoType && type !is MapGoType && type !is ChannelGoType))
+                val validArgument = pointerToArray || type is SliceGoType || type is ArrayGoType ||
+                    type is ChannelGoType || (name == "len" && (string || type is MapGoType))
+                if (!validArgument)
                     error("$name not defined for this type")
                 listOf(predeclaredIntType)
             }
