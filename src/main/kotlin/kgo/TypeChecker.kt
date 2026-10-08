@@ -1564,6 +1564,18 @@ class TypeChecker(
 
     private fun expressionType(
         expression: Expression, scope: Scope, expectedType: GoTypeSyntax? = null
+    ): GoTypeSyntax {
+        val result = expressionTypeUnchecked(expression, scope, expectedType)
+        if (!isUntyped(result) && isConstantExpression(expression, scope) &&
+            (isInteger(result) || isFloatArgument(result) || isComplex(result))) {
+            // Typed constant operations must remain representable in their result type.
+            requireIntegerConstantRepresentable(expression, result, scope)
+        }
+        return result
+    }
+
+    private fun expressionTypeUnchecked(
+        expression: Expression, scope: Scope, expectedType: GoTypeSyntax?
     ): GoTypeSyntax = when (expression) {
         is NameExpression -> scope.getOrNull(expression.name)?.also { scope.markUsed(expression.name) } ?: when {
             scope.typeBinding(expression.name) != null || typeDeclarations.containsKey(expression.name) ||
