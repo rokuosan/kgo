@@ -44,10 +44,10 @@ class TypeChecker(
     private val terminatingPanicCalls = Collections.newSetFromMap(IdentityHashMap<CallExpression, Boolean>())
     private val globals = Scope()
     private val calledMethodsByFunction = IdentityHashMap<FunctionDeclaration, MutableSet<FunctionDeclaration>>()
-    private val calledMethodsByVariable = IdentityHashMap<VariableDeclaration, MutableSet<FunctionDeclaration>>()
+    private val calledMethodsByExpression = IdentityHashMap<Expression, MutableSet<FunctionDeclaration>>()
     private var dependencyFunction: FunctionDeclaration? = null
-    private var dependencyVariable: VariableDeclaration? = null
-    private var checkedVariableInitializationOrder: List<VariableDeclaration> = emptyList()
+    private var dependencyExpression: Expression? = null
+    private var checkedVariableInitializationOrder: List<PackageVariableInitialization> = emptyList()
     private var resultTypes: List<GoTypeSyntax> = emptyList()
     private var resultNames: List<String?> = emptyList()
     private var functionLabels: Map<String, LabelInfo> = emptyMap()
@@ -196,22 +196,30 @@ class TypeChecker(
         declarations.forEach { (file, declaration) ->
             (declaration as? VariableDeclaration)?.let { variableFiles[it] = file }
         }
+        if (globalVariables.any { it.values.isNotEmpty() && it.values.size != it.names.size && it.values.size != 1 })
+            error("initializer count mismatch")
         val initialVariableOrder = globalVariableInitializationOrder(globalVariables)
-        for (declaration in initialVariableOrder) {
+        for (initialization in initialVariableOrder) {
+            val declaration = initialization.declaration
+            val names = initialization.indices.map(declaration.names::get)
+            val expressions = variableInitializerExpressions(initialization)
             val sourceFile = variableFiles.getValue(declaration)
             withFileImports(sourceFile) {
-                val previousDependencyVariable = dependencyVariable
-                dependencyVariable = declaration
-                val values = try { expressionTypes(declaration.values, declaration.names.size, globals) }
-                finally { dependencyVariable = previousDependencyVariable }
-                if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
+                val previousDependencyExpression = dependencyExpression
+                val values = try {
+                    expressions.flatMap { expression ->
+                        dependencyExpression = expression
+                        expressionTypes(listOf(expression), if (expressions.size == 1) names.size else 1, globals)
+                    }
+                } finally { dependencyExpression = previousDependencyExpression }
+                if (expressions.isNotEmpty() && values.size != names.size)
                     error("initializer count mismatch")
                 val declaredType = declaration.type?.let { resolveLocalType(it, globals) }
                 if (declaredType != null) {
                     validateType(declaredType)
-                    requireAssignableValues(values, declaration.values, declaredType, "initializer", globals)
-                } else requireDefaultValues(values, declaration.values, "initializer", globals)
-                declaration.names.forEachIndexed { i, name ->
+                    requireAssignableValues(values, expressions, declaredType, "initializer", globals)
+                } else if (expressions.isNotEmpty()) requireDefaultValues(values, expressions, "initializer", globals)
+                names.forEachIndexed { i, name ->
                     if (name != "_") globals.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType))
                 }
             }
@@ -325,7 +333,7 @@ class TypeChecker(
     internal fun runtimeFunctionTypes(): Map<FunctionDeclaration, FunctionGoType> =
         IdentityHashMap<FunctionDeclaration, FunctionGoType>().also { it.putAll(checkedFunctionTypes) }
 
-    internal fun runtimeVariableInitializationOrder(): List<VariableDeclaration> =
+    internal fun runtimeVariableInitializationOrder(): List<PackageVariableInitialization> =
         checkedVariableInitializationOrder.toList()
 
     internal fun exportedFunctionType(name: String, importPath: String? = null): FunctionGoType? =
@@ -435,29 +443,50 @@ class TypeChecker(
         if (main.parameters.isNotEmpty() || main.resultTypes.isNotEmpty()) error("main must have no parameters or results")
     }
 
-    private fun globalVariableInitializationOrder(variables: List<VariableDeclaration>): List<VariableDeclaration> {
-        val ownerByName = variables.flatMapIndexed { index, declaration ->
-            declaration.names.filter { it != "_" }.map { it to index }
-        }.toMap()
-        val dependencies = variables.map { declaration ->
-            val references = declaration.values.flatMapTo(linkedSetOf(), ::referencedNames)
-            addFunctionDependencies(references, calledMethodsByVariable[declaration].orEmpty())
-            references.mapNotNull(ownerByName::get).distinct().sorted().toSet()
-        }
-        val state = IntArray(variables.size)
-        val result = mutableListOf<VariableDeclaration>()
-        fun visit(index: Int) {
-            when (state[index]) {
-                2 -> return
-                1 -> error("initialization cycle involving ${variables[index].names.joinToString()}")
+    private fun globalVariableInitializationOrder(
+        variables: List<VariableDeclaration>
+    ): List<PackageVariableInitialization> {
+        val initializations = variables.flatMap { declaration ->
+            when {
+                declaration.values.isEmpty() || declaration.values.size == 1 && declaration.names.size > 1 ->
+                    listOf(PackageVariableInitialization(declaration, declaration.names.indices.toList()))
+                else -> declaration.names.indices.map { PackageVariableInitialization(declaration, listOf(it)) }
             }
-            state[index] = 1
-            dependencies[index].forEach(::visit)
-            state[index] = 2
-            result += variables[index]
         }
-        variables.indices.forEach(::visit)
+        val ownerByName = buildMap {
+            initializations.forEachIndexed { index, initialization ->
+                initialization.indices.map(initialization.declaration.names::get).filter { it != "_" }
+                    .forEach { put(it, index) }
+            }
+        }
+        val dependencies = initializations.map { initialization ->
+            val expressions = variableInitializerExpressions(initialization)
+            val references = expressions.flatMapTo(linkedSetOf(), ::referencedNames)
+            val methodDependencies = expressions.flatMap { calledMethodsByExpression[it].orEmpty() }
+            addFunctionDependencies(references, methodDependencies)
+            references.mapNotNull(ownerByName::get).distinct().toSet()
+        }
+        val initialized = BooleanArray(initializations.size)
+        val result = mutableListOf<PackageVariableInitialization>()
+        while (result.size < initializations.size) {
+            val next = initializations.indices.firstOrNull { index ->
+                !initialized[index] && dependencies[index].all { initialized[it] }
+            } ?: error("initialization cycle involving ${initializations.filterIndexed { index, _ -> !initialized[index] }
+                .flatMap { initialization -> initialization.indices.map(initialization.declaration.names::get) }
+                .distinct().joinToString()}")
+            initialized[next] = true
+            result += initializations[next]
+        }
         return result
+    }
+
+    private fun variableInitializerExpressions(initialization: PackageVariableInitialization): List<Expression> {
+        val declaration = initialization.declaration
+        return when {
+            declaration.values.isEmpty() -> emptyList()
+            declaration.values.size == 1 && initialization.indices.size > 1 -> declaration.values
+            else -> initialization.indices.map { declaration.values[it] }
+        }
     }
 
     private data class GlobalConstantBinding(
@@ -1941,8 +1970,8 @@ class TypeChecker(
         dependencyFunction?.let { owner ->
             calledMethodsByFunction.getOrPut(owner) { Collections.newSetFromMap(IdentityHashMap()) }.add(function)
         }
-        dependencyVariable?.let { owner ->
-            calledMethodsByVariable.getOrPut(owner) { Collections.newSetFromMap(IdentityHashMap()) }.add(function)
+        dependencyExpression?.let { expression ->
+            calledMethodsByExpression.getOrPut(expression) { Collections.newSetFromMap(IdentityHashMap()) }.add(function)
         }
     }
 

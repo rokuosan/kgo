@@ -14,6 +14,7 @@ data class FunctionDeclaration(
     val resultNames: List<String?> = emptyList()
 ) : Declaration
 data class VariableDeclaration(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Declaration
+internal data class PackageVariableInitialization(val declaration: VariableDeclaration, val indices: List<Int>)
 data class ConstantDeclaration(
     val names: List<String>,
     val values: List<Expression>,

@@ -140,7 +140,7 @@ class Interpreter(
     private var exportedTypeNames: Set<String> = emptySet()
     private var packageShadowsIota = false
     private var packageIdentity: String? = null
-    private var packageVariableInitializationOrder: List<VariableDeclaration>? = null
+    private var packageVariableInitializationOrder: List<PackageVariableInitialization>? = null
     private lateinit var goroutines: CoroutineScope
 
     fun run(file: GoFile) = run(listOf(file), emptyList())
@@ -154,8 +154,8 @@ class Interpreter(
         importedTypeDefinitions: Map<String, Map<String, GoTypeSyntax>> = emptyMap(),
         rootFunctionTypes: Map<FunctionDeclaration, FunctionGoType> = emptyMap(),
         importedFunctionTypes: Map<String, Map<FunctionDeclaration, FunctionGoType>> = emptyMap(),
-        rootVariableInitializationOrder: List<VariableDeclaration>? = null,
-        importedVariableInitializationOrders: Map<String, List<VariableDeclaration>> = emptyMap()
+        rootVariableInitializationOrder: List<PackageVariableInitialization>? = null,
+        importedVariableInitializationOrders: Map<String, List<PackageVariableInitialization>> = emptyMap()
     ) {
         if (files.isEmpty()) throw RuntimeGoError("no Go source files")
         val packageName = files.first().packageName
@@ -260,12 +260,14 @@ class Interpreter(
                 globals.imports = declarationImports[declaration] ?: RuntimeImports()
                 initializeConstant(declaration)
             }
-        (packageVariableInitializationOrder ?: orderPackageDeclarations(
-            packageVariables, { it.names }, { it.values }, includeFunctionDependencies = true
-        ))
-            .forEach { declaration ->
+        (packageVariableInitializationOrder ?: defaultVariableInitializationOrder(packageVariables))
+            .forEach { initialization ->
+                val declaration = initialization.declaration
                 globals.imports = declarationImports[declaration] ?: RuntimeImports()
-                initialize(declaration.names, declaration.values, globals, declaration.type)
+                initialize(
+                    initialization.indices.map(declaration.names::get),
+                    variableInitializerExpressions(initialization), globals, declaration.type
+                )
             }
         initFunctions.forEach { invoke(it, emptyList()) }
     }
@@ -1526,6 +1528,33 @@ class Interpreter(
             ordered += declarations[next]
         }
         return ordered
+    }
+
+    private fun defaultVariableInitializationOrder(
+        declarations: List<VariableDeclaration>
+    ): List<PackageVariableInitialization> {
+        val initializations = declarations.flatMap { declaration ->
+            when {
+                declaration.values.isEmpty() || declaration.values.size == 1 && declaration.names.size > 1 ->
+                    listOf(PackageVariableInitialization(declaration, declaration.names.indices.toList()))
+                else -> declaration.names.indices.map { PackageVariableInitialization(declaration, listOf(it)) }
+            }
+        }
+        return orderPackageDeclarations(
+            initializations,
+            { initialization -> initialization.indices.map(initialization.declaration.names::get) },
+            ::variableInitializerExpressions,
+            includeFunctionDependencies = true
+        )
+    }
+
+    private fun variableInitializerExpressions(initialization: PackageVariableInitialization): List<Expression> {
+        val declaration = initialization.declaration
+        return when {
+            declaration.values.isEmpty() -> emptyList()
+            declaration.values.size == 1 && initialization.indices.size > 1 -> declaration.values
+            else -> initialization.indices.map { declaration.values[it] }
+        }
     }
 
     private fun addFunctionDependencies(references: MutableSet<String>) {
