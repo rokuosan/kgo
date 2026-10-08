@@ -3146,14 +3146,18 @@ class TypeChecker(
             if (key in seen) error("invalid recursive interface embedding")
             interfaceMethods(embedded, seen + key).forEach { (name, signature) ->
                 val previous = result.putIfAbsent(name, signature)
-                if (previous != null) error("duplicate interface method $name")
+                if (previous != null && !sameSignature(previous, signature))
+                    error("incompatible interface method $name")
             }
         }
+        val declaredNames = mutableSetOf<String>()
         iface.methods.forEach { method ->
             val signature = FunctionGoType(method.parameters, method.results)
             val key = interfaceMethodKey(method)
+            if (!declaredNames.add(key)) error("duplicate interface method ${method.name}")
             val previous = result.putIfAbsent(key, signature)
-            if (previous != null) error("duplicate interface method ${method.name}")
+            if (previous != null && !sameSignature(previous, signature))
+                error("incompatible interface method ${method.name}")
         }
         return result
     }
