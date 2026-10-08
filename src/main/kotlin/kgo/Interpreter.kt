@@ -3607,7 +3607,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         if (low < 0 || high < low || max < high || max > array.values.size)
             throw RuntimeGoError("slice bounds out of range")
         return GoSlice(array.elementType, array.values, low, high - low, max - low,
-            type = SliceGoType(array.elementType))
+            type = SliceGoType(array.elementType), reuseSynchronizedBacking = true)
     }
 
     private fun slice(receiver: Any?, lowValue: Any?, highValue: Any?): Any? {
@@ -5232,9 +5232,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val capacity: Int,
         val namedType: String? = null,
         val type: GoTypeSyntax? = null,
-        val packagePath: String? = packageIdentity
+        val packagePath: String? = packageIdentity,
+        reuseSynchronizedBacking: Boolean = false
     ) {
-        private val backing: MutableList<Any?> = Collections.synchronizedList(backing)
+        private val backing: MutableList<Any?> = if (reuseSynchronizedBacking) backing else Collections.synchronizedList(backing)
         fun get(index: Int): Any? {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             return backing[start + index]
@@ -5252,10 +5253,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
-            return GoSlice(elementType, backing, start + low, high - low, max - low, namedType, type, packagePath)
+            return GoSlice(elementType, backing, start + low, high - low, max - low, namedType, type, packagePath,
+                reuseSynchronizedBacking = true)
         }
         fun retype(element: GoTypeSyntax, name: String?, type: GoTypeSyntax, packagePath: String? = packageIdentity) =
-            GoSlice(element, backing, start, length, capacity, name, type, packagePath)
+            GoSlice(element, backing, start, length, capacity, name, type, packagePath,
+                reuseSynchronizedBacking = true)
         fun append(values: List<Any?>): GoSlice {
             val required = length.toLong() + values.size
             if (required > Int.MAX_VALUE) throw RuntimeGoError("slice length out of range")
@@ -5265,7 +5268,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     val assigned = copyForType(value, elementType)
                     backing[index] = preserveAggregateStorage(backing[index], assigned, elementType)
                 }
-                return GoSlice(elementType, backing, start, length + values.size, capacity, namedType, type, packagePath)
+                return GoSlice(elementType, backing, start, length + values.size, capacity, namedType, type, packagePath,
+                    reuseSynchronizedBacking = true)
             }
             val grownCapacity = minOf(capacity.toLong() * 2, Int.MAX_VALUE.toLong())
             val newCapacity = maxOf(required, maxOf(1L, grownCapacity)).toInt()
