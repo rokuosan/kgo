@@ -1857,7 +1857,15 @@ class Interpreter(
             }
             val root = rootName(expression)
             if (root != null && lookup(scopes, root).first) null
-            else methodExpressionReceiver(expression, globals)
+            else {
+                val normalized = when (target) {
+                    is NameExpression, is SelectorExpression -> target
+                    is UnaryExpression -> if (expression is ParenthesizedExpression)
+                        ParenthesizedExpression(target) else expression
+                    else -> expression
+                }
+                methodExpressionReceiver(normalized, globals)
+            }
         }
         fun rangeTypes(range: RangeClause, scopes: List<MutableMap<String, GoTypeSyntax?>>): List<GoTypeSyntax> {
             val source = infer(range.expression, scopes)?.let(::underlying) ?: return rangeVariableTypes(range, globals)
