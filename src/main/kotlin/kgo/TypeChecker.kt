@@ -1385,7 +1385,8 @@ class TypeChecker(
             ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.complex else null
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
-            alias?.let(packagePaths::get)?.let { importedConstant(it, expression.field)?.complex }
+            alias?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }
+                ?.let(packagePaths::get)?.let { importedConstant(it, expression.field)?.complex }
         }
         is LiteralExpression -> if (expression.token.kind == TokenKind.IMAG) {
             runCatching { GoRational.decimal(expression.token.lexeme.removeSuffix("i")) }.getOrNull()
@@ -1460,8 +1461,9 @@ class TypeChecker(
                 "false" -> false
                 else -> dotImportedConstant(expression.name)?.second?.boolean
             }
-        is SelectorExpression -> (expression.receiver as? NameExpression)?.name?.let(packagePaths::get)
-            ?.let { importedConstant(it, expression.field)?.boolean }
+        is SelectorExpression -> (expression.receiver as? NameExpression)?.name
+            ?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }
+            ?.let(packagePaths::get)?.let { importedConstant(it, expression.field)?.boolean }
         is ParenthesizedExpression -> constantBoolean(expression.expression, scope)
         is UnaryExpression -> if (expression.operator == TokenKind.NOT) constantBoolean(expression.operand, scope)?.not() else null
         is BinaryExpression -> {
@@ -1513,8 +1515,9 @@ class TypeChecker(
     private fun constantStringIdentity(expression: Expression, scope: Scope = globals): String? = when (expression) {
         is NameExpression -> scope.constantStringIdentity(expression.name)
             ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.stringIdentity else null
-        is SelectorExpression -> (expression.receiver as? NameExpression)?.name?.let(packagePaths::get)
-            ?.let { importedConstant(it, expression.field)?.stringIdentity }
+        is SelectorExpression -> (expression.receiver as? NameExpression)?.name
+            ?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }
+            ?.let(packagePaths::get)?.let { importedConstant(it, expression.field)?.stringIdentity }
         is LiteralExpression -> if (expression.token.kind == TokenKind.STRING)
             canonicalGoStringLiteral(expression.token.lexeme) else null
         is ParenthesizedExpression -> constantStringIdentity(expression.expression, scope)
