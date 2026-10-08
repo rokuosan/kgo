@@ -3143,6 +3143,9 @@ class TypeChecker(
         val blocked = mutableSetOf<String>()
         while (level.isNotEmpty()) {
             val candidates = linkedMapOf<String, MutableList<FunctionGoType>>()
+            // Fields and methods compete in the same selector namespace. A field
+            // at this depth makes a promoted method with the same name ambiguous.
+            val fieldsAtDepth = mutableSetOf<String>()
             val next = mutableListOf<SearchNode>()
             level.forEach { node ->
                 val nodeType = selectorBaseType(node.type)
@@ -3160,6 +3163,11 @@ class TypeChecker(
                         candidates.getOrPut(name) { mutableListOf() } += signature
                     }
                     is StructGoType -> {
+                        nodeType.fields.forEach { field ->
+                            field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
+                                .filter { it.isNotEmpty() }
+                                .forEach { name -> fieldsAtDepth += selectorPackageKey(field, name) }
+                        }
                         val baseName = methodBaseName(node.type)
                         if (baseName != null) methods.values.forEach { method ->
                             val receiverType = method.receiver?.type ?: return@forEach
@@ -3187,13 +3195,19 @@ class TypeChecker(
                 }
             }
             candidates.forEach { (name, methodsAtDepth) ->
-                if (methodsAtDepth.size == 1 && name !in blocked) result[name] = methodsAtDepth.single()
+                if (methodsAtDepth.size == 1 && name !in blocked && name !in fieldsAtDepth)
+                    result[name] = methodsAtDepth.single()
                 blocked += name
             }
+            blocked += fieldsAtDepth
             level = next
         }
         return result
     }
+
+    private fun selectorPackageKey(field: StructFieldSyntax, name: String): String =
+        if (isExportedIdentifier(name)) name
+        else "${unexportedFieldPackagePath(field, name) ?: packageIdentity ?: packageName ?: "<package>"}:$name"
 
     private fun sameSignature(left: FunctionGoType, right: FunctionGoType): Boolean =
         left.parameters.size == right.parameters.size && left.results.size == right.results.size &&

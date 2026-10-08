@@ -3415,6 +3415,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val blocked = mutableSetOf<String>()
         while (level.isNotEmpty()) {
             val candidates = linkedMapOf<String, MutableList<FunctionGoType>>()
+            // Match the checker's selector-depth rule when testing dynamic types
+            // for interface implementation.
+            val fieldsAtDepth = mutableSetOf<String>()
             val next = mutableListOf<SearchNode>()
             level.forEach { node ->
                 val nodeUnderlying = baseType(node.type)
@@ -3434,6 +3437,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                         candidates.getOrPut(name) { mutableListOf() } += signature
                     }
                     is StructGoType -> {
+                        nodeUnderlying.fields.forEach { field ->
+                            field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
+                                .filter { it.isNotEmpty() }
+                                .forEach { name -> fieldsAtDepth += runtimeSelectorPackageKey(field, name) }
+                        }
                         val named = baseName(node.type)
                         if (named != null) methods.values.forEach methodLoop@{ method ->
                             val receiverType = method.receiver?.type ?: return@methodLoop
@@ -3463,9 +3471,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
             }
             candidates.forEach { (name, methodsAtDepth) ->
-                if (methodsAtDepth.size == 1 && name !in blocked) result[name] = methodsAtDepth.single()
+                if (methodsAtDepth.size == 1 && name !in blocked && name !in fieldsAtDepth)
+                    result[name] = methodsAtDepth.single()
                 blocked += name
             }
+            blocked += fieldsAtDepth
             level = next
         }
         return result
@@ -3483,6 +3493,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private fun runtimePackageMethodKey(name: String): String = if (GoUnicode6.isExportedIdentifier(name)) name
         else "${packageIdentity ?: "<package>"}:$name"
+
+    private fun runtimeSelectorPackageKey(field: StructFieldSyntax, name: String): String =
+        if (GoUnicode6.isExportedIdentifier(name)) name
+        else "${unexportedFieldPackagePath(field, name) ?: packageIdentity ?: "<package>"}:$name"
 
     private fun runtimeInterfaceMethodKey(method: InterfaceMethodSyntax): String =
         if (GoUnicode6.isExportedIdentifier(method.name)) method.name
