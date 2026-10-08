@@ -1846,9 +1846,14 @@ class TypeChecker(
             }
         }
         is TypeAssertionExpression -> {
-            if (underlying(expressionType(expression.receiver, scope)) !is InterfaceGoType)
+            val interfaceType = expressionType(expression.receiver, scope)
+            if (underlying(interfaceType) !is InterfaceGoType)
                 error("type assertion requires an interface operand")
-            resolveLocalType(expression.type, scope).also(::validateType)
+            resolveLocalType(expression.type, scope).also { targetType ->
+                validateType(targetType)
+                if (underlying(targetType) !is InterfaceGoType)
+                    requireAssignable(targetType, interfaceType, "type assertion")
+            }
         }
         is TypeSwitchGuardExpression -> error("type switch guard is only valid in a switch statement")
         is TypeExpression -> resolveLocalType(expression.type, scope).also(::validateType)
