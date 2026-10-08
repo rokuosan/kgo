@@ -229,7 +229,7 @@ class Parser(private val tokens: List<Token>) {
             if (match(TokenKind.SEMICOLON)) { statements += EmptyStatement; continue }
             val statement = parseStatement()
             statements += statement
-            if (!match(TokenKind.SEMICOLON) && !at(TokenKind.RBRACE) && statement !is DeclarationStatement) {
+            if (!match(TokenKind.SEMICOLON) && !at(TokenKind.RBRACE)) {
                 fail("expected semicolon or '}'")
             }
         }
@@ -677,7 +677,7 @@ class Parser(private val tokens: List<Token>) {
         if (!match(TokenKind.SEMICOLON) && !at(close)) fail("expected semicolon or $close")
     }
     private fun optionalSemicolon() {
-        if (parsingTopLevelDeclaration) semicolon() else match(TokenKind.SEMICOLON)
+        if (parsingTopLevelDeclaration) semicolon()
     }
     private fun at(kind: TokenKind) = current().kind == kind
     private fun match(kind: TokenKind): Boolean = if (at(kind)) { take(); true } else false
