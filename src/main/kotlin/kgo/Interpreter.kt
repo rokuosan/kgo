@@ -3941,6 +3941,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             is BigInteger -> value
             is Long -> BigInteger.valueOf(value)
             is GoInteger -> integerValue(value, "array length")
+            is GoRational -> if (value.isInteger()) value.numerator
+                else throw RuntimeGoError("array length is not a constant integer expression")
+            is GoExactComplex -> if (value.imaginary == GoRational.ZERO && value.real.isInteger()) value.real.numerator
+                else throw RuntimeGoError("array length is not a constant integer expression")
             else -> throw RuntimeGoError("array length is not a constant integer expression")
         }
         is ParenthesizedExpression -> integerLiteral(expression.expression, env)
