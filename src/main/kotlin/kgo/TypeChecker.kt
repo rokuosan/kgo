@@ -1205,7 +1205,8 @@ class TypeChecker(
                 val caseType = expressionType(case, caseScope)
                 if (caseType != nilType && !isComparable(caseType)) error("switch case expression must be comparable")
                 if (tagType != null) {
-                    if (!assignable(caseType, tagType) && !constantIntegerAssignable(caseType, tagType, case, caseScope))
+                    if (!comparisonCompatible(caseType, tagType, case, statement.tag, caseScope) &&
+                        !constantIntegerAssignable(caseType, tagType, case, caseScope))
                         error("case type does not match switch expression")
                     requireIntegerConstantRepresentable(case, tagType, caseScope)
                 } else requireBoolean(caseType, "expressionless switch case")
@@ -2545,7 +2546,7 @@ class TypeChecker(
             return commonType(operandLeft, operandRight)
         }
         if (operator in setOf(TokenKind.EQL, TokenKind.NEQ)) {
-            if (!constantOperandsAssignable(operandLeft, operandRight, leftExpression, rightExpression, scope))
+            if (!comparisonCompatible(operandLeft, operandRight, leftExpression, rightExpression, scope))
                 error("incompatible comparison: $operandLeft and $operandRight")
             if (operandLeft == nilType) {
                 if (!isNilable(operandRight)) error("cannot compare nil with $operandRight")
@@ -2580,6 +2581,26 @@ class TypeChecker(
         scope: Scope
     ): Boolean = constantOperandAssignable(left, right, leftExpression, scope) ||
         constantOperandAssignable(right, left, rightExpression, scope)
+
+    private fun comparisonCompatible(
+        left: GoTypeSyntax,
+        right: GoTypeSyntax,
+        leftExpression: Expression?,
+        rightExpression: Expression?,
+        scope: Scope
+    ): Boolean {
+        if (constantOperandsAssignable(left, right, leftExpression, rightExpression, scope)) return true
+        val leftChannel = underlying(left) as? ChannelGoType ?: return false
+        val rightChannel = underlying(right) as? ChannelGoType ?: return false
+        if (isNamed(left) && isNamed(right)) return false
+        return compatibleType(leftChannel.element, rightChannel.element)
+    }
+
+    private fun compatibleType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
+        if (sameType(left, right)) return true
+        if (isNamed(left) == isNamed(right)) return false
+        return sameType(underlying(left), underlying(right))
+    }
 
     private fun constantOperandAssignable(
         from: GoTypeSyntax,
