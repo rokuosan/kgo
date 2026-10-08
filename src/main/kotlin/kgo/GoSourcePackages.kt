@@ -38,6 +38,7 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
         val files = parseGoFiles(directory)
         if (files.isEmpty()) throw GoTypeError("no Go source files in imported package $path")
         val packageName = files.first().packageName
+        if (packageName == "main") throw GoTypeError("cannot import package main: $path")
         if (files.any { it.packageName != packageName })
             throw GoTypeError("source files in imported package $path declare different package names")
         val resolvedFiles = resolveImports(files, directory, order)
