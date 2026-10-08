@@ -4,7 +4,7 @@ package kgo
 internal object GoRuntimePackage {
     private val errorType = InterfaceGoType(
         listOf(InterfaceMethodSyntax("RuntimeError", emptyList(), emptyList())),
-        listOf(NamedGoType("error"))
+        listOf(NamedGoType("#predeclared-error"))
     )
 
     val exportedTypes = setOf("Error")
