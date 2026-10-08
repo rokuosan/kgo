@@ -600,7 +600,13 @@ class Interpreter(
 
     private suspend fun assign(statement: AssignmentStatement, env: Environment) {
         if (statement.operator == TokenKind.DEFINE) {
-            val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
+            val expectedTypes = statement.targets.map { target ->
+                (target as? NameExpression)?.takeIf { it.name != "_" && env.containsLocal(it.name) }
+                    ?.let { env.typeOf(it.name) }
+            }
+            val values = expandValues(evaluateRhs(
+                statement.values, statement.targets.size, env, expectedTypes
+            ), statement.targets.size)
             assignValues(statement.targets, statement.operator, values, env, statement.values)
         } else {
             // Go 1 evaluates all left-hand index/pointer operands before the right-hand expressions,
@@ -1596,7 +1602,7 @@ class Interpreter(
     }
 
     private suspend fun evaluateRhs(
-        expressions: List<Expression>, arity: Int, env: Environment, expectedTypes: List<GoTypeSyntax>? = null
+        expressions: List<Expression>, arity: Int, env: Environment, expectedTypes: List<GoTypeSyntax?>? = null
     ): List<Any?> {
         if (expressions.size == 1 && arity == 2 && expressions[0] is TypeAssertionExpression) {
             val assertion = expressions[0] as TypeAssertionExpression
