@@ -1900,7 +1900,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val methodOwner: Interpreter? = null,
             val resolvedMember: Any? = null
         )
-        var level = listOf(Node(receiver, emptySet(), staticExpressionType(receiverExpression, env)))
+        val receiverType = staticExpressionType(receiverExpression, env)
+        val receiverUnderlying = receiverType?.let(::underlying)
+        if (receiverUnderlying is PointerGoType && underlying(receiverUnderlying.element) is InterfaceGoType)
+            throw RuntimeGoError("cannot select a member from a pointer to an interface")
+        var level = listOf(Node(receiver, emptySet(), receiverType))
         while (level.isNotEmpty()) {
             val candidates = mutableListOf<Candidate>()
             val next = mutableListOf<Node>()

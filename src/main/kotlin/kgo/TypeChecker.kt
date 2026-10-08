@@ -1806,6 +1806,9 @@ class TypeChecker(
             return FunctionGoType(listOf(ParameterSyntax(null, receiverType)) + method.parameters, method.results)
         }
         val receiverType = expressionType(expression.receiver, scope)
+        val receiverUnderlying = underlying(receiverType)
+        if (receiverUnderlying is PointerGoType && underlying(receiverUnderlying.element) is InterfaceGoType)
+            error("cannot select a member from a pointer to an interface")
         data class Candidate(
             val type: GoTypeSyntax,
             val needsAddressableReceiver: Boolean = false
