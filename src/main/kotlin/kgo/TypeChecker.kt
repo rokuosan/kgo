@@ -1657,8 +1657,10 @@ class TypeChecker(
         }
         is UnaryExpression -> {
             val operandContext = expectedType?.takeIf {
-                expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.XOR) &&
-                    containsNonConstantUntypedShift(expression.operand, scope)
+                (expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.XOR) &&
+                    containsNonConstantUntypedShift(expression.operand, scope)) ||
+                    expression.operator == TokenKind.NOT && isBoolean(it) &&
+                    containsBooleanComparison(expression.operand)
             }
             val operand = expressionType(expression.operand, scope, operandContext)
             when (expression.operator) {
@@ -2788,6 +2790,7 @@ class TypeChecker(
 
     private fun containsBooleanComparison(expression: Expression): Boolean = when (expression) {
         is ParenthesizedExpression -> containsBooleanComparison(expression.expression)
+        is UnaryExpression -> expression.operator == TokenKind.NOT && containsBooleanComparison(expression.operand)
         is BinaryExpression -> expression.operator in setOf(
             TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ
         ) || expression.operator in setOf(TokenKind.LAND, TokenKind.LOR) &&
