@@ -3712,7 +3712,7 @@ class TypeChecker(
         private val runeType = NamedGoType("rune")
         private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
-        private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(stringType))))
+        private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(predeclaredStringType))))
         private val integerNames = setOf("#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32", "#predeclared-int64", "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val floatNames = setOf("#predeclared-float32", "#predeclared-float64", "float32", "float64")
         private val complexNames = setOf("#predeclared-complex64", "#predeclared-complex128", "complex64", "complex128")

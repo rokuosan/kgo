@@ -3133,7 +3133,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val actual = underlying(type)
         if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
         if (type == runtimeErrorValueType) return mapOf(
-            "Error" to FunctionGoType(emptyList(), listOf(NamedGoType("string"))),
+            "Error" to FunctionGoType(emptyList(), listOf(predeclaredStringRuntimeType)),
             "RuntimeError" to FunctionGoType(emptyList(), emptyList())
         )
         val result = linkedMapOf<String, FunctionGoType>()
@@ -5191,7 +5191,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         private val predeclaredUInt64RuntimeType = NamedGoType("#predeclared-uint64")
         private val predeclaredUintptrRuntimeType = NamedGoType("#predeclared-uintptr")
         private val integerTypeNames = setOf("#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32", "#predeclared-int64", "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
-        private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
+        private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(predeclaredStringRuntimeType))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")
     }
