@@ -1747,6 +1747,35 @@ class Interpreter(
             scopes.asReversed().forEach { scope -> if (name in scope) return true to scope[name] }
             return false to null
         }
+        fun resolveDependencyType(
+            type: GoTypeSyntax, scopes: List<MutableMap<String, GoTypeSyntax?>>
+        ): GoTypeSyntax = when (type) {
+            is NamedGoType -> lookup(scopes, type.name).let { (local, localType) ->
+                if (local) localType ?: type else resolveRuntimeType(type, globals)
+            }
+            is QualifiedGoType -> resolveRuntimeType(type, globals)
+            is PointerGoType -> PointerGoType(resolveDependencyType(type.element, scopes))
+            is SliceGoType -> SliceGoType(resolveDependencyType(type.element, scopes))
+            is ArrayGoType -> ArrayGoType(type.length, resolveDependencyType(type.element, scopes))
+            is MapGoType -> MapGoType(
+                resolveDependencyType(type.key, scopes), resolveDependencyType(type.value, scopes)
+            )
+            is ChannelGoType -> ChannelGoType(resolveDependencyType(type.element, scopes), type.direction)
+            is StructGoType -> StructGoType(type.fields.map { field ->
+                field.copy(type = resolveDependencyType(field.type, scopes))
+            })
+            is InterfaceGoType -> InterfaceGoType(
+                type.methods.map { method -> method.copy(
+                    parameters = method.parameters.map { it.copy(type = resolveDependencyType(it.type, scopes)) },
+                    results = method.results.map { resolveDependencyType(it, scopes) }
+                ) },
+                type.embeddedTypes.map { resolveDependencyType(it, scopes) }
+            )
+            is FunctionGoType -> FunctionGoType(
+                type.parameters.map { it.copy(type = resolveDependencyType(it.type, scopes)) },
+                type.results.map { resolveDependencyType(it, scopes) }
+            )
+        }
         fun infer(
             expression: Expression, scopes: List<MutableMap<String, GoTypeSyntax?>>, resultIndex: Int = 0
         ): GoTypeSyntax? {
@@ -1755,8 +1784,8 @@ class Interpreter(
                 is NameExpression -> lookup(scopes, target.name).let { (local, type) ->
                     if (local) type else globals.typeOf(target.name) ?: staticExpressionType(target, globals)
                 }
-                is CompositeLiteral -> resolveRuntimeType(target.type, globals)
-                is TypeAssertionExpression -> resolveRuntimeType(target.type, globals)
+                is CompositeLiteral -> resolveDependencyType(target.type, scopes)
+                is TypeAssertionExpression -> resolveDependencyType(target.type, scopes)
                 is UnaryExpression -> {
                     val operand = infer(target.operand, scopes)
                     when (target.operator) {
@@ -1813,7 +1842,7 @@ class Interpreter(
             val inferred = names.mapIndexed { index, name ->
                 if (name == "_") return@mapIndexed null
                 val source = values.singleOrNull()?.takeIf { names.size > 1 } ?: values.getOrNull(index)
-                declaredType?.let { resolveRuntimeType(it, globals) }
+                declaredType?.let { resolveDependencyType(it, scopes) }
                     ?: source?.let { infer(it, scopes, if (names.size > 1) index else 0) }
             }
             names.forEachIndexed { index, name -> if (name != "_") scopes.last()[name] = inferred[index] }
@@ -1844,10 +1873,15 @@ class Interpreter(
                 is FunctionLiteralExpression -> {
                     val nested = child(scopes)
                     expression.parameters.forEach { parameter ->
-                        parameter.name?.takeIf { it != "_" }?.let { nested.last()[it] = parameter.type }
+                        parameter.name?.takeIf { it != "_" }?.let {
+                            nested.last()[it] = resolveDependencyType(parameter.type, scopes)
+                        }
                     }
                     expression.resultNames.forEachIndexed { index, name ->
-                        name?.takeIf { it != "_" }?.let { nested.last()[it] = expression.results.getOrNull(index) }
+                        name?.takeIf { it != "_" }?.let {
+                            nested.last()[it] = expression.results.getOrNull(index)
+                                ?.let { type -> resolveDependencyType(type, scopes) }
+                        }
                     }
                     visitBlock(expression.body, nested)
                 }
@@ -1867,7 +1901,18 @@ class Interpreter(
                         declaration.values.forEach { visitExpression(it, scopes) }
                         bindValues(declaration.names, declaration.values, declaration.type, scopes)
                     }
-                    is TypeDeclaration -> scopes.last()[declaration.name] = NamedGoType(declaration.name)
+                    is TypeDeclaration -> {
+                        val identity = synchronized(localTypeIdentities) {
+                            localTypeIdentities[declaration] ?:
+                                "<local:${nextLocalTypeIdentity.incrementAndGet()}:${declaration.name}>".also {
+                                    localTypeIdentities[declaration] = it
+                                }
+                        }
+                        scopes.last()[declaration.name] = NamedGoType(identity)
+                        typeDefinitions[identity] = runCatching {
+                            resolveDependencyType(declaration.type, scopes)
+                        }.getOrDefault(declaration.type)
+                    }
                     else -> Unit
                 } }
                 is BlockStatement -> visitBlock(statement, scopes)
@@ -1941,7 +1986,7 @@ class Interpreter(
                         val caseScope = child(nested)
                         statement.guard.name?.takeIf { it != "_" }?.let { name ->
                             caseScope.last()[name] = clause.types?.singleOrNull()
-                                ?.let { resolveRuntimeType(it, globals) } ?: interfaceType
+                                ?.let { resolveDependencyType(it, nested) } ?: interfaceType
                         }
                         visitBlock(BlockStatement(clause.statements), caseScope)
                     }
