@@ -93,6 +93,10 @@ class TypeChecker(
             val definitions = group.count { !it.incomplete }
             if (forwards > 1 || definitions > 1 || forwards == 1 && definitions != 1)
                 error("invalid forward declaration for type $name")
+            val forward = group.singleOrNull { it.incomplete }
+            val definition = group.singleOrNull { !it.incomplete }
+            if (forward != null && definition != null && !completesForwardType(forward.type, definition.type))
+                error("forward declaration kind mismatch for type $name")
         }
 
         val packageIdentifiers = linkedSetOf<String>()
@@ -947,6 +951,9 @@ class TypeChecker(
                             typeDeclarations[identity] = declaration.type
                             incompleteLocalTypes += identity
                         } else {
+                            if (completingForward && !completesForwardType(
+                                    typeDeclarations.getValue(identity), declaration.type
+                                )) error("forward declaration kind mismatch for type $name")
                             typeDeclarations[identity] = resolveLocalType(declaration.type, scope)
                             incompleteLocalTypes -= identity
                             validateType(NamedGoType(identity))
@@ -3070,6 +3077,12 @@ class TypeChecker(
                 type.results.forEach { validateType(it, active, true) }
             }
         }
+    }
+
+    private fun completesForwardType(forward: GoTypeSyntax, definition: GoTypeSyntax): Boolean = when (forward) {
+        is StructGoType -> definition is StructGoType
+        is InterfaceGoType -> definition is InterfaceGoType
+        else -> false
     }
 
     private fun standardPackageName(path: String): String? {
