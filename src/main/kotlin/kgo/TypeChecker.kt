@@ -84,7 +84,18 @@ class TypeChecker(
                 listOf(declaration.name) else emptyList()
             else -> emptyList()
         } }.filter { it != "_" }.toSet()
+        val typeDeclarationGroups = declarations.mapNotNull { (_, declaration) ->
+            (declaration as? TypeDeclaration)?.takeIf { it.name != "_" }
+        }.groupBy { it.name }
+        typeDeclarationGroups.forEach { (name, group) ->
+            val forwards = group.count { it.incomplete }
+            val definitions = group.count { !it.incomplete }
+            if (forwards > 1 || definitions > 1 || forwards == 1 && definitions != 1)
+                error("invalid forward declaration for type $name")
+        }
+
         val packageIdentifiers = linkedSetOf<String>()
+        val declaredTypeNames = mutableSetOf<String>()
         declarations.forEach { (_, declaration) ->
             if (declaration !is FunctionDeclaration && "init" in when (declaration) {
                     is VariableDeclaration -> declaration.names
@@ -101,14 +112,13 @@ class TypeChecker(
                 else -> emptyList()
             }
             names.filter { it != "_" }.forEach { name ->
+                if (declaration is TypeDeclaration && !declaredTypeNames.add(name)) return@forEach
                 if (!packageIdentifiers.add(name)) error("$name redeclared in package block")
             }
         }
-        declarations.mapNotNull { (file, declaration) ->
-            (declaration as? TypeDeclaration)?.let { file to it }
-        }.forEach { (_, declaration) ->
-            if (declaration.name == "_") return@forEach
-            if (typeDeclarations.putIfAbsent(declaration.name, declaration.type) != null) error("type ${declaration.name} redeclared")
+        typeDeclarationGroups.forEach { (name, group) ->
+            val definition = group.singleOrNull { !it.incomplete } ?: return@forEach
+            typeDeclarations[name] = definition.type
         }
         for ((_, declaration) in declarations) when (declaration) {
             is TypeDeclaration -> Unit
@@ -230,7 +240,7 @@ class TypeChecker(
             }
         }
         for ((sourceFile, declaration) in declarations) {
-            if (declaration is TypeDeclaration) withFileImports(sourceFile) {
+            if (declaration is TypeDeclaration && !declaration.incomplete) withFileImports(sourceFile) {
                 if (declaration.name == "_") validateType(declaration.type)
                 else {
                     validateType(NamedGoType(declaration.name))
@@ -909,6 +919,7 @@ class TypeChecker(
                         } }
                     }
                     is TypeDeclaration -> {
+                        if (declaration.incomplete) error("incomplete local type declarations are not supported")
                         if (declaration.name != "_" && scope.containsLocal(declaration.name))
                             error("${declaration.name} redeclared in this block")
                         val identity = "<local:${nextLocalTypeIdentity.incrementAndGet()}:${declaration.name}>"

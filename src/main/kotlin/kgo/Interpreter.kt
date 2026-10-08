@@ -244,7 +244,7 @@ class Interpreter(
                 else functions[function.name] = function
             }
         }
-        file.declarations.filterIsInstance<TypeDeclaration>().forEach {
+        file.declarations.filterIsInstance<TypeDeclaration>().filterNot { it.incomplete }.forEach {
             if (it.name != "_") {
                 val typeScope = globals.child().also { scope ->
                     scope.imports = declarationImports[it] ?: RuntimeImports()
@@ -255,7 +255,7 @@ class Interpreter(
         }
         val packageConstants = file.declarations.filterIsInstance<ConstantDeclaration>()
         val packageVariables = file.declarations.filterIsInstance<VariableDeclaration>()
-        exportedTypeNames = file.declarations.filterIsInstance<TypeDeclaration>().mapNotNullTo(mutableSetOf()) {
+        exportedTypeNames = file.declarations.filterIsInstance<TypeDeclaration>().filterNot { it.incomplete }.mapNotNullTo(mutableSetOf()) {
             it.name.takeIf { name -> name != "_" && GoUnicode6.isExportedIdentifier(name) }
         }
         exportedConstantNames = packageConstants.flatMap { it.names }.filterTo(mutableSetOf()) {

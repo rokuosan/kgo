@@ -178,19 +178,31 @@ class Parser(private val tokens: List<Token>) {
 
     private fun parseTypes(): List<TypeDeclaration> {
         if (!match(TokenKind.LPAREN)) {
-            val declaration = TypeDeclaration(expect(TokenKind.IDENT).lexeme, parseType())
+            val declaration = parseTypeDeclaration()
             optionalSemicolon()
             return listOf(declaration)
         }
         val declarations = mutableListOf<TypeDeclaration>()
         while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
             if (match(TokenKind.SEMICOLON)) continue
-            declarations += TypeDeclaration(expect(TokenKind.IDENT).lexeme, parseType())
+            declarations += parseTypeDeclaration()
             semicolonOrClose(TokenKind.RPAREN)
         }
         expect(TokenKind.RPAREN)
         optionalSemicolon()
         return declarations
+    }
+
+    private fun parseTypeDeclaration(): TypeDeclaration {
+        val name = expect(TokenKind.IDENT).lexeme
+        if ((at(TokenKind.STRUCT) || at(TokenKind.INTERFACE)) && tokens.getOrNull(index + 1)?.kind != TokenKind.LBRACE) {
+            return when (take().kind) {
+                TokenKind.STRUCT -> TypeDeclaration(name, StructGoType(emptyList()), incomplete = true)
+                TokenKind.INTERFACE -> TypeDeclaration(name, InterfaceGoType(emptyList()), incomplete = true)
+                else -> error("unreachable")
+            }
+        }
+        return TypeDeclaration(name, parseType())
     }
 
     private fun parseVariableSpec(grouped: Boolean = false): VariableDeclaration {
