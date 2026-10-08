@@ -3828,13 +3828,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun makeSize(value: Any?, operation: String): Int {
-        val integer = when (value) {
-            is GoRational -> if (value.isInteger()) value.numerator else throw RuntimeGoError("$operation must be integer")
-            is GoExactComplex -> if (value.imaginary.numerator.signum() == 0 && value.real.isInteger()) value.real.numerator
-                else throw RuntimeGoError("$operation must be integer")
-            else -> runCatching { integerValue(value, operation) }
-                .getOrElse { throw RuntimeGoError("$operation must be integer") }
-        }
+        val integer = exactIntegerValue(value, operation)
         if (integer < BigInteger.valueOf(Int.MIN_VALUE.toLong()) || integer > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
             throw RuntimeGoError("$operation out of range")
         return integer.toInt()
@@ -4433,9 +4427,16 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         else -> typeError(op, value)
     }
     private fun collectionIndex(value: Any?, op: String): Int {
-        val index = number(value, op)
-        if (index < Int.MIN_VALUE || index > Int.MAX_VALUE) throw RuntimeGoError("$op out of range")
+        val index = exactIntegerValue(value, op)
+        if (index < BigInteger.valueOf(Int.MIN_VALUE.toLong()) || index > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
+            throw RuntimeGoError("$op out of range")
         return index.toInt()
+    }
+    private fun exactIntegerValue(value: Any?, op: String): BigInteger = when (value) {
+        is GoRational -> if (value.isInteger()) value.numerator else throw RuntimeGoError("$op must be integer")
+        is GoExactComplex -> if (value.imaginary == GoRational.ZERO && value.real.isInteger()) value.real.numerator
+            else throw RuntimeGoError("$op must be integer")
+        else -> integerValue(value, op)
     }
     private fun integerValue(value: Any?, op: String): BigInteger = when (value) {
         is BigInteger -> value

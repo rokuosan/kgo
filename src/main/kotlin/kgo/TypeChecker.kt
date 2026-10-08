@@ -1726,7 +1726,7 @@ class TypeChecker(
         is SliceExpression -> {
             listOfNotNull(expression.low, expression.high).forEach { bound ->
                 val boundType = expressionType(bound, scope)
-                requireInteger(boundType, "slice index")
+                requireIntegerValue(boundType, bound, "slice index", scope)
                 requireValidConstantIndex(bound, null, "slice", scope)
             }
             val receiverType = expressionType(expression.receiver, scope)
@@ -1780,30 +1780,35 @@ class TypeChecker(
         val index = expressionType(expression.index, scope)
         return when (receiver) {
             is ArrayGoType -> {
-                requireInteger(index, "array index")
+                requireIntegerValue(index, expression.index, "array index", scope)
                 requireValidConstantIndex(expression.index, receiver.length?.let { constantInteger(it, scope) }, "array", scope)
                 receiver.element
             }
             is PointerGoType -> when (val pointed = underlying(receiver.element)) {
                 is ArrayGoType -> {
-                    requireInteger(index, "array index")
+                    requireIntegerValue(index, expression.index, "array index", scope)
                     requireValidConstantIndex(expression.index, pointed.length?.let { constantInteger(it, scope) }, "array", scope)
                     pointed.element
                 }
                 else -> error("cannot index through this pointer")
             }
             is SliceGoType -> {
-                requireInteger(index, "slice index")
+                requireIntegerValue(index, expression.index, "slice index", scope)
                 requireValidConstantIndex(expression.index, null, "slice", scope)
                 receiver.element
             }
             is MapGoType -> { requireAssignable(index, receiver.key, "map index", expression.index, scope); receiver.value }
             else -> if (isString(receiver)) {
-                requireInteger(index, "string index")
+                requireIntegerValue(index, expression.index, "string index", scope)
                 requireValidConstantIndex(expression.index, constantStringLength(expression.receiver, scope), "string", scope)
                 byteType
             } else error("cannot index this value")
         }
+    }
+
+    private fun requireIntegerValue(type: GoTypeSyntax, expression: Expression, context: String, scope: Scope) {
+        if (!isInteger(type) && !constantIntegerAssignable(type, predeclaredIntType, expression, scope))
+            error("$context must be integer")
     }
 
     private fun requireValidConstantIndex(
