@@ -1716,7 +1716,7 @@ class Interpreter(
             if (!visited.add(name)) continue
             val function = dependencyFunction(name) ?: continue
             val functionReferences = withRuntimeImports(functionImports[function]) {
-                val localTypes = functionLocalTypes(function)
+                val localTypes = functionSelectorReceiverTypes(function)
                 GoPackageDependencies.functionReferences(
                     function,
                     resolveType = { type -> runCatching { underlying(resolveRuntimeType(type, globals)) }.getOrNull() },
@@ -1728,26 +1728,37 @@ class Interpreter(
         }
     }
 
-    private fun functionLocalTypes(function: FunctionDeclaration): Map<String, GoTypeSyntax> {
-        val types = mutableMapOf<String, MutableSet<GoTypeSyntax>>()
-        val localNames = mutableSetOf<String>()
-        fun add(name: String?, type: GoTypeSyntax?) {
-            if (name == null || name == "_") return
-            localNames += name
-            if (type == null) return
-            val resolved = runCatching { resolveRuntimeType(type, globals) }.getOrDefault(type)
-            types.getOrPut(name) { linkedSetOf() } += resolved
+    private fun functionSelectorReceiverTypes(function: FunctionDeclaration): IdentityHashMap<Expression, GoTypeSyntax?> {
+        val receiverTypes = IdentityHashMap<Expression, GoTypeSyntax?>()
+        val functionScope = linkedMapOf<String, GoTypeSyntax?>()
+        function.parameters.forEachIndexed { index, name ->
+            name?.takeIf { it != "_" }?.let { functionScope[it] = function.parameterTypes.getOrNull(index) }
         }
-        fun infer(expression: Expression, resultIndex: Int = 0): GoTypeSyntax? {
+        function.receiver?.let { receiver ->
+            receiver.name?.takeIf { it != "_" }?.let { functionScope[it] = receiver.type }
+        }
+        function.resultNames.forEachIndexed { index, name ->
+            name?.takeIf { it != "_" }?.let { functionScope[it] = function.resultTypes.getOrNull(index) }
+        }
+
+        fun lookup(
+            scopes: List<MutableMap<String, GoTypeSyntax?>>, name: String
+        ): Pair<Boolean, GoTypeSyntax?> {
+            scopes.asReversed().forEach { scope -> if (name in scope) return true to scope[name] }
+            return false to null
+        }
+        fun infer(
+            expression: Expression, scopes: List<MutableMap<String, GoTypeSyntax?>>, resultIndex: Int = 0
+        ): GoTypeSyntax? {
             val target = expression.unparenthesized()
             val resolved = when (target) {
-                is NameExpression -> if (target.name in localNames)
-                    types[target.name]?.singleOrNull()
-                else globals.typeOf(target.name) ?: staticExpressionType(target, globals)
+                is NameExpression -> lookup(scopes, target.name).let { (local, type) ->
+                    if (local) type else globals.typeOf(target.name) ?: staticExpressionType(target, globals)
+                }
                 is CompositeLiteral -> resolveRuntimeType(target.type, globals)
                 is TypeAssertionExpression -> resolveRuntimeType(target.type, globals)
                 is UnaryExpression -> {
-                    val operand = infer(target.operand)
+                    val operand = infer(target.operand, scopes)
                     when (target.operator) {
                         TokenKind.AND -> operand?.let(::PointerGoType)
                         TokenKind.MUL -> (operand?.let(::underlying) as? PointerGoType)?.element
@@ -1756,15 +1767,15 @@ class Interpreter(
                     }
                 }
                 is SelectorExpression -> {
-                    val receiverType = infer(target.receiver)
-                    val structType = receiverType?.let(::underlying).let {
+                    val receiver = infer(target.receiver, scopes)
+                    val structType = receiver?.let(::underlying).let {
                         if (it is PointerGoType) underlying(it.element) else it
                     }
                     if (structType is StructGoType)
                         staticPromotedFieldType(structType, target.field, globals) ?: staticExpressionType(target, globals)
                     else staticExpressionType(target, globals)
                 }
-                is IndexExpression -> when (val receiver = infer(target.receiver)?.let(::underlying)) {
+                is IndexExpression -> when (val receiver = infer(target.receiver, scopes)?.let(::underlying)) {
                     is ArrayGoType -> receiver.element
                     is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.element
                     is SliceGoType -> receiver.element
@@ -1773,12 +1784,11 @@ class Interpreter(
                 }
                 else -> staticExpressionType(target, globals)
             }
-            val resultType = if (target is NameExpression && target.name in localNames) null
-                else staticExpressionResultType(expression, resultIndex, globals)
-            return resultType ?: resolved
+            val isLocalName = target is NameExpression && lookup(scopes, target.name).first
+            return if (isLocalName) resolved else staticExpressionResultType(expression, resultIndex, globals) ?: resolved
         }
-        fun rangeTypes(range: RangeClause): List<GoTypeSyntax> {
-            val source = infer(range.expression)?.let(::underlying) ?: return rangeVariableTypes(range, globals)
+        fun rangeTypes(range: RangeClause, scopes: List<MutableMap<String, GoTypeSyntax?>>): List<GoTypeSyntax> {
+            val source = infer(range.expression, scopes)?.let(::underlying) ?: return rangeVariableTypes(range, globals)
             val pair = when (source) {
                 is ArrayGoType -> predeclaredIntRuntimeType to source.element
                 is PointerGoType -> (underlying(source.element) as? ArrayGoType)?.let {
@@ -1792,134 +1802,173 @@ class Interpreter(
             } ?: return emptyList()
             return listOfNotNull(pair.first, pair.second).take(range.targets.size)
         }
-        fun addValues(names: List<String>, values: List<Expression>, declaredType: GoTypeSyntax?) {
-            names.forEachIndexed { index, name ->
+        lateinit var visitBlock: (BlockStatement, List<MutableMap<String, GoTypeSyntax?>>) -> Unit
+        lateinit var visitStatement: (Statement, List<MutableMap<String, GoTypeSyntax?>>) -> Unit
+        lateinit var visitExpression: (Expression, List<MutableMap<String, GoTypeSyntax?>>) -> Unit
+        fun child(scopes: List<MutableMap<String, GoTypeSyntax?>>) = scopes + linkedMapOf<String, GoTypeSyntax?>()
+        fun bindValues(
+            names: List<String>, values: List<Expression>, declaredType: GoTypeSyntax?,
+            scopes: List<MutableMap<String, GoTypeSyntax?>>
+        ) {
+            val inferred = names.mapIndexed { index, name ->
+                if (name == "_") return@mapIndexed null
                 val source = values.singleOrNull()?.takeIf { names.size > 1 } ?: values.getOrNull(index)
-                add(name, declaredType ?: source?.let { infer(it, if (names.size > 1) index else 0) })
+                declaredType?.let { resolveRuntimeType(it, globals) }
+                    ?: source?.let { infer(it, scopes, if (names.size > 1) index else 0) }
             }
+            names.forEachIndexed { index, name -> if (name != "_") scopes.last()[name] = inferred[index] }
         }
-        lateinit var visitBlock: (BlockStatement) -> Unit
-        lateinit var visitStatement: (Statement) -> Unit
-        function.parameters.forEachIndexed { index, name -> add(name, function.parameterTypes.getOrNull(index)) }
-        function.receiver?.let { add(it.name, it.type) }
-        function.resultNames.forEachIndexed { index, name -> add(name, function.resultTypes.getOrNull(index)) }
-
-        fun visitExpression(expression: Expression) {
+        visitExpression = { expression, scopes ->
             when (expression) {
-                is UnaryExpression -> visitExpression(expression.operand)
-                is BinaryExpression -> { visitExpression(expression.left); visitExpression(expression.right) }
-                is CallExpression -> { visitExpression(expression.function); expression.arguments.forEach(::visitExpression) }
-                is SelectorExpression -> visitExpression(expression.receiver)
-                is IndexExpression -> { visitExpression(expression.receiver); visitExpression(expression.index) }
-                is SliceExpression -> { visitExpression(expression.receiver); expression.low?.let(::visitExpression); expression.high?.let(::visitExpression) }
-                is TypeAssertionExpression -> visitExpression(expression.receiver)
-                is TypeSwitchGuardExpression -> visitExpression(expression.receiver)
-                is ParenthesizedExpression -> visitExpression(expression.expression)
+                is UnaryExpression -> visitExpression(expression.operand, scopes)
+                is BinaryExpression -> { visitExpression(expression.left, scopes); visitExpression(expression.right, scopes) }
+                is CallExpression -> { visitExpression(expression.function, scopes); expression.arguments.forEach { visitExpression(it, scopes) } }
+                is SelectorExpression -> {
+                    visitExpression(expression.receiver, scopes)
+                    receiverTypes[expression] = infer(expression.receiver, scopes)
+                }
+                is IndexExpression -> { visitExpression(expression.receiver, scopes); visitExpression(expression.index, scopes) }
+                is SliceExpression -> {
+                    visitExpression(expression.receiver, scopes); expression.low?.let { visitExpression(it, scopes) }
+                    expression.high?.let { visitExpression(it, scopes) }
+                }
+                is TypeAssertionExpression -> visitExpression(expression.receiver, scopes)
+                is TypeSwitchGuardExpression -> visitExpression(expression.receiver, scopes)
+                is ParenthesizedExpression -> visitExpression(expression.expression, scopes)
                 is CompositeLiteral -> expression.elements.forEach { element ->
-                    element.key?.let(::visitExpression); visitExpression(element.value)
+                    element.key?.let { visitExpression(it, scopes) }; visitExpression(element.value, scopes)
                 }
                 is ElidedCompositeLiteral -> expression.elements.forEach { element ->
-                    element.key?.let(::visitExpression); visitExpression(element.value)
+                    element.key?.let { visitExpression(it, scopes) }; visitExpression(element.value, scopes)
                 }
                 is FunctionLiteralExpression -> {
-                    expression.parameters.forEach { add(it.name, it.type) }
-                    expression.resultNames.forEachIndexed { index, name -> add(name, expression.results.getOrNull(index)) }
-                    visitBlock(expression.body)
+                    val nested = child(scopes)
+                    expression.parameters.forEach { parameter ->
+                        parameter.name?.takeIf { it != "_" }?.let { nested.last()[it] = parameter.type }
+                    }
+                    expression.resultNames.forEachIndexed { index, name ->
+                        name?.takeIf { it != "_" }?.let { nested.last()[it] = expression.results.getOrNull(index) }
+                    }
+                    visitBlock(expression.body, nested)
                 }
                 is NameExpression, is LiteralExpression, is TypeExpression -> Unit
             }
         }
-        visitStatement = { statement ->
+        visitStatement = { statement, scopes ->
             when (statement) {
                 EmptyStatement, is BranchStatement -> Unit
-                is LabeledStatement -> visitStatement(statement.statement)
+                is LabeledStatement -> visitStatement(statement.statement, scopes)
                 is DeclarationStatement -> statement.declarations.forEach { declaration -> when (declaration) {
                     is VariableDeclaration -> {
-                        declaration.values.forEach(::visitExpression)
-                        addValues(declaration.names, declaration.values, declaration.type)
+                        declaration.values.forEach { visitExpression(it, scopes) }
+                        bindValues(declaration.names, declaration.values, declaration.type, scopes)
                     }
                     is ConstantDeclaration -> {
-                        declaration.values.forEach(::visitExpression)
-                        addValues(declaration.names, declaration.values, declaration.type)
+                        declaration.values.forEach { visitExpression(it, scopes) }
+                        bindValues(declaration.names, declaration.values, declaration.type, scopes)
                     }
+                    is TypeDeclaration -> scopes.last()[declaration.name] = NamedGoType(declaration.name)
                     else -> Unit
                 } }
-                is BlockStatement -> visitBlock(statement)
+                is BlockStatement -> visitBlock(statement, scopes)
                 is VariableStatement -> {
-                    statement.values.forEach(::visitExpression)
-                    addValues(statement.names, statement.values, statement.type)
+                    statement.values.forEach { visitExpression(it, scopes) }
+                    bindValues(statement.names, statement.values, statement.type, scopes)
                 }
-                is ReturnStatement -> statement.values.forEach(::visitExpression)
-                is ExpressionStatement -> visitExpression(statement.expression)
-                is SendStatement -> { visitExpression(statement.channel); visitExpression(statement.value) }
-                is GoStatement -> visitExpression(statement.call)
-                is DeferStatement -> visitExpression(statement.call)
+                is ReturnStatement -> statement.values.forEach { visitExpression(it, scopes) }
+                is ExpressionStatement -> visitExpression(statement.expression, scopes)
+                is SendStatement -> { visitExpression(statement.channel, scopes); visitExpression(statement.value, scopes) }
+                is GoStatement -> visitExpression(statement.call, scopes)
+                is DeferStatement -> visitExpression(statement.call, scopes)
                 is AssignmentStatement -> {
-                    statement.values.forEach(::visitExpression)
+                    statement.values.forEach { visitExpression(it, scopes) }
                     if (statement.operator == TokenKind.DEFINE) {
-                        statement.targets.forEachIndexed { index, target ->
-                            val name = (target as? NameExpression)?.name ?: return@forEachIndexed
-                            if (name in localNames) return@forEachIndexed
+                        val scope = scopes.last()
+                        val inferred = statement.targets.mapIndexed { index, target ->
+                            val local = target as? NameExpression ?: return@mapIndexed null
+                            if (local.name == "_" || local.name in scope) return@mapIndexed null
                             val source = statement.values.singleOrNull()?.takeIf { statement.targets.size > 1 }
                                 ?: statement.values.getOrNull(index)
-                            add(name, source?.let { infer(it, if (statement.targets.size > 1) index else 0) })
+                            source?.let { infer(it, scopes, if (statement.targets.size > 1) index else 0) }
                         }
-                    }
+                        statement.targets.forEachIndexed { index, target ->
+                            val local = target as? NameExpression ?: return@forEachIndexed
+                            if (local.name != "_" && local.name !in scope) scope[local.name] = inferred[index]
+                        }
+                    } else statement.targets.forEach { visitExpression(it, scopes) }
                 }
-                is IncrementStatement -> Unit
+                is IncrementStatement -> visitExpression(statement.target, scopes)
                 is IfStatement -> {
-                    statement.init?.let(visitStatement); visitExpression(statement.condition)
-                    visitBlock(statement.thenBranch); statement.elseBranch?.let(visitStatement)
+                    val nested = child(scopes)
+                    statement.init?.let { visitStatement(it, nested) }
+                    visitExpression(statement.condition, nested)
+                    visitBlock(statement.thenBranch, nested)
+                    statement.elseBranch?.let { visitStatement(it, child(nested)) }
                 }
                 is ForStatement -> {
-                    statement.init?.let(visitStatement); statement.condition?.let(::visitExpression)
-                    statement.post?.let(visitStatement)
+                    val nested = child(scopes)
+                    statement.init?.let { visitStatement(it, nested) }
+                    statement.condition?.let { visitExpression(it, nested) }
+                    statement.post?.let { visitStatement(it, nested) }
                     statement.rangeClause?.let { range ->
-                        visitExpression(range.expression)
+                        visitExpression(range.expression, nested)
                         if (range.operator == TokenKind.DEFINE) {
-                            val valueTypes = rangeTypes(range)
+                            val types = rangeTypes(range, nested)
                             range.targets.forEachIndexed { index, target ->
-                                add((target as? NameExpression)?.name, valueTypes.getOrNull(index))
+                                (target as? NameExpression)?.name?.takeIf { it != "_" }
+                                    ?.let { nested.last()[it] = types.getOrNull(index) }
                             }
-                        }
+                        } else range.targets.forEach { visitExpression(it, nested) }
                     }
-                    visitBlock(statement.body)
+                    visitBlock(statement.body, nested)
                 }
                 is SwitchStatement -> {
-                    statement.init?.let(visitStatement); statement.tag?.let(::visitExpression)
+                    val nested = child(scopes)
+                    statement.init?.let { visitStatement(it, nested) }
+                    statement.tag?.let { visitExpression(it, nested) }
                     statement.clauses.forEach { clause ->
-                        clause.expressions?.forEach(::visitExpression)
-                        visitBlock(BlockStatement(clause.statements))
+                        val caseScope = child(nested)
+                        clause.expressions?.forEach { visitExpression(it, caseScope) }
+                        visitBlock(BlockStatement(clause.statements), caseScope)
                     }
                 }
                 is TypeSwitchStatement -> {
-                    statement.init?.let(visitStatement); visitExpression(statement.guard.expression)
+                    val nested = child(scopes)
+                    statement.init?.let { visitStatement(it, nested) }
+                    visitExpression(statement.guard.expression, nested)
                     statement.clauses.forEach { clause ->
-                        statement.guard.name?.let { name -> add(name, clause.types?.singleOrNull()) }
-                        visitBlock(BlockStatement(clause.statements))
+                        val caseScope = child(nested)
+                        statement.guard.name?.takeIf { it != "_" }?.let { name ->
+                            caseScope.last()[name] = clause.types?.singleOrNull()
+                        }
+                        visitBlock(BlockStatement(clause.statements), caseScope)
                     }
                 }
                 is SelectStatement -> statement.cases.forEach { clause ->
-                    clause.communication?.let(visitStatement)
-                    visitBlock(BlockStatement(clause.statements))
+                    val caseScope = child(scopes)
+                    clause.communication?.let { visitStatement(it, caseScope) }
+                    visitBlock(BlockStatement(clause.statements), caseScope)
                 }
             }
         }
-        visitBlock = { block -> block.statements.forEach(visitStatement) }
-        function.body?.let(visitBlock)
-        return types.mapNotNull { (name, candidates) ->
-            candidates.singleOrNull()?.let { name to it }
-        }.toMap()
+        visitBlock = { block, scopes ->
+            val blockScopes = child(scopes)
+            block.statements.forEach { visitStatement(it, blockScopes) }
+        }
+        function.body?.let { visitBlock(it, listOf(functionScope)) }
+        return receiverTypes
     }
 
     private fun methodCallDependencies(
         expression: Expression,
         locals: Set<String> = emptySet(),
-        localTypes: Map<String, GoTypeSyntax> = emptyMap()
+        localTypes: IdentityHashMap<Expression, GoTypeSyntax?>? = null
     ): Set<String> {
         val selector = expression.unparenthesized() as? SelectorExpression ?: return emptySet()
         val receiver = selector.receiver.unparenthesized()
-        val receiverType = dependencyExpressionType(receiver, locals, localTypes) ?: return emptySet()
+        val receiverType = if (localTypes?.containsKey(selector) == true) localTypes[selector]
+            else dependencyExpressionType(receiver, locals, emptyMap())
+        if (receiverType == null) return emptySet()
         val method = methodForDependency(receiverType, selector.field)
             ?: (if (receiverType is PointerGoType) null
                 else methodForDependency(PointerGoType(receiverType), selector.field))
