@@ -2401,7 +2401,9 @@ class TypeChecker(
     private fun builtinCall(name: String, args: List<Expression>, scope: Scope, expandLastArgument: Boolean = false): List<GoTypeSyntax>? {
         val types = if (name == "make" || name == "new") {
             args.firstOrNull()?.let { typeArgument ->
-                listOf(builtinTypeArgument(typeArgument, scope)) + args.drop(1).map { expressionType(it, scope) }
+                listOf(builtinTypeArgument(typeArgument, scope)) + args.drop(1).map {
+                    expressionType(it, scope, predeclaredIntType.takeIf { name == "make" })
+                }
             } ?: emptyList()
         } else callArgumentTypes(args, expandLastArgument, scope)
         if (expandLastArgument && name in setOf("print", "println") && args.size != 1)
@@ -2427,16 +2429,16 @@ class TypeChecker(
                     is SliceGoType -> {
                         if (args.size !in 2..3) error("make slice requires length and optional capacity")
                         args.drop(1).forEachIndexed { index, _ ->
-                            requireMakeSize(types[index + 1])
+                            requireMakeSize(types[index + 1], args[index + 1], scope)
                         }
                     }
                     is MapGoType -> {
                         if (args.size !in 1..2) error("make map accepts at most one size hint")
-                        args.getOrNull(1)?.let { requireMakeSize(types[1]) }
+                        args.getOrNull(1)?.let { requireMakeSize(types[1], it, scope) }
                     }
                     is ChannelGoType -> {
                         if (args.size !in 1..2) error("make channel accepts at most one buffer size")
-                        args.getOrNull(1)?.let { requireMakeSize(types[1]) }
+                        args.getOrNull(1)?.let { requireMakeSize(types[1], it, scope) }
                     }
                     else -> error("make requires slice, map, or channel type")
                 }
@@ -3653,8 +3655,9 @@ class TypeChecker(
     }
     private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
         dotImportedType(name) != null || (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
-    private fun requireMakeSize(type: GoTypeSyntax) {
-        if (!isInteger(type)) error("make size must be integer")
+    private fun requireMakeSize(type: GoTypeSyntax, expression: Expression, scope: Scope) {
+        if (!isInteger(type) && !constantIntegerAssignable(type, predeclaredIntType, expression, scope))
+            error("make size must be integer")
         // Go 1.0 specifies invalid sizes and values outside int as run-time panics.
     }
 

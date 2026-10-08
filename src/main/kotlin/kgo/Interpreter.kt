@@ -2095,7 +2095,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             staticRangeArrayLength(call.arguments.single(), env)?.let { return it.toLong() }
         }
         val target = evaluate(call.function, env)
-        val rawArgs = evaluateCallArguments(call, env, callParameterTypes(target))
+        val rawArgs = evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call))
         val args = adaptCallArguments(call, target, rawArgs, env).let { arguments ->
             if (target is TypeValue && arguments.size == 1 && call.arguments.size == 1 && !call.expandLastArgument)
                 listOf(defaultRuneValue(arguments.single(), call.arguments.single(), env))
@@ -2198,6 +2198,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is MethodExpressionValue -> (target.type as? FunctionGoType)?.parameters?.map { it.type }.orEmpty()
         else -> emptyList()
     }
+
+    private fun runtimeCallArgumentTypes(target: Any?, call: CallExpression): List<GoTypeSyntax> =
+        if (target is BuiltinValue && target.name == "make")
+            List(call.arguments.size) { predeclaredIntRuntimeType }
+        else callParameterTypes(target)
 
     private suspend fun evaluateCallArguments(
         call: CallExpression, env: Environment, expectedTypes: List<GoTypeSyntax> = emptyList()
@@ -3823,9 +3828,16 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun makeSize(value: Any?, operation: String): Int {
-        val size = number(value, operation)
-        if (size < Int.MIN_VALUE || size > Int.MAX_VALUE) throw RuntimeGoError("$operation out of range")
-        return size.toInt()
+        val integer = when (value) {
+            is GoRational -> if (value.isInteger()) value.numerator else throw RuntimeGoError("$operation must be integer")
+            is GoExactComplex -> if (value.imaginary.numerator.signum() == 0 && value.real.isInteger()) value.real.numerator
+                else throw RuntimeGoError("$operation must be integer")
+            else -> runCatching { integerValue(value, operation) }
+                .getOrElse { throw RuntimeGoError("$operation must be integer") }
+        }
+        if (integer < BigInteger.valueOf(Int.MIN_VALUE.toLong()) || integer > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
+            throw RuntimeGoError("$operation out of range")
+        return integer.toInt()
     }
 
     private fun zeroedSliceBacking(capacity: Int, elementType: GoTypeSyntax): MutableList<Any?> = try {
