@@ -2944,13 +2944,17 @@ class TypeChecker(
                 val constant = constantInteger(length, globals) ?: error("array length must be constant")
                 if (constant.signum() < 0) error("array length must be non-negative")
                 requireIntegerConstantRepresentable(length, predeclaredIntType, globals)
-                validateType(type.element, active)
+                validateType(type.element, active, indirect)
             }
-            is MapGoType -> { validateType(type.key, active); validateType(type.value, active, true); if (!isComparable(type.key)) error("invalid map key type") }
+            is MapGoType -> {
+                validateType(type.key, active, indirect)
+                validateType(type.value, active, true)
+                if (!isComparable(type.key)) error("invalid map key type")
+            }
             is ChannelGoType -> validateType(type.element, active, true)
             is StructGoType -> {
                 validateStructFields(type)
-                type.fields.forEach { validateType(it.type, active) }
+                type.fields.forEach { validateType(it.type, active, indirect) }
             }
             is InterfaceGoType -> {
                 val names = mutableSetOf<String>()
