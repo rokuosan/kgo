@@ -71,7 +71,9 @@ internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
             if (!isUnicodeScalarValue(codePoint)) throw RuntimeGoError("invalid Unicode code point")
             offset += Character.charCount(codePoint)
         }
-        return body.toByteArray(Charsets.UTF_8)
+        // Go discards carriage returns from raw string literal values so that
+        // source files with CRLF line endings produce the same value as LF files.
+        return body.replace("\r", "").toByteArray(Charsets.UTF_8)
     }
     val body = text.substring(1, text.length - 1)
     val bytes = mutableListOf<Byte>()
