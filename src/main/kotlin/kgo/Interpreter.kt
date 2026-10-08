@@ -1697,6 +1697,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     // The dynamic type may satisfy the interface through a promoted method.
                     (receiver.implementationOwner ?: this)
                         .selectStructMember(receiver.value, expression.field, expression.receiver, env)
+                } else if (receiver == null &&
+                    staticExpressionType(expression.receiver, env)?.let(::underlying) is InterfaceGoType) {
+                    throw RuntimeGoError("method call on nil interface")
                 } else {
                     selectStructMember(receiver, expression.field, expression.receiver, env)
                 }
@@ -1808,7 +1811,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private suspend fun selectStructMember(receiver: Any?, name: String, receiverExpression: Expression, env: Environment): Any? {
-        data class Node(val value: Any?, val ancestors: Set<String>)
+        data class Node(val value: Any?, val ancestors: Set<String>, val staticType: GoTypeSyntax? = null)
         data class Candidate(
             val owner: GoStruct?,
             val method: FunctionDeclaration?,
@@ -1817,7 +1820,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val methodOwner: Interpreter? = null,
             val resolvedMember: Any? = null
         )
-        var level = listOf(Node(receiver, emptySet()))
+        var level = listOf(Node(receiver, emptySet(), staticExpressionType(receiverExpression, env)))
         while (level.isNotEmpty()) {
             val candidates = mutableListOf<Candidate>()
             val next = mutableListOf<Node>()
@@ -1836,6 +1839,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     return@forEach
                 }
                 val current = dereference(node.value)
+                val nilInterface = node.staticType?.let(::underlying) as? InterfaceGoType
+                if (current == null && nilInterface != null) {
+                    if (runtimeInterfaceMethodKey(InterfaceMethodSyntax(name, emptyList(), emptyList())) in
+                        interfaceMethodsRuntime(nilInterface))
+                        throw RuntimeGoError("method call on nil interface")
+                    return@forEach
+                }
                 if (current is GoInterfaceValue) {
                     val member = if (current.value is GoRuntimeErrorValue && name == "Error")
                         RuntimeErrorMethodValue(current.value)
@@ -1862,11 +1872,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     candidates += Candidate(null, method, node.value, methodOwner = owner)
                 }
                 struct.embeddedFields.forEach { embeddedName ->
-                    val embeddedValue = struct.fields[embeddedName] ?: return@forEach
+                    if (embeddedName !in struct.fields) return@forEach
+                    val embeddedValue = struct.fields[embeddedName]
                     val key = "${struct.packagePath}:${struct.namedType}.$embeddedName"
                     if (key !in node.ancestors) {
                         val child = if (embeddedValue is GoPointer) embeddedValue else struct.pointer(embeddedName)
-                        next += Node(child, node.ancestors + key)
+                        next += Node(child, node.ancestors + key, struct.fieldTypes[embeddedName])
                     }
                 }
             }
