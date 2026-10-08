@@ -4497,8 +4497,6 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         Math.copySign(if (value.isInfinite()) 1.0 else 0.0, value)
 
     private fun goEqual(left: Any?, right: Any?): Boolean {
-        if (left is GoBoolean || right is GoBoolean)
-            return runCatching { booleanValue(left, "comparison") == booleanValue(right, "comparison") }.getOrDefault(false)
         if (left is GoPointer && right == null) return left.isNil
         if (right is GoPointer && left == null) return right.isNil
         if (left is GoNilValue && right == null || right is GoNilValue && left == null) return true
@@ -4526,6 +4524,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 throw RuntimeGoError("comparing uncomparable type ${leftType ?: "interface value"}")
             return goEqual(leftValue, rightValue)
         }
+        if (left is GoBoolean || right is GoBoolean)
+            return runCatching { booleanValue(left, "comparison") == booleanValue(right, "comparison") }.getOrDefault(false)
         if (left is GoExactComplex || right is GoExactComplex) {
             val a = exactComplex(left)
             val b = exactComplex(right)
