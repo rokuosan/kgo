@@ -3080,7 +3080,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             "Modf" -> {
                 count(1)
                 val value = x()
-                if (value == 0.0) GoMultiValue(listOf(0.0, value))
+                if (value == 0.0) GoMultiValue(listOf(value, value))
                 else {
                     val integral = if (value < 0.0) ceil(value) else floor(value)
                     GoMultiValue(listOf(integral, value - integral))
