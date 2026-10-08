@@ -3059,7 +3059,7 @@ class TypeChecker(
             val alias = (expression.receiver as? NameExpression)?.name
             val path = alias?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }?.let(::importedPackagePath)
             if (path != null && standardPackageName(path) == "math")
-                GoMathPackage.constant(expression.field)?.let(GoRational::decimal)
+                GoMathPackage.constant(expression.field)
             else if (path != null && standardPackageName(path) == "unsafe")
                 GoUnsafePackage.constant(expression.field)?.let(GoRational::of)
             else path?.let { importedConstant(it, expression.field)?.rational }
@@ -3113,7 +3113,7 @@ class TypeChecker(
     }
 
     private fun dotImportedConstantRational(name: String): GoRational? = dotImportPaths.firstNotNullOfOrNull { path ->
-        if (standardPackageName(path) == "math") GoMathPackage.constant(name)?.let(GoRational::decimal)
+        if (standardPackageName(path) == "math") GoMathPackage.constant(name)
         else if (standardPackageName(path) == "unsafe") GoUnsafePackage.constant(name)?.let(GoRational::of)
         else importedConstant(path, name)?.rational
     }

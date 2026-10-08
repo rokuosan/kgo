@@ -2734,10 +2734,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         else -> null
     }
 
-    private fun evaluateMathPackageMember(name: String): Any? = when {
-        GoMathPackage.constant(name) != null -> GoRational.decimal(GoMathPackage.constant(name)!!)
-        GoMathPackage.functionType(name) != null -> BuiltinValue("math.$name", GoMathPackage.functionType(name))
-        else -> throw RuntimeGoError("undefined math identifier $name")
+    private fun evaluateMathPackageMember(name: String): Any? {
+        GoMathPackage.constant(name)?.let { return it }
+        GoMathPackage.functionType(name)?.let { return BuiltinValue("math.$name", it) }
+        throw RuntimeGoError("undefined math identifier $name")
     }
 
     private fun evaluateUnsafePackageMember(name: String): Any? = when {

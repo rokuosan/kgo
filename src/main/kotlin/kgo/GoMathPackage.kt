@@ -1,5 +1,7 @@
 package kgo
 
+import java.math.BigInteger
+
 /** Go 1.0 math package declarations exposed by the JVM runtime. */
 internal object GoMathPackage {
     private val float64 = NamedGoType("#predeclared-float64")
@@ -12,6 +14,7 @@ internal object GoMathPackage {
         "MaxInt8", "MinInt8", "MaxInt16", "MinInt16", "MaxInt32", "MinInt32", "MaxInt64", "MinInt64",
         "MaxUint8", "MaxUint16", "MaxUint32", "MaxUint64"
     )
+    private val reciprocalConstants = setOf("Log2E", "Log10E")
 
     val constants = linkedMapOf(
         "E" to "2.71828182845904523536028747135266249775724709369995957496696763",
@@ -22,9 +25,7 @@ internal object GoMathPackage {
         "SqrtPi" to "1.77245385090551602729816748334114518279754945612238712821380779",
         "SqrtPhi" to "1.27201964951406896425242246173749149171560804184009624861664038",
         "Ln2" to "0.693147180559945309417232121458176568075500134360255254120680009",
-        "Log2E" to "1.44269504088896340735992468100189213742664595415298593413544941",
         "Ln10" to "2.30258509299404568401799145468436420760110148862877297603332790",
-        "Log10E" to "0.43429448190325182765112891891660508229439700580366656611445378",
         "MaxFloat32" to "3.40282346638528859811704183484516925440e+38",
         "SmallestNonzeroFloat32" to "1.401298464324817070923729583289916131280e-45",
         "MaxFloat64" to "1.797693134862315708145274237317043567981e+308",
@@ -76,12 +77,16 @@ internal object GoMathPackage {
         put("Float64frombits", FunctionGoType(listOf(ParameterSyntax(null, uint64)), listOf(float64)))
     }
 
-    val exportedNames: Set<String> get() = constants.keys + functions.keys
+    val exportedNames: Set<String> get() = constants.keys + reciprocalConstants + functions.keys
     fun memberType(name: String): GoTypeSyntax? = when {
         name in integerConstants -> NamedGoType("#untyped-int")
-        name in constants -> NamedGoType("#untyped-float")
+        name in constants || name in reciprocalConstants -> NamedGoType("#untyped-float")
         else -> functions[name]
     }
     fun functionType(name: String): FunctionGoType? = functions[name]
-    fun constant(name: String): String? = constants[name]
+    fun constant(name: String): GoRational? = when (name) {
+        "Log2E" -> GoRational.of(BigInteger.ONE) / GoRational.decimal(constants.getValue("Ln2"))
+        "Log10E" -> GoRational.of(BigInteger.ONE) / GoRational.decimal(constants.getValue("Ln10"))
+        else -> constants[name]?.let(GoRational::decimal)
+    }
 }
