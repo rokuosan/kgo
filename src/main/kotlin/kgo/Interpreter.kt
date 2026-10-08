@@ -1715,16 +1715,8 @@ class Interpreter(
             val name = pending.removeFirst()
             if (!visited.add(name)) continue
             val function = dependencyFunction(name) ?: continue
-            val localTypes = buildMap {
-                function.parameters.forEachIndexed { index, parameterName ->
-                    val type = function.parameterTypes.getOrNull(index) ?: return@forEachIndexed
-                    parameterName?.let { put(it, runCatching { resolveRuntimeType(type, globals) }.getOrDefault(type)) }
-                }
-                function.receiver?.let { receiver ->
-                    receiver.name?.let { put(it, runCatching { resolveRuntimeType(receiver.type, globals) }.getOrDefault(receiver.type)) }
-                }
-            }
             val functionReferences = withRuntimeImports(functionImports[function]) {
+                val localTypes = functionLocalTypes(function)
                 GoPackageDependencies.functionReferences(
                     function,
                     resolveType = { type -> runCatching { underlying(resolveRuntimeType(type, globals)) }.getOrNull() },
@@ -1736,6 +1728,190 @@ class Interpreter(
         }
     }
 
+    private fun functionLocalTypes(function: FunctionDeclaration): Map<String, GoTypeSyntax> {
+        val types = mutableMapOf<String, MutableSet<GoTypeSyntax>>()
+        val localNames = mutableSetOf<String>()
+        fun add(name: String?, type: GoTypeSyntax?) {
+            if (name == null || name == "_") return
+            localNames += name
+            if (type == null) return
+            val resolved = runCatching { resolveRuntimeType(type, globals) }.getOrDefault(type)
+            types.getOrPut(name) { linkedSetOf() } += resolved
+        }
+        fun infer(expression: Expression, resultIndex: Int = 0): GoTypeSyntax? {
+            val target = expression.unparenthesized()
+            val resolved = when (target) {
+                is NameExpression -> if (target.name in localNames)
+                    types[target.name]?.singleOrNull()
+                else globals.typeOf(target.name) ?: staticExpressionType(target, globals)
+                is CompositeLiteral -> resolveRuntimeType(target.type, globals)
+                is TypeAssertionExpression -> resolveRuntimeType(target.type, globals)
+                is UnaryExpression -> {
+                    val operand = infer(target.operand)
+                    when (target.operator) {
+                        TokenKind.AND -> operand?.let(::PointerGoType)
+                        TokenKind.MUL -> (operand?.let(::underlying) as? PointerGoType)?.element
+                        TokenKind.ARROW -> (operand?.let(::underlying) as? ChannelGoType)?.element
+                        else -> staticExpressionType(target, globals)
+                    }
+                }
+                is SelectorExpression -> {
+                    val receiverType = infer(target.receiver)
+                    val structType = receiverType?.let(::underlying).let {
+                        if (it is PointerGoType) underlying(it.element) else it
+                    }
+                    if (structType is StructGoType)
+                        staticPromotedFieldType(structType, target.field, globals) ?: staticExpressionType(target, globals)
+                    else staticExpressionType(target, globals)
+                }
+                is IndexExpression -> when (val receiver = infer(target.receiver)?.let(::underlying)) {
+                    is ArrayGoType -> receiver.element
+                    is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.element
+                    is SliceGoType -> receiver.element
+                    is MapGoType -> receiver.value
+                    else -> staticExpressionType(target, globals)
+                }
+                else -> staticExpressionType(target, globals)
+            }
+            val resultType = if (target is NameExpression && target.name in localNames) null
+                else staticExpressionResultType(expression, resultIndex, globals)
+            return resultType ?: resolved
+        }
+        fun rangeTypes(range: RangeClause): List<GoTypeSyntax> {
+            val source = infer(range.expression)?.let(::underlying) ?: return rangeVariableTypes(range, globals)
+            val pair = when (source) {
+                is ArrayGoType -> predeclaredIntRuntimeType to source.element
+                is PointerGoType -> (underlying(source.element) as? ArrayGoType)?.let {
+                    predeclaredIntRuntimeType to it.element
+                }
+                is SliceGoType -> predeclaredIntRuntimeType to source.element
+                is MapGoType -> source.key to source.value
+                is ChannelGoType -> null to source.element
+                NamedGoType("string") -> predeclaredIntRuntimeType to predeclaredInt32RuntimeType
+                else -> null
+            } ?: return emptyList()
+            return listOfNotNull(pair.first, pair.second).take(range.targets.size)
+        }
+        fun addValues(names: List<String>, values: List<Expression>, declaredType: GoTypeSyntax?) {
+            names.forEachIndexed { index, name ->
+                val source = values.singleOrNull()?.takeIf { names.size > 1 } ?: values.getOrNull(index)
+                add(name, declaredType ?: source?.let { infer(it, if (names.size > 1) index else 0) })
+            }
+        }
+        lateinit var visitBlock: (BlockStatement) -> Unit
+        lateinit var visitStatement: (Statement) -> Unit
+        function.parameters.forEachIndexed { index, name -> add(name, function.parameterTypes.getOrNull(index)) }
+        function.receiver?.let { add(it.name, it.type) }
+        function.resultNames.forEachIndexed { index, name -> add(name, function.resultTypes.getOrNull(index)) }
+
+        fun visitExpression(expression: Expression) {
+            when (expression) {
+                is UnaryExpression -> visitExpression(expression.operand)
+                is BinaryExpression -> { visitExpression(expression.left); visitExpression(expression.right) }
+                is CallExpression -> { visitExpression(expression.function); expression.arguments.forEach(::visitExpression) }
+                is SelectorExpression -> visitExpression(expression.receiver)
+                is IndexExpression -> { visitExpression(expression.receiver); visitExpression(expression.index) }
+                is SliceExpression -> { visitExpression(expression.receiver); expression.low?.let(::visitExpression); expression.high?.let(::visitExpression) }
+                is TypeAssertionExpression -> visitExpression(expression.receiver)
+                is TypeSwitchGuardExpression -> visitExpression(expression.receiver)
+                is ParenthesizedExpression -> visitExpression(expression.expression)
+                is CompositeLiteral -> expression.elements.forEach { element ->
+                    element.key?.let(::visitExpression); visitExpression(element.value)
+                }
+                is ElidedCompositeLiteral -> expression.elements.forEach { element ->
+                    element.key?.let(::visitExpression); visitExpression(element.value)
+                }
+                is FunctionLiteralExpression -> {
+                    expression.parameters.forEach { add(it.name, it.type) }
+                    expression.resultNames.forEachIndexed { index, name -> add(name, expression.results.getOrNull(index)) }
+                    visitBlock(expression.body)
+                }
+                is NameExpression, is LiteralExpression, is TypeExpression -> Unit
+            }
+        }
+        visitStatement = { statement ->
+            when (statement) {
+                EmptyStatement, is BranchStatement -> Unit
+                is LabeledStatement -> visitStatement(statement.statement)
+                is DeclarationStatement -> statement.declarations.forEach { declaration -> when (declaration) {
+                    is VariableDeclaration -> {
+                        declaration.values.forEach(::visitExpression)
+                        addValues(declaration.names, declaration.values, declaration.type)
+                    }
+                    is ConstantDeclaration -> {
+                        declaration.values.forEach(::visitExpression)
+                        addValues(declaration.names, declaration.values, declaration.type)
+                    }
+                    else -> Unit
+                } }
+                is BlockStatement -> visitBlock(statement)
+                is VariableStatement -> {
+                    statement.values.forEach(::visitExpression)
+                    addValues(statement.names, statement.values, statement.type)
+                }
+                is ReturnStatement -> statement.values.forEach(::visitExpression)
+                is ExpressionStatement -> visitExpression(statement.expression)
+                is SendStatement -> { visitExpression(statement.channel); visitExpression(statement.value) }
+                is GoStatement -> visitExpression(statement.call)
+                is DeferStatement -> visitExpression(statement.call)
+                is AssignmentStatement -> {
+                    statement.values.forEach(::visitExpression)
+                    if (statement.operator == TokenKind.DEFINE) {
+                        statement.targets.forEachIndexed { index, target ->
+                            val name = (target as? NameExpression)?.name ?: return@forEachIndexed
+                            if (name in localNames) return@forEachIndexed
+                            val source = statement.values.singleOrNull()?.takeIf { statement.targets.size > 1 }
+                                ?: statement.values.getOrNull(index)
+                            add(name, source?.let { infer(it, if (statement.targets.size > 1) index else 0) })
+                        }
+                    }
+                }
+                is IncrementStatement -> Unit
+                is IfStatement -> {
+                    statement.init?.let(visitStatement); visitExpression(statement.condition)
+                    visitBlock(statement.thenBranch); statement.elseBranch?.let(visitStatement)
+                }
+                is ForStatement -> {
+                    statement.init?.let(visitStatement); statement.condition?.let(::visitExpression)
+                    statement.post?.let(visitStatement)
+                    statement.rangeClause?.let { range ->
+                        visitExpression(range.expression)
+                        if (range.operator == TokenKind.DEFINE) {
+                            val valueTypes = rangeTypes(range)
+                            range.targets.forEachIndexed { index, target ->
+                                add((target as? NameExpression)?.name, valueTypes.getOrNull(index))
+                            }
+                        }
+                    }
+                    visitBlock(statement.body)
+                }
+                is SwitchStatement -> {
+                    statement.init?.let(visitStatement); statement.tag?.let(::visitExpression)
+                    statement.clauses.forEach { clause ->
+                        clause.expressions?.forEach(::visitExpression)
+                        visitBlock(BlockStatement(clause.statements))
+                    }
+                }
+                is TypeSwitchStatement -> {
+                    statement.init?.let(visitStatement); visitExpression(statement.guard.expression)
+                    statement.clauses.forEach { clause ->
+                        statement.guard.name?.let { name -> add(name, clause.types?.singleOrNull()) }
+                        visitBlock(BlockStatement(clause.statements))
+                    }
+                }
+                is SelectStatement -> statement.cases.forEach { clause ->
+                    clause.communication?.let(visitStatement)
+                    visitBlock(BlockStatement(clause.statements))
+                }
+            }
+        }
+        visitBlock = { block -> block.statements.forEach(visitStatement) }
+        function.body?.let(visitBlock)
+        return types.mapNotNull { (name, candidates) ->
+            candidates.singleOrNull()?.let { name to it }
+        }.toMap()
+    }
+
     private fun methodCallDependencies(
         expression: Expression,
         locals: Set<String> = emptySet(),
@@ -1743,19 +1919,48 @@ class Interpreter(
     ): Set<String> {
         val selector = expression.unparenthesized() as? SelectorExpression ?: return emptySet()
         val receiver = selector.receiver.unparenthesized()
-        val localReceiverType = (receiver as? NameExpression)?.takeIf { it.name in locals }
-            ?.let { localTypes[it.name] }
-        if (receiver is NameExpression && receiver.name in locals && localReceiverType == null) return emptySet()
-        val receiverType = when (receiver) {
-            is NameExpression -> localReceiverType ?: globals.typeBinding(receiver.name)
-                ?: staticExpressionType(receiver, globals)
-            else -> staticExpressionType(receiver, globals)
-        } ?: return emptySet()
+        val receiverType = dependencyExpressionType(receiver, locals, localTypes) ?: return emptySet()
         val method = methodForDependency(receiverType, selector.field)
             ?: (if (receiverType is PointerGoType) null
                 else methodForDependency(PointerGoType(receiverType), selector.field))
             ?: return emptySet()
         return setOf(packageMethodDependencyPrefix + methodKey(method.receiver?.type ?: return emptySet(), method.name))
+    }
+
+    private fun dependencyExpressionType(
+        expression: Expression,
+        locals: Set<String>,
+        localTypes: Map<String, GoTypeSyntax>
+    ): GoTypeSyntax? = when (val target = expression.unparenthesized()) {
+        is NameExpression -> if (target.name in locals) localTypes[target.name]
+            else globals.typeOf(target.name) ?: staticExpressionType(target, globals)
+        is CompositeLiteral -> resolveRuntimeType(target.type, globals)
+        is TypeAssertionExpression -> resolveRuntimeType(target.type, globals)
+        is SelectorExpression -> {
+            val receiverType = dependencyExpressionType(target.receiver, locals, localTypes)
+            val structType = receiverType?.let(::underlying).let {
+                if (it is PointerGoType) underlying(it.element) else it
+            }
+            if (structType is StructGoType)
+                staticPromotedFieldType(structType, target.field, globals) ?: staticExpressionType(target, globals)
+            else staticExpressionType(target, globals)
+        }
+        is IndexExpression -> when (val receiver = dependencyExpressionType(target.receiver, locals, localTypes)?.let(::underlying)) {
+            is ArrayGoType -> receiver.element
+            is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.element
+            is SliceGoType -> receiver.element
+            is MapGoType -> receiver.value
+            else -> staticExpressionType(target, globals)
+        }
+        is UnaryExpression -> {
+            val operand = dependencyExpressionType(target.operand, locals, localTypes)
+            when (target.operator) {
+                TokenKind.AND -> operand?.let(::PointerGoType)
+                TokenKind.MUL -> (operand?.let(::underlying) as? PointerGoType)?.element
+                else -> staticExpressionType(target, globals)
+            }
+        }
+        else -> staticExpressionType(target, globals)
     }
 
     private fun methodForDependency(type: GoTypeSyntax, name: String): FunctionDeclaration? {
