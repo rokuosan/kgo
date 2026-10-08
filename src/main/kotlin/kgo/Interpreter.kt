@@ -1011,18 +1011,27 @@ class Interpreter(
             a is ChannelGoType && b is ChannelGoType ->
                 a.direction == b.direction && sameRuntimeType(a.element, b.element)
             a is StructGoType && b is StructGoType -> {
+                data class FieldIdentity(
+                    val name: String,
+                    val packagePath: String?,
+                    val type: GoTypeSyntax,
+                    val tag: String,
+                    val embedded: Boolean
+                )
                 val leftFields = a.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
-                        .map { name -> Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag.orEmpty()) }
+                        .map { name -> FieldIdentity(name, unexportedFieldPackagePath(field, name), field.type,
+                            field.tag.orEmpty(), field.names.isEmpty()) }
                 }
                 val rightFields = b.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
-                        .map { name -> Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag.orEmpty()) }
+                        .map { name -> FieldIdentity(name, unexportedFieldPackagePath(field, name), field.type,
+                            field.tag.orEmpty(), field.names.isEmpty()) }
                 }
                 leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (leftField, rightField) ->
-                    leftField.first == rightField.first && leftField.second == rightField.second &&
-                        leftField.third.second == rightField.third.second &&
-                        sameRuntimeType(leftField.third.first, rightField.third.first)
+                    leftField.name == rightField.name && leftField.packagePath == rightField.packagePath &&
+                        leftField.tag == rightField.tag && leftField.embedded == rightField.embedded &&
+                        sameRuntimeType(leftField.type, rightField.type)
                 }
             }
             a is InterfaceGoType && b is InterfaceGoType -> {

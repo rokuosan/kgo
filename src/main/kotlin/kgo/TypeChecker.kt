@@ -3115,19 +3115,28 @@ class TypeChecker(
             left is MapGoType && right is MapGoType -> sameType(left.key, right.key) && sameType(left.value, right.value)
             left is ChannelGoType && right is ChannelGoType -> left.direction == right.direction && sameType(left.element, right.element)
             left is StructGoType && right is StructGoType -> {
+                data class FieldIdentity(
+                    val name: String,
+                    val packagePath: String?,
+                    val type: GoTypeSyntax,
+                    val tag: String,
+                    val embedded: Boolean
+                )
                 val leftFields = left.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { name ->
-                        Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag)
+                        FieldIdentity(name, unexportedFieldPackagePath(field, name), field.type,
+                            field.tag.orEmpty(), field.names.isEmpty())
                     }
                 }
                 val rightFields = right.fields.flatMap { field ->
                     field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { name ->
-                        Triple(name, unexportedFieldPackagePath(field, name), field.type to field.tag)
+                        FieldIdentity(name, unexportedFieldPackagePath(field, name), field.type,
+                            field.tag.orEmpty(), field.names.isEmpty())
                     }
                 }
                 leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (a, b) ->
-                    a.first == b.first && a.second == b.second &&
-                        a.third.second.orEmpty() == b.third.second.orEmpty() && sameType(a.third.first, b.third.first)
+                    a.name == b.name && a.packagePath == b.packagePath && a.tag == b.tag &&
+                        a.embedded == b.embedded && sameType(a.type, b.type)
                 }
             }
             left is InterfaceGoType && right is InterfaceGoType -> {
