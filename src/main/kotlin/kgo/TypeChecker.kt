@@ -2841,7 +2841,7 @@ class TypeChecker(
     }
 
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean {
-        val slice = type as? SliceGoType ?: return false
+        val slice = underlying(type) as? SliceGoType ?: return false
         return isByteElementType(slice.element) || isRuneElementType(slice.element)
     }
 

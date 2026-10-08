@@ -3422,7 +3422,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 namedTypeName(type), type, namedTypePackage(type))
         }
         is SliceGoType -> {
-            if (type is SliceGoType && value is GoString &&
+            if (value is GoString &&
                 (isByteElementType(target.element) || isRuneElementType(target.element))) {
                 if (value.bytes.isEmpty()) GoNilValue(type)
                 else {
@@ -3554,7 +3554,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun isByteElementType(type: GoTypeSyntax): Boolean =
         canonicalAliasType(type) == predeclaredUInt8RuntimeType
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
-        (type as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
+        (underlying(type) as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
         canonicalAliasType(type) == predeclaredIntRuntimeType
