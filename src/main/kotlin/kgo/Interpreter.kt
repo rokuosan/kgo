@@ -4480,9 +4480,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         if (left is GoString && right is GoString) {
             if (op == TokenKind.ADD) {
                 val resultType = when {
-                    left.type != NamedGoType("string") -> left.type
-                    right.type != NamedGoType("string") -> right.type
-                    else -> left.type
+                    left.type != predeclaredStringRuntimeType -> left.type
+                    right.type != predeclaredStringRuntimeType -> right.type
+                    else -> predeclaredStringRuntimeType
                 }
                 return GoString(left.bytes + right.bytes, resultType)
             }
