@@ -2268,10 +2268,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             return GoInteger(unsafeIntrinsicValue(name, argument, env), predeclaredUintptrRuntimeType)
         }
         val builtinName = (call.function as? NameExpression)?.name
-        if (builtinName in setOf("len", "cap") && builtinName?.let {
-                !env.contains(it) && env.typeBinding(it) == null && it !in env.imports.packages &&
-                    !functions.containsKey(it) && !typeDefinitions.containsKey(it)
-            } == true &&
+        if (builtinName in setOf("len", "cap") && builtinName?.let { isPredeclaredBuiltin(it, env) } == true &&
             call.arguments.size == 1 && !call.expandLastArgument && !containsCallOrReceive(call.arguments.single(), env)) {
             staticRangeArrayLength(call.arguments.single(), env)?.let { return it.toLong() }
         }
@@ -2283,6 +2280,23 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             else arguments
         }
         return call(target, args, call.expandLastArgument, env.panicState, environment = env)
+    }
+
+    private fun isPredeclaredBuiltin(name: String, env: Environment): Boolean {
+        if (env.contains(name) || env.typeBinding(name) != null || name in env.imports.packages ||
+            name in functions || typeDefinitions.containsKey(name)) return false
+        return env.imports.dotPackages.none { path ->
+            when (path) {
+                "fmt" -> name in GoFmtPackage.exportedNames
+                "math" -> name in GoMathPackage.exportedNames
+                "unsafe" -> name in GoUnsafePackage.exportedNames
+                "runtime" -> name in GoRuntimePackage.exportedTypes
+                else -> importedRuntimePackages[path]?.let { imported ->
+                    name in imported.exportedTypeNames || name in imported.exportedConstantNames ||
+                        name in imported.exportedVariableNames || imported.exportedFunction(name) != null
+                } == true
+            }
+        }
     }
 
     private fun parenthesizedPointerConversionType(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
@@ -4236,7 +4250,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val name = (expression.function as? NameExpression)?.name
             if (name == "len" || name == "cap") {
                 val scope = env ?: globals
-                if (scope.contains(name) || scope.typeBinding(name) != null || name in scope.imports.packages)
+                if (!isPredeclaredBuiltin(name, scope))
                     throw RuntimeGoError("array length is not a constant integer expression")
                 val operand = expression.arguments.single()
                 if (name == "len") constantStringByteLength(operand, env)?.let { return it }
@@ -4983,8 +4997,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is CallExpression -> {
             val builtin = (expression.function as? NameExpression)?.name
             val constantLength = builtin in setOf("len", "cap") && expression.arguments.size == 1 &&
-                builtin?.let { !env.contains(it) && env.typeBinding(it) == null && it !in env.imports.packages &&
-                    it !in functions && !typeDefinitions.containsKey(it) } == true &&
+                builtin?.let { isPredeclaredBuiltin(it, env) } == true &&
                 !containsCallOrReceive(expression.arguments.single(), env) &&
                 (isRuntimeConstantExpression(expression.arguments.single(), env) ||
                     staticRangeArrayLength(expression.arguments.single(), env) != null)

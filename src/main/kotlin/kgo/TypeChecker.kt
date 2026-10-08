@@ -414,6 +414,21 @@ class TypeChecker(
         return null
     }
 
+    private fun isPredeclaredBuiltin(name: String, scope: Scope): Boolean {
+        if (scope.getOrNull(name) != null || scope.typeBinding(name) != null || name in packagePaths ||
+            name in packageLevelNames || name in functions) return false
+        return dotImportPaths.none { path ->
+            val exported = when (standardPackageName(path)) {
+                "fmt" -> GoFmtPackage.exportedNames
+                "math" -> GoMathPackage.exportedNames
+                "unsafe" -> GoUnsafePackage.exportedNames
+                "runtime" -> GoRuntimePackage.exportedTypes
+                else -> importedPackages[path]?.exportedNames().orEmpty()
+            }
+            name in exported
+        }
+    }
+
     private fun importedConstant(path: String, name: String): ExportedConstant? =
         importedPackages[path]?.exportedConstant(name, path)
 
@@ -1410,14 +1425,17 @@ class TypeChecker(
         is CallExpression -> {
             val target = constantConversionTarget(expression, scope)
             when {
-                expression.function == NameExpression("complex") && expression.arguments.size == 2 -> {
+                expression.function == NameExpression("complex") && isPredeclaredBuiltin("complex", scope) &&
+                    expression.arguments.size == 2 -> {
                     val real = constantRealValue(expression.arguments[0], scope)
                     val imaginary = constantRealValue(expression.arguments[1], scope)
                     if (real == null || imaginary == null) null else ConstantComplexValue(real, imaginary)
                 }
-                expression.function == NameExpression("real") && expression.arguments.size == 1 ->
+                expression.function == NameExpression("real") && isPredeclaredBuiltin("real", scope) &&
+                    expression.arguments.size == 1 ->
                     constantComplex(expression.arguments.single(), scope)?.let { ConstantComplexValue(it.real, GoRational.ZERO) }
-                expression.function == NameExpression("imag") && expression.arguments.size == 1 ->
+                expression.function == NameExpression("imag") && isPredeclaredBuiltin("imag", scope) &&
+                    expression.arguments.size == 1 ->
                     constantComplex(expression.arguments.single(), scope)?.let { ConstantComplexValue(it.imaginary, GoRational.ZERO) }
                 target != null && isComplex(target) && expression.arguments.size == 1 && !expression.expandLastArgument ->
                     constantComplex(expression.arguments.single(), scope)
@@ -3325,9 +3343,11 @@ class TypeChecker(
             when {
                 target != null -> expression.arguments.size == 1 && isConstantValueType(target) &&
                     isConstantExpression(expression.arguments.single(), scope)
-                expression.function == NameExpression("len") || expression.function == NameExpression("cap") ->
+                (expression.function == NameExpression("len") || expression.function == NameExpression("cap")) &&
+                    isPredeclaredBuiltin((expression.function as NameExpression).name, scope) ->
                     constantInteger(expression, scope) != null
-                expression.function in setOf(NameExpression("complex"), NameExpression("real"), NameExpression("imag")) ->
+                expression.function is NameExpression && expression.function.name in setOf("complex", "real", "imag") &&
+                    isPredeclaredBuiltin(expression.function.name, scope) ->
                     expression.arguments.isNotEmpty() && expression.arguments.all { isConstantExpression(it, scope) }
                 expression.function is SelectorExpression || expression.function is NameExpression -> unsafeConstant(expression, scope) != null
                 else -> false
@@ -3429,7 +3449,7 @@ class TypeChecker(
             unsafeConstant(expression, scope)?.let { return it }
             val builtinName = (expression.function as? NameExpression)?.name
             val builtinLength = builtinName in setOf("len", "cap") && builtinName != null &&
-                scope.getOrNull(builtinName) == null && builtinName !in packagePaths
+                isPredeclaredBuiltin(builtinName, scope)
             val lengthConstant = if (builtinLength &&
                 expression.arguments.size == 1 && !expression.expandLastArgument) {
                 val operand = expression.arguments.single()
