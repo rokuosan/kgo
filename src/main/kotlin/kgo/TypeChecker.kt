@@ -2402,6 +2402,8 @@ class TypeChecker(
     }
 
     private fun builtinCall(name: String, args: List<Expression>, scope: Scope, expandLastArgument: Boolean = false): List<GoTypeSyntax>? {
+        if (expandLastArgument && name !in setOf("append", "print", "println"))
+            error("$name does not accept ...")
         val types = if (name == "make" || name == "new") {
             args.firstOrNull()?.let { typeArgument ->
                 listOf(builtinTypeArgument(typeArgument, scope)) + args.drop(1).map {
