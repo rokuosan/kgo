@@ -4376,9 +4376,33 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             isUntypedIntegerRuntimeExpression(shift.left, env) && !isRuntimeConstantExpression(shift.right, env)
     }
 
+    private fun importedConstantType(expression: Expression, env: Environment): GoTypeSyntax? {
+        val (path, name) = when (val target = expression.unparenthesized()) {
+            is NameExpression -> env.imports.dotPackages.firstNotNullOfOrNull { importedPath ->
+                importedRuntimePackages[importedPath]?.takeIf { target.name in it.exportedConstantNames }
+                    ?.let { importedPath to target.name }
+            } ?: return null
+            is SelectorExpression -> {
+                val alias = (target.receiver as? NameExpression)?.name ?: return null
+                val importedPath = env.imports.packages[alias]?.takeIf { !env.contains(alias) } ?: return null
+                val imported = importedRuntimePackages[importedPath] ?: return null
+                if (target.field !in imported.exportedConstantNames) return null
+                importedPath to target.field
+            }
+            else -> return null
+        }
+        return importedRuntimePackages[path]?.exportedIdentifierType(name)
+    }
+
     private fun isUntypedIntegerRuntimeExpression(expression: Expression, env: Environment): Boolean = when (expression) {
         is LiteralExpression -> expression.token.kind in setOf(TokenKind.INT, TokenKind.CHAR, TokenKind.FLOAT)
-        is NameExpression -> env.isConstant(expression.name) && env.typeOf(expression.name) == null
+        is NameExpression -> (env.isConstant(expression.name) && env.typeOf(expression.name) == null) ||
+            importedConstantType(expression, env)?.let {
+                it == NamedGoType("#untyped-int") || it == NamedGoType("#untyped-rune")
+            } == true
+        is SelectorExpression -> importedConstantType(expression, env)?.let {
+            it == NamedGoType("#untyped-int") || it == NamedGoType("#untyped-rune")
+        } == true
         is ParenthesizedExpression -> isUntypedIntegerRuntimeExpression(expression.expression, env)
         is UnaryExpression -> expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.XOR) &&
             isUntypedIntegerRuntimeExpression(expression.operand, env)
@@ -4394,7 +4418,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is LiteralExpression -> expression.token.kind in setOf(
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING
         )
-        is NameExpression -> env.isConstant(expression.name)
+        is NameExpression -> env.isConstant(expression.name) || importedConstantType(expression, env) != null
+        is SelectorExpression -> importedConstantType(expression, env) != null
         is ParenthesizedExpression -> isRuntimeConstantExpression(expression.expression, env)
         is UnaryExpression -> expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR) &&
             isRuntimeConstantExpression(expression.operand, env)
