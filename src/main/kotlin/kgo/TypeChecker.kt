@@ -1356,7 +1356,7 @@ class TypeChecker(
                     NamedGoType(function.name) else null
                 else -> null
             }
-            if (target == null || underlying(target) != stringType || expression.arguments.size != 1 || expression.expandLastArgument) null
+            if (target == null || !isString(target) || expression.arguments.size != 1 || expression.expandLastArgument) null
             else constantStringIdentity(expression.arguments.single(), scope) ?: constantInteger(expression.arguments.single(), scope)?.let { value ->
                 val codePoint = runCatching { value.intValueExact() }.getOrNull()
                 val bytes = encodeGoCodePoint(codePoint ?: -1)
@@ -3256,7 +3256,7 @@ class TypeChecker(
                     NamedGoType(function.name) else null
                 else -> null
             }
-            if (target == null || underlying(target) != stringType || expression.arguments.size != 1 || expression.expandLastArgument) null
+            if (target == null || !isString(target) || expression.arguments.size != 1 || expression.expandLastArgument) null
             else constantStringLength(expression.arguments.single(), scope) ?: constantInteger(expression.arguments.single(), scope)?.let { value ->
                 val codePoint = runCatching { value.intValueExact() }.getOrNull()
                 val rune = if (codePoint == null || codePoint !in 0..Character.MAX_CODE_POINT) 0xfffd else codePoint
