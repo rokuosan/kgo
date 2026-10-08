@@ -678,6 +678,8 @@ class TypeChecker(
         is ExpressionStatement -> (statement.expression.unparenthesized() as? CallExpression)
             ?.let(terminatingPanicCalls::contains) == true
         is BlockStatement -> endsWithGo10Exit(statement)
+        is IfStatement -> statement.elseBranch != null &&
+            isGo10Exit(statement.thenBranch) && isGo10Exit(statement.elseBranch)
         is LabeledStatement -> isGo10Exit(statement.statement)
         else -> false
     }
