@@ -1277,13 +1277,15 @@ class Interpreter(
         is UnaryExpression -> when (expression.operator) {
             TokenKind.AND -> staticExpressionType(expression.operand, env)?.let(::PointerGoType)
             TokenKind.MUL -> (staticExpressionType(expression.operand, env)?.let(::underlying) as? PointerGoType)?.element
+            TokenKind.ADD, TokenKind.SUB, TokenKind.XOR, TokenKind.NOT -> staticExpressionType(expression.operand, env)
             else -> null
         }
         is CallExpression -> staticExpressionResultType(expression, 0, env)
         is BinaryExpression -> when (expression.operator) {
             TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ -> NamedGoType("bool")
             TokenKind.LAND, TokenKind.LOR -> staticExpressionType(expression.left, env) ?: staticExpressionType(expression.right, env)
-            else -> null
+            TokenKind.SHL, TokenKind.SHR -> staticExpressionType(expression.left, env)
+            else -> staticExpressionType(expression.left, env) ?: staticExpressionType(expression.right, env)
         }
         is IndexExpression -> when (val receiver = staticExpressionType(expression.receiver, env)?.let(::underlying)) {
             is ArrayGoType -> receiver.element
