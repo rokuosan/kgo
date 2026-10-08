@@ -3430,7 +3430,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val signature = FunctionGoType(method.parameters, method.results)
             val previous = result.putIfAbsent(key, signature)
             if (previous != null && !sameFunctionType(previous, signature))
-                throw RuntimeGoError("duplicate interface method ${method.name}")
+                throw RuntimeGoError("incompatible interface method ${method.name}")
         }
         return result
     }
