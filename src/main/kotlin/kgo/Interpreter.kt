@@ -1287,9 +1287,21 @@ class Interpreter(
         }
         is IndexExpression -> when (val receiver = staticExpressionType(expression.receiver, env)?.let(::underlying)) {
             is ArrayGoType -> receiver.element
+            is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.element
             is SliceGoType -> receiver.element
             is MapGoType -> receiver.value
+            is NamedGoType -> if (receiver.name == "string") NamedGoType("byte") else null
             else -> null
+        }
+        is SliceExpression -> {
+            val sourceType = staticExpressionType(expression.receiver, env) ?: return null
+            when (val receiver = underlying(sourceType)) {
+                is ArrayGoType -> SliceGoType(receiver.element)
+                is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.let { SliceGoType(it.element) }
+                is SliceGoType -> sourceType
+                is NamedGoType -> sourceType.takeIf { receiver.name == "string" }
+                else -> null
+            }
         }
         else -> null
     }
