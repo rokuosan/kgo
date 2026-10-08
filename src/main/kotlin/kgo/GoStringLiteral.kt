@@ -146,7 +146,7 @@ internal fun decodeGoUtf8Rune(bytes: ByteArray, offset: Int): Pair<Int, Int> {
     }
     if (first in 0xe0..0xef && continuation(offset + 1) && continuation(offset + 2)) {
         val second = bytes[offset + 1].toInt() and 0xff
-        if (first != 0xe0 || second >= 0xa0) {
+        if ((first != 0xe0 || second >= 0xa0) && (first != 0xed || second <= 0x9f)) {
             val codePoint = ((first and 0x0f) shl 12) or ((second and 0x3f) shl 6) or
                 (bytes[offset + 2].toInt() and 0x3f)
             return codePoint to 3
