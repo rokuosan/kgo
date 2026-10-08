@@ -889,7 +889,7 @@ class Interpreter(
         val env = parent.child()
         if (assignment != null && received != null) {
             val declaredTypes = if (assignment.operator == TokenKind.DEFINE && receiveElementType != null)
-                listOf(receiveElementType) + if (assignment.targets.size > 1) listOf(NamedGoType("bool")) else emptyList()
+                listOf(receiveElementType) + if (assignment.targets.size > 1) listOf(predeclaredBoolRuntimeType) else emptyList()
             else null
             assignValues(assignment.targets, assignment.operator,
                 expandValues(listOf(received), assignment.targets.size), env, declaredTypes = declaredTypes)
@@ -1300,7 +1300,7 @@ class Interpreter(
         }
         is CallExpression -> staticExpressionResultType(expression, 0, env)
         is BinaryExpression -> when (expression.operator) {
-            TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ -> NamedGoType("bool")
+            TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ -> predeclaredBoolRuntimeType
             TokenKind.LAND, TokenKind.LOR -> staticExpressionType(expression.left, env) ?: staticExpressionType(expression.right, env)
             TokenKind.SHL, TokenKind.SHR -> staticExpressionType(expression.left, env)
             else -> staticExpressionType(expression.left, env) ?: staticExpressionType(expression.right, env)
@@ -1335,20 +1335,20 @@ class Interpreter(
         is ParenthesizedExpression -> staticExpressionResultType(expression.expression, resultIndex, env)
         is TypeAssertionExpression -> when (resultIndex) {
             0 -> resolveRuntimeType(expression.type, env)
-            1 -> NamedGoType("bool")
+            1 -> predeclaredBoolRuntimeType
             else -> null
         }
         is UnaryExpression -> if (expression.operator == TokenKind.ARROW) {
             val channel = staticExpressionType(expression.operand, env)?.let(::underlying) as? ChannelGoType
             when (resultIndex) {
                 0 -> channel?.element
-                1 -> NamedGoType("bool")
+                1 -> predeclaredBoolRuntimeType
                 else -> null
             }
         } else if (resultIndex == 0) staticExpressionType(expression, env) else null
         is IndexExpression -> {
             val receiver = staticExpressionType(expression.receiver, env)?.let(::underlying)
-            if (resultIndex == 1 && receiver is MapGoType) NamedGoType("bool")
+            if (resultIndex == 1 && receiver is MapGoType) predeclaredBoolRuntimeType
             else if (resultIndex == 0) staticExpressionType(expression, env) else null
         }
         is CallExpression -> {
@@ -2646,13 +2646,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         is NamedGoType -> when (type.name) {
-            "#predeclared-bool" -> NamedGoType("bool")
+            "#predeclared-bool" -> predeclaredBoolRuntimeType
             "#predeclared-float32" -> NamedGoType("float32")
             "#predeclared-float64" -> NamedGoType("float64")
             "#predeclared-string" -> NamedGoType("string")
             "#predeclared-complex64" -> NamedGoType("complex64")
             "#predeclared-complex128" -> NamedGoType("complex128")
             else -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
+            "bool" -> predeclaredBoolRuntimeType
             "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
             "error", "#predeclared-error" -> errorInterfaceType
@@ -2831,7 +2832,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is Long -> NamedGoType("int")
         is Double -> NamedGoType("float64")
         is GoString -> value.type
-        is Boolean -> NamedGoType("bool")
+        is Boolean -> predeclaredBoolRuntimeType
         else -> null
     }
 
@@ -3279,8 +3280,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             is PointerGoType -> GoPointer.nil(actual.element, type)
             is SliceGoType, is MapGoType, is ChannelGoType, is FunctionGoType -> GoNilValue(type)
             else -> null
-        } else if (value is GoBoolean && actual == NamedGoType("bool")) GoBoolean(value.value, type)
-        else if (value is Boolean && actual == NamedGoType("bool")) GoBoolean(value, type)
+        } else if (value is GoBoolean && actual == predeclaredBoolRuntimeType) GoBoolean(value.value, type)
+        else if (value is Boolean && actual == predeclaredBoolRuntimeType) GoBoolean(value, type)
         else if (value is GoString && actual == NamedGoType("string")) GoString(value.bytes.copyOf(), type)
         else if (value is GoPointer && actual is PointerGoType) value.retype(actual.element, type)
         else if (value is GoArray && actual is ArrayGoType)

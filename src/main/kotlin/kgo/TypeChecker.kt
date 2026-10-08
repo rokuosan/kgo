@@ -3475,7 +3475,7 @@ class TypeChecker(
     private fun underlying(type: GoTypeSyntax, seen: Set<String> = emptySet()): GoTypeSyntax = when (type) {
         is NamedGoType -> when (type.name) {
             "#predeclared-error" -> errorInterfaceType
-            "#predeclared-bool" -> boolType
+            "#predeclared-bool" -> predeclaredBoolType
             "#predeclared-float32", "#predeclared-float64", "#predeclared-string",
             "#predeclared-complex64", "#predeclared-complex128" -> type
             "#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32",
@@ -3483,6 +3483,7 @@ class TypeChecker(
             "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr" -> type
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
+                    "bool" -> predeclaredBoolType
                     "byte" -> predeclaredUint8Type
                     "rune" -> predeclaredIntType
                     "error" -> errorInterfaceType
@@ -3572,7 +3573,7 @@ class TypeChecker(
         runeType -> if ("rune" !in typeDeclarations) predeclaredIntType else type
         intType -> if ("int" !in typeDeclarations) predeclaredIntType else type
         NamedGoType("error") -> if ("error" !in typeDeclarations) predeclaredErrorType else type
-        boolType -> if ("bool" !in typeDeclarations) predeclaredBoolType else type
+        NamedGoType("bool") -> if ("bool" !in typeDeclarations) predeclaredBoolType else type
         NamedGoType("float32") -> if ("float32" !in typeDeclarations) predeclaredFloat32Type else type
         NamedGoType("float64") -> if ("float64" !in typeDeclarations) predeclaredFloat64Type else type
         stringType -> if ("string" !in typeDeclarations) predeclaredStringType else type
@@ -3752,7 +3753,7 @@ class TypeChecker(
         private val predeclaredUintptrType = NamedGoType("#predeclared-uintptr")
         private val byteType = predeclaredUint8Type
         private val runeType = NamedGoType("rune")
-        private val boolType = NamedGoType("bool")
+        private val boolType = predeclaredBoolType
         private val stringType = NamedGoType("string")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(predeclaredStringType))))
         private val integerNames = setOf("#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32", "#predeclared-int64", "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
