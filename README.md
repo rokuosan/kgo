@@ -73,7 +73,8 @@ This is ongoing work toward the [Go 1.0 language specification, version of
 March 17, 2012](https://go.googlesource.com/go/+/6174b5e21e73714c63061e66efdbe180e1c5491d/doc/go_spec.html),
 published with the Go 1 release.
 Identifier letters and decimal digits use the Unicode 6.0 categories specified
-by Go 1.0, rather than the host JDK's current Unicode tables.
+by Go 1.0, rather than the host JDK's current Unicode tables. In Go 1.0, `rune`
+is an alias for `int`; the implementation uses its documented 64-bit `int` layout.
 Empty and basic non-empty interface values use method-set checks for declared
 methods on named types, with value and pointer receiver dispatch. Embedded
 struct-field and interface-method promotion follow breadth-first selector
