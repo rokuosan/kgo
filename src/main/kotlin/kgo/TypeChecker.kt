@@ -2351,63 +2351,77 @@ class TypeChecker(
         rightExpression: Expression? = null,
         scope: Scope = globals
     ): GoTypeSyntax {
+        var operandLeft = left
+        var operandRight = right
         if (operator != TokenKind.SHL && operator != TokenKind.SHR) {
-            if (isUntyped(left) && !isUntyped(right)) leftExpression?.let { requireIntegerConstantRepresentable(it, right, scope) }
-            if (isUntyped(right) && !isUntyped(left)) rightExpression?.let { requireIntegerConstantRepresentable(it, left, scope) }
+            if (leftExpression?.let { nonConstantUntypedShift(it, scope) } != null &&
+                !isUntyped(operandRight) && isInteger(operandRight)) {
+                requireIntegerConstantRepresentable(leftExpression, operandRight, scope)
+                operandLeft = operandRight
+            }
+            if (rightExpression?.let { nonConstantUntypedShift(it, scope) } != null &&
+                !isUntyped(operandLeft) && isInteger(operandLeft)) {
+                requireIntegerConstantRepresentable(rightExpression, operandLeft, scope)
+                operandRight = operandLeft
+            }
+        }
+        if (operator != TokenKind.SHL && operator != TokenKind.SHR) {
+            if (isUntyped(operandLeft) && !isUntyped(operandRight)) leftExpression?.let { requireIntegerConstantRepresentable(it, operandRight, scope) }
+            if (isUntyped(operandRight) && !isUntyped(operandLeft)) rightExpression?.let { requireIntegerConstantRepresentable(it, operandLeft, scope) }
         }
         if (operator == TokenKind.SHL || operator == TokenKind.SHR) {
-            if (isUntyped(left)) {
+            if (isUntyped(operandLeft)) {
                 if (leftExpression?.let { constantInteger(it, scope) } == null)
                     error("left operand of shift must be an integer")
-            } else if (!isInteger(left)) error("left operand of shift must be an integer")
+            } else if (!isInteger(operandLeft)) error("left operand of shift must be an integer")
 
-            if (isUntyped(right)) {
+            if (isUntyped(operandRight)) {
                 val shiftExpression = rightExpression
                     ?: error("shift count must be a non-negative integer constant or unsigned integer")
                 val count = constantInteger(shiftExpression, scope)
                     ?: error("shift count must be a non-negative integer constant or unsigned integer")
                 if (count.signum() < 0) error("negative shift count")
                 requireIntegerConstantRepresentable(shiftExpression, predeclaredUint64Type, scope)
-            } else if (!isUnsignedInteger(right)) {
+            } else if (!isUnsignedInteger(operandRight)) {
                 error("shift count must have unsigned integer type")
             }
-            return if (isUntyped(left)) {
+            return if (isUntyped(operandLeft)) {
                 if (rightExpression?.let { isConstantExpression(it, scope) } == false) predeclaredIntType else untypedInt
-            } else left
+            } else operandLeft
         }
-        val l = underlying(left); val r = underlying(right)
+        val l = underlying(operandLeft); val r = underlying(operandRight)
         if (operator in setOf(TokenKind.LAND, TokenKind.LOR)) {
-            requireBoolean(left, "logical operator")
-            requireBoolean(right, "logical operator")
-            requireSameOperands(left, right, leftExpression, rightExpression, scope)
-            return commonType(left, right)
+            requireBoolean(operandLeft, "logical operator")
+            requireBoolean(operandRight, "logical operator")
+            requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
+            return commonType(operandLeft, operandRight)
         }
         if (operator in setOf(TokenKind.EQL, TokenKind.NEQ)) {
-            if (!constantOperandsAssignable(left, right, leftExpression, rightExpression, scope))
-                error("incompatible comparison: $left and $right")
-            if (left == nilType) {
-                if (!isNilable(right)) error("cannot compare nil with $right")
-            } else if (right == nilType) {
-                if (!isNilable(left)) error("cannot compare $left with nil")
-            } else if (!isComparable(left) || !isComparable(right)) {
-                error("cannot compare values of type $left and $right")
+            if (!constantOperandsAssignable(operandLeft, operandRight, leftExpression, rightExpression, scope))
+                error("incompatible comparison: $operandLeft and $operandRight")
+            if (operandLeft == nilType) {
+                if (!isNilable(operandRight)) error("cannot compare nil with $operandRight")
+            } else if (operandRight == nilType) {
+                if (!isNilable(operandLeft)) error("cannot compare $operandLeft with nil")
+            } else if (!isComparable(operandLeft) || !isComparable(operandRight)) {
+                error("cannot compare values of type $operandLeft and $operandRight")
             }
             return comparisonResultType(leftExpression, rightExpression, scope)
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
-            if (!((isOrderedNumeric(left) && isOrderedNumeric(right)) || (isString(left) && isString(right)))) error("invalid ordered comparison")
-            requireSameOperands(left, right, leftExpression, rightExpression, scope)
+            if (!((isOrderedNumeric(operandLeft) && isOrderedNumeric(operandRight)) || (isString(operandLeft) && isString(operandRight)))) error("invalid ordered comparison")
+            requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
             return comparisonResultType(leftExpression, rightExpression, scope)
         }
-        if (operator == TokenKind.ADD && isString(left) && isString(right)) {
-            requireSameOperands(left, right, leftExpression, rightExpression, scope)
-            return commonType(left, right)
+        if (operator == TokenKind.ADD && isString(operandLeft) && isString(operandRight)) {
+            requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
+            return commonType(operandLeft, operandRight)
         }
-        if (operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.MUL, TokenKind.QUO, TokenKind.REM) && !isNumeric(left)) error("arithmetic requires numeric operands")
-        if (operator in setOf(TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT, TokenKind.REM) && !isInteger(left)) error("operator requires integer operands")
-        if (!isNumeric(left) && operator !in setOf(TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT, TokenKind.REM)) error("invalid binary operands")
-        requireSameOperands(left, right, leftExpression, rightExpression, scope)
-        return commonType(left, right)
+        if (operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.MUL, TokenKind.QUO, TokenKind.REM) && !isNumeric(operandLeft)) error("arithmetic requires numeric operands")
+        if (operator in setOf(TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT, TokenKind.REM) && !isInteger(operandLeft)) error("operator requires integer operands")
+        if (!isNumeric(operandLeft) && operator !in setOf(TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT, TokenKind.REM)) error("invalid binary operands")
+        requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
+        return commonType(operandLeft, operandRight)
     }
 
     private fun constantOperandsAssignable(
