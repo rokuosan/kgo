@@ -3382,7 +3382,8 @@ class TypeChecker(
             PointerGoType(InterfaceGoType(emptyList())) else type
         else -> type
     }
-    private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType && !type.name.startsWith("#")
+    private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType &&
+        (!type.name.startsWith("#") || type.name.startsWith("#predeclared-"))
     private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
     private fun isUintptrType(type: GoTypeSyntax) = underlying(type) == NamedGoType("uintptr")
     private fun isUntyped(type: GoTypeSyntax) = type is NamedGoType && type.name.startsWith("#untyped-")
