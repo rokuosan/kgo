@@ -18,7 +18,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.selects.selectUnbiased
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.yield
 import org.apache.commons.math3.special.BesselJ
 import org.apache.commons.math3.special.Erf
@@ -172,33 +172,40 @@ class Interpreter(
             goroutines = CoroutineScope(SupervisorJob() + Dispatchers.Default + failureHandler)
             goroutineRuntime = GoGoroutineRuntime(goroutines)
             try {
-                knownPackageNames = sourcePackages.associate { it.importPath to it.packageName }
-                val runtimes = linkedMapOf<String, Interpreter>()
-                sourcePackages.forEach { sourcePackage ->
-                    val runtime = Interpreter(output, outputBytes)
-                    runtime.packageIdentity = sourcePackage.importPath
-                    runtime.goroutines = goroutines
-                    runtime.goroutineRuntime = goroutineRuntime
-                    runtime.importedRuntimePackages = runtimes.toMap()
-                    runtime.knownPackageNames = knownPackageNames
-                    runtime.checkedTypeDefinitions = importedTypeDefinitions[sourcePackage.importPath].orEmpty()
-                    runtime.checkedFunctionTypes = importedFunctionTypes[sourcePackage.importPath].orEmpty()
-                    runtime.packageVariableInitializationOrder = importedVariableInitializationOrders[sourcePackage.importPath]
-                    runtime.preparePackage(sourcePackage.files)
-                    runtime.initializePackage(sourcePackage.files)
-                    runtimes[sourcePackage.importPath] = runtime
+                val initialization = async {
+                    knownPackageNames = sourcePackages.associate { it.importPath to it.packageName }
+                    val runtimes = linkedMapOf<String, Interpreter>()
+                    sourcePackages.forEach { sourcePackage ->
+                        val runtime = Interpreter(output, outputBytes)
+                        runtime.packageIdentity = sourcePackage.importPath
+                        runtime.goroutines = goroutines
+                        runtime.goroutineRuntime = goroutineRuntime
+                        runtime.importedRuntimePackages = runtimes.toMap()
+                        runtime.knownPackageNames = knownPackageNames
+                        runtime.checkedTypeDefinitions = importedTypeDefinitions[sourcePackage.importPath].orEmpty()
+                        runtime.checkedFunctionTypes = importedFunctionTypes[sourcePackage.importPath].orEmpty()
+                        runtime.packageVariableInitializationOrder = importedVariableInitializationOrders[sourcePackage.importPath]
+                        runtime.preparePackage(sourcePackage.files)
+                        runtime.initializePackage(sourcePackage.files)
+                        runtimes[sourcePackage.importPath] = runtime
+                    }
+                    importedRuntimePackages = runtimes
+                    checkedTypeDefinitions = rootTypeDefinitions
+                    checkedFunctionTypes = rootFunctionTypes
+                    packageVariableInitializationOrder = rootVariableInitializationOrder
+                    preparePackage(files)
+                    initializePackage(files)
+                    functions["main"] ?: throw RuntimeGoError("main function not found")
                 }
-                importedRuntimePackages = runtimes
-                checkedTypeDefinitions = rootTypeDefinitions
-                checkedFunctionTypes = rootFunctionTypes
-                packageVariableInitializationOrder = rootVariableInitializationOrder
-                preparePackage(files)
-                initializePackage(files)
-                val main = functions["main"] ?: throw RuntimeGoError("main function not found")
-                val mainExecution = async { invoke(main, emptyList()) }
-                selectUnbiased<Unit> {
-                    mainExecution.onAwait { }
+                val main = select<FunctionDeclaration> {
                     goroutineFailure.onAwait { throw it }
+                    initialization.onAwait { it }
+                }
+                if (goroutineFailure.isCompleted) throw goroutineFailure.await()
+                val mainExecution = async { invoke(main, emptyList()) }
+                select<Unit> {
+                    goroutineFailure.onAwait { throw it }
+                    mainExecution.onAwait { }
                 }
             } finally {
                 // Go exits when main returns; it does not wait for remaining goroutines.
