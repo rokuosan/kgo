@@ -613,9 +613,19 @@ class Interpreter(
             // then performs writes left-to-right. Resolve every target before evaluating the RHS.
             val locations = statement.targets.map { resolveTarget(it, env) }
             val previous = if (statement.operator == TokenKind.ASSIGN) emptyList() else locations.map { it.get() }
-            val values = expandValues(evaluateRhs(
+            val evaluatedValues = expandValues(evaluateRhs(
                 statement.values, statement.targets.size, env, locations.map { it.type ?: NamedGoType("int") }
             ), statement.targets.size)
+            val compoundOperator = if (statement.operator == TokenKind.ASSIGN) null else compoundOperator(statement.operator)
+            val values = if (compoundOperator in setOf(
+                    TokenKind.ADD, TokenKind.SUB, TokenKind.MUL, TokenKind.QUO, TokenKind.REM,
+                    TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT
+                )) evaluatedValues.mapIndexed { index, value ->
+                    val expression = statement.values.getOrNull(index)
+                    val targetType = locations.getOrNull(index)?.type
+                    if (expression != null && targetType != null && isUntypedNumericConstantExpression(expression, env))
+                        contextualRuntimeConstant(value, expression, targetType, env) else value
+                } else evaluatedValues
             assignToLocations(locations, statement.operator, assignedValues(locations, values, statement.values, env), previous)
         }
     }
