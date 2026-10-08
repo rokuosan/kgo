@@ -3425,7 +3425,10 @@ class TypeChecker(
         else -> false
     }
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? NamedGoType)?.name in setOf("#predeclared-uint8", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")
+        (underlying(type) as? NamedGoType)?.name in setOf(
+            "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
+            "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
+        )
     private fun complementIntegerConstant(value: BigInteger, type: GoTypeSyntax): BigInteger {
         if (!isUnsignedInteger(type)) return value.not()
         val mask = BigInteger.ONE.shiftLeft(integerBitWidth(type)).subtract(BigInteger.ONE)
@@ -3434,7 +3437,7 @@ class TypeChecker(
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
         "#predeclared-uint8", "int8", "uint8", "byte" -> 8
         "int16", "uint16" -> 16
-        "int32", "uint32" -> 32
+        "#predeclared-uint32", "int32", "uint32" -> 32
         else -> 64
     }
     private fun isString(type: GoTypeSyntax) = underlying(type) == stringType ||
