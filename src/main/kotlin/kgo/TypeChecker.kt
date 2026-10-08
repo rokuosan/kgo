@@ -673,32 +673,14 @@ class TypeChecker(
     private fun endsWithGo10Exit(block: BlockStatement): Boolean = endsWithGo10Exit(block.statements)
 
     private fun endsWithGo10Exit(statements: List<Statement>): Boolean =
-        statements.lastOrNull { it != EmptyStatement }?.let(::isGo10Exit) == true
-
-    private fun switchExits(clauses: List<SwitchClause>): Boolean {
-        if (clauses.none { it.expressions == null }) return false
-        fun exitsFrom(index: Int): Boolean {
-            val statement = clauses.getOrNull(index)?.statements?.lastOrNull { it != EmptyStatement } ?: return false
-            val branch = unwrapLabels(statement) as? BranchStatement
-            return if (branch?.kind == TokenKind.FALLTHROUGH) exitsFrom(index + 1) else isGo10Exit(statement)
-        }
-        return clauses.indices.all(::exitsFrom)
-    }
-
-    private fun isGo10Exit(statement: Statement): Boolean = when (statement) {
-        is ReturnStatement -> true
-        is ExpressionStatement -> (statement.expression.unparenthesized() as? CallExpression)
-            ?.let(terminatingPanicCalls::contains) == true
-        is BlockStatement -> endsWithGo10Exit(statement)
-        is IfStatement -> statement.elseBranch != null &&
-            isGo10Exit(statement.thenBranch) && isGo10Exit(statement.elseBranch)
-        is SwitchStatement -> switchExits(statement.clauses)
-        is TypeSwitchStatement -> statement.clauses.any { it.types == null } &&
-            statement.clauses.all { endsWithGo10Exit(it.statements) }
-        is SelectStatement -> statement.cases.all { endsWithGo10Exit(it.statements) }
-        is LabeledStatement -> isGo10Exit(statement.statement)
-        else -> false
-    }
+        statements.lastOrNull { it != EmptyStatement }?.let { statement ->
+            when (val finalStatement = unwrapLabels(statement)) {
+                is ReturnStatement -> true
+                is ExpressionStatement -> (finalStatement.expression.unparenthesized() as? CallExpression)
+                    ?.let(terminatingPanicCalls::contains) == true
+                else -> false
+            }
+        } == true
 
     private fun <T> withLocalTypeScope(action: () -> T): T {
         val previous = typeDeclarations.toMap()
