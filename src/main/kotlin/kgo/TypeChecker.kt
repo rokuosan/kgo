@@ -2566,9 +2566,16 @@ class TypeChecker(
 
     private fun constantIntegerAssignable(from: GoTypeSyntax, to: GoTypeSyntax, expression: Expression?, scope: Scope): Boolean {
         if (expression == null || !isUntyped(from) || !isInteger(to)) return false
-        if (constantInteger(expression, scope) != null) return true
-        val complex = constantComplex(expression, scope) ?: return false
-        return complex.imaginary.numerator.signum() == 0 && complex.real.isInteger()
+        val integer = constantInteger(expression, scope) ?: constantComplex(expression, scope)?.let { complex ->
+            complex.takeIf { it.imaginary.numerator.signum() == 0 && it.real.isInteger() }?.real?.numerator
+        } ?: return false
+        if (integer.signum() < 0 && isUnsignedInteger(to)) return false
+        return try {
+            requireIntegerConstantRepresentable(expression, to, scope)
+            true
+        } catch (_: GoTypeError) {
+            false
+        }
     }
 
     private fun comparisonResultType(left: Expression?, right: Expression?, scope: Scope): GoTypeSyntax =
