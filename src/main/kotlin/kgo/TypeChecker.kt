@@ -29,6 +29,7 @@ class TypeChecker(
     private val sourceImportPath: String? = null
 ) {
     private val typeDeclarations = linkedMapOf<String, GoTypeSyntax>()
+    private val incompleteLocalTypes = linkedSetOf<String>()
     private val checkedRuntimeTypeDeclarations = linkedMapOf<String, GoTypeSyntax>()
     private val checkedFunctionTypes = IdentityHashMap<FunctionDeclaration, FunctionGoType>()
     private val functions = linkedMapOf<String, FunctionDeclaration>()
@@ -622,16 +623,21 @@ class TypeChecker(
     private fun checkBlock(block: BlockStatement, parent: Scope, reuseScope: Boolean = false) {
         val scope = if (reuseScope) parent else parent.child()
         val previousTypes = typeDeclarations.toMap()
+        val previousIncompleteTypes = incompleteLocalTypes.toSet()
         val previousPath = labelBlockPath
         labelBlockPath = previousPath + block
         try {
             block.statements.forEachIndexed { index, statement ->
                 withStatementIndex(block, index) { checkStatement(statement, scope) }
             }
+            if ((incompleteLocalTypes - previousIncompleteTypes).isNotEmpty())
+                error("incomplete local type declaration has no definition")
         }
         finally {
             typeDeclarations.clear()
             typeDeclarations.putAll(previousTypes)
+            incompleteLocalTypes.clear()
+            incompleteLocalTypes.addAll(previousIncompleteTypes)
             labelBlockPath = previousPath
         }
     }
@@ -766,11 +772,17 @@ class TypeChecker(
 
     private fun <T> withLocalTypeScope(action: () -> T): T {
         val previous = typeDeclarations.toMap()
+        val previousIncompleteTypes = incompleteLocalTypes.toSet()
         return try {
-            action()
+            action().also {
+                if ((incompleteLocalTypes - previousIncompleteTypes).isNotEmpty())
+                    error("incomplete local type declaration has no definition")
+            }
         } finally {
             typeDeclarations.clear()
             typeDeclarations.putAll(previous)
+            incompleteLocalTypes.clear()
+            incompleteLocalTypes.addAll(previousIncompleteTypes)
         }
     }
 
@@ -919,13 +931,26 @@ class TypeChecker(
                         } }
                     }
                     is TypeDeclaration -> {
-                        if (declaration.incomplete) error("incomplete local type declarations are not supported")
-                        if (declaration.name != "_" && scope.containsLocal(declaration.name))
-                            error("${declaration.name} redeclared in this block")
-                        val identity = "<local:${nextLocalTypeIdentity.incrementAndGet()}:${declaration.name}>"
-                        if (declaration.name != "_") scope.defineType(declaration.name, identity)
-                        typeDeclarations[identity] = resolveLocalType(declaration.type, scope)
-                        validateType(NamedGoType(identity))
+                        val name = declaration.name
+                        if (declaration.incomplete && name == "_") error("blank identifier cannot be forward-declared")
+                        val existingIdentity = if (name != "_" && scope.containsLocalType(name)) scope.typeBinding(name) else null
+                        val completingForward = existingIdentity != null && existingIdentity in incompleteLocalTypes
+                        if (declaration.incomplete && (existingIdentity != null || scope.containsLocal(name)))
+                            error("$name redeclared in this block")
+                        if (!declaration.incomplete && !completingForward &&
+                            name != "_" && scope.containsLocal(name)) error("$name redeclared in this block")
+                        val identity = if (completingForward) existingIdentity else
+                            "<local:${nextLocalTypeIdentity.incrementAndGet()}:$name>".also {
+                                if (name != "_") scope.defineType(name, it)
+                            }
+                        if (declaration.incomplete) {
+                            typeDeclarations[identity] = declaration.type
+                            incompleteLocalTypes += identity
+                        } else {
+                            typeDeclarations[identity] = resolveLocalType(declaration.type, scope)
+                            incompleteLocalTypes -= identity
+                            validateType(NamedGoType(identity))
+                        }
                     }
                     else -> error("unsupported local declaration")
                 }
@@ -2980,6 +3005,10 @@ class TypeChecker(
             is NamedGoType -> {
                 if (type.name in packagePaths) error("package ${type.name} is not a type")
                 if (!isBuiltinType(type.name) && type.name !in typeDeclarations) error("undefined type ${type.name}")
+                if (type.name in incompleteLocalTypes) {
+                    if (indirect) return
+                    error("incomplete type ${type.name} used as a complete type")
+                }
                 if (type.name in active) {
                     if (indirect) return
                     error("invalid recursive type ${type.name}")

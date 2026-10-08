@@ -2899,14 +2899,19 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun defineLocalType(declaration: TypeDeclaration, env: Environment, resolveDefinition: Boolean = true) {
+        val existingIdentity = if (declaration.name != "_" && env.containsLocalType(declaration.name))
+            env.typeBinding(declaration.name) else null
         val identity = synchronized(localTypeIdentities) {
-            localTypeIdentities[declaration] ?: "<local:${nextLocalTypeIdentity.incrementAndGet()}:${declaration.name}>".also {
-                localTypeIdentities[declaration] = it
-            }
+            localTypeIdentities[declaration] ?: existingIdentity?.name
+                ?: "<local:${nextLocalTypeIdentity.incrementAndGet()}:${declaration.name}>"
+                .also { localTypeIdentities[declaration] = it }
         }
+        synchronized(localTypeIdentities) { localTypeIdentities[declaration] = identity }
         val namedType = NamedGoType(identity)
-        if (declaration.name != "_") env.defineType(declaration.name, namedType)
-        if (resolveDefinition) typeDefinitions[identity] = resolveRuntimeType(declaration.type, env)
+        if (declaration.name != "_" && !env.containsLocalType(declaration.name))
+            env.defineType(declaration.name, namedType)
+        if (declaration.incomplete) typeDefinitions.putIfAbsent(identity, declaration.type)
+        else if (resolveDefinition) typeDefinitions[identity] = resolveRuntimeType(declaration.type, env)
     }
 
     private fun boxInterface(value: Any?, targetType: GoTypeSyntax): Any? {
