@@ -536,8 +536,19 @@ class Parser(private val tokens: List<Token>) {
         return withCompositeLiterals(false, block)
     }
 
-    private fun rangeExpression(): Expression = if (current().kind in setOf(TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT))
+    private fun rangeExpression(): Expression = if (rangeExpressionStartsWithUnambiguousCompositeType())
         expressionWithComposite { expression() } else expressionHeader { expression() }
+
+    private fun rangeExpressionStartsWithUnambiguousCompositeType(): Boolean {
+        var tokenIndex = index
+        while (tokens.getOrNull(tokenIndex)?.kind in setOf(
+                TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR,
+                TokenKind.MUL, TokenKind.AND, TokenKind.ARROW
+            )) {
+            tokenIndex++
+        }
+        return tokens.getOrNull(tokenIndex)?.kind in setOf(TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT)
+    }
 
     private fun <T> expressionWithComposite(block: () -> T): T = withCompositeLiterals(true, block)
 
