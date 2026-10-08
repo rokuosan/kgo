@@ -907,15 +907,20 @@ class Interpreter(
     private suspend fun executeSwitch(statement: SwitchStatement, env: Environment, labels: Set<String>) {
         val scope = env.child()
         statement.init?.let { execute(it, scope) }
-        val tag = statement.tag?.let { copyValue(evaluate(it, scope)) } ?: if (statement.tag == null) true else null
+        val rawTag = statement.tag?.let { copyValue(evaluate(it, scope)) } ?: if (statement.tag == null) true else null
         val caseExpectedType = statement.tag?.let { expression ->
             staticExpressionType(expression, scope)?.let { resolveRuntimeType(it, scope) }
-                ?: runtimeType(defaultConstantValue(tag, expression, scope))
+                ?: runtimeType(defaultConstantValue(rawTag, expression, scope))
         } ?: predeclaredBoolRuntimeType
+        val tag = statement.tag?.let { expression ->
+            contextualRuntimeConstant(rawTag, expression, caseExpectedType, scope)
+        } ?: rawTag
         var selected = -1
         for ((clauseIndex, clause) in statement.clauses.withIndex()) {
             if (clause.expressions?.any { expression ->
-                    val caseValue = copyValue(evaluate(expression, scope, caseExpectedType))
+                    val caseValue = contextualRuntimeConstant(
+                        evaluate(expression, scope, caseExpectedType), expression, caseExpectedType, scope
+                    )
                     val (comparedCase, comparedTag) = interfaceComparisonOperands(
                         expression, caseValue, statement.tag, tag, scope
                     )
@@ -1418,6 +1423,25 @@ class Interpreter(
         return left to right
     }
 
+    private fun isUntypedNumericConstantExpression(expression: Expression, env: Environment): Boolean {
+        if (!isRuntimeConstantExpression(expression, env)) return false
+        val type = staticExpressionType(expression, env) ?: return true
+        val name = (underlying(type) as? NamedGoType)?.name ?: return false
+        return name in setOf("#untyped-int", "#untyped-rune", "#untyped-float", "#untyped-complex")
+    }
+
+    private fun runtimeComparisonOperandType(expression: Expression, value: Any?, env: Environment): GoTypeSyntax? =
+        staticExpressionType(expression, env)?.let { resolveRuntimeType(it, env) }
+            ?: if (isUntypedNumericConstantExpression(expression, env)) null else runtimeType(value)
+
+    private fun contextualRuntimeConstant(
+        value: Any?, expression: Expression, target: GoTypeSyntax?, env: Environment
+    ): Any? {
+        if (target == null || underlying(target) is InterfaceGoType ||
+            !isUntypedNumericConstantExpression(expression, env)) return value
+        return convert(resolveRuntimeType(target, env), defaultRuneValue(value, expression, env))
+    }
+
     private fun logicalResultType(
         leftExpression: Expression,
         leftValue: Any?,
@@ -1726,11 +1750,24 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 } else if (directShiftContext != null) {
                     val typedLeft = convert(directShiftContext, defaultRuneValue(left, expression.left, env))
                     binary(typedLeft, expression.operator, right)
-                } else if (expression.operator == TokenKind.EQL || expression.operator == TokenKind.NEQ) {
-                    val (comparedLeft, comparedRight) = interfaceComparisonOperands(
-                        expression.left, left, expression.right, right, env
-                    )
-                    binary(comparedLeft, expression.operator, comparedRight)
+                } else if (expression.operator in setOf(
+                        TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ
+                    )) {
+                    val comparisonLeftType = runtimeComparisonOperandType(expression.left, left, env)
+                    val comparisonRightType = runtimeComparisonOperandType(expression.right, right, env)
+                    val contextualLeft = if (isUntypedNumericConstantExpression(expression.left, env))
+                        contextualRuntimeConstant(left, expression.left, comparisonRightType, env) else left
+                    val contextualRight = if (isUntypedNumericConstantExpression(expression.right, env))
+                        contextualRuntimeConstant(right, expression.right, comparisonLeftType, env) else right
+                    if (expression.operator == TokenKind.LSS || expression.operator == TokenKind.LEQ ||
+                        expression.operator == TokenKind.GTR || expression.operator == TokenKind.GEQ) {
+                        binary(contextualLeft, expression.operator, contextualRight)
+                    } else {
+                        val (comparedLeft, comparedRight) = interfaceComparisonOperands(
+                            expression.left, contextualLeft, expression.right, contextualRight, env
+                        )
+                        binary(comparedLeft, expression.operator, comparedRight)
+                    }
                 } else {
                     binary(left, expression.operator, right)
                 }
