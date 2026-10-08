@@ -635,6 +635,8 @@ class Parser(private val tokens: List<Token>) {
                         names = fieldNames
                         type = parseType()
                     } else {
+                        if (fieldNames.size != 1)
+                            fail("embedded field must have a single type name")
                         names = emptyList()
                         type = NamedGoType(first)
                     }
