@@ -64,7 +64,7 @@ private fun isUnicodeScalarValue(codePoint: Int): Boolean =
 internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
     if (text.length < 2) throw RuntimeGoError("invalid string literal")
     if (text.first() == '`') {
-        val body = text.substring(1, text.length - 1).replace("\r", "")
+        val body = text.substring(1, text.length - 1)
         var offset = 0
         while (offset < body.length) {
             val codePoint = body.codePointAt(offset)
