@@ -1251,6 +1251,11 @@ class Interpreter(
         )
         is TypeAssertionExpression -> resolveRuntimeType(expression.type, env)
         is SelectorExpression -> {
+            methodExpressionReceiver(expression.receiver, env)?.let { receiverType ->
+                runtimeMethodSet(receiverType)[expression.field]?.let { method ->
+                    return FunctionGoType(listOf(ParameterSyntax(null, receiverType)) + method.parameters, method.results)
+                }
+            }
             val packageAlias = (expression.receiver as? NameExpression)?.name
             val importedPath = packageAlias
                 ?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
@@ -1792,7 +1797,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
-            val path = alias?.let(env.imports.packages::get)
+            val path = alias
+                ?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
+                ?.let(env.imports.packages::get)
             if (path == "runtime" && expression.field in GoRuntimePackage.exportedTypes)
                 QualifiedGoType(path, expression.field)
             else if (path != null && expression.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
