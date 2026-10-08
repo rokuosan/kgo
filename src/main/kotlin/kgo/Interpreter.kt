@@ -74,7 +74,9 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
             if (exponent > maximumExponent) return if (negative) Double.NEGATIVE_INFINITY else Double.POSITIVE_INFINITY
 
             val subnormal = exponent < minimumExponent
-            if (subnormal && exponent < minimumExponent - 1) return if (negative) -0.0 else 0.0
+            val halfMinimumSubnormalExponent = minimumExponent - (precision - 1) - 1
+            if (subnormal && exponent < halfMinimumSubnormalExponent)
+                return if (negative) -0.0 else 0.0
             val scale = if (subnormal) precision - 1 - minimumExponent else precision - 1 - exponent
             val scaledNumerator = if (scale >= 0) n.shiftLeft(scale) else n
             val scaledDenominator = if (scale < 0) d.shiftLeft(-scale) else d
