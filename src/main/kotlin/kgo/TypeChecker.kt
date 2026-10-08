@@ -286,6 +286,7 @@ class TypeChecker(
                 val spec = binding.specification
                 val path = binding.path
                 if (path.isEmpty()) error("import path cannot be empty")
+                if (importedPackages[path]?.packageName == "main") error("cannot import package main")
                 // Import identity is the decoded path, not its source spelling. For example,
                 // "fmt" and "f\\x6dt" name the same package and cannot both be imported.
                 if (!importedPaths.add(path))
