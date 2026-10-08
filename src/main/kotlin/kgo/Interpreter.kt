@@ -266,7 +266,7 @@ class Interpreter(
                 globals.imports = declarationImports[declaration] ?: RuntimeImports()
                 initialize(
                     initialization.indices.map(declaration.names::get),
-                    variableInitializerExpressions(initialization), globals, declaration.type
+                    initialization.initializerExpressions(), globals, declaration.type
                 )
             }
         initFunctions.forEach { invoke(it, emptyList()) }
@@ -1536,28 +1536,13 @@ class Interpreter(
     private fun defaultVariableInitializationOrder(
         declarations: List<VariableDeclaration>
     ): List<PackageVariableInitialization> {
-        val initializations = declarations.flatMap { declaration ->
-            when {
-                declaration.values.isEmpty() || declaration.values.size == 1 && declaration.names.size > 1 ->
-                    listOf(PackageVariableInitialization(declaration, declaration.names.indices.toList()))
-                else -> declaration.names.indices.map { PackageVariableInitialization(declaration, listOf(it)) }
-            }
-        }
+        val initializations = packageVariableInitializations(declarations)
         return orderPackageDeclarations(
             initializations,
             { initialization -> initialization.indices.map(initialization.declaration.names::get) },
-            ::variableInitializerExpressions,
+            PackageVariableInitialization::initializerExpressions,
             includeFunctionDependencies = true
         )
-    }
-
-    private fun variableInitializerExpressions(initialization: PackageVariableInitialization): List<Expression> {
-        val declaration = initialization.declaration
-        return when {
-            declaration.values.isEmpty() -> emptyList()
-            declaration.values.size == 1 && initialization.indices.size > 1 -> declaration.values
-            else -> initialization.indices.map { declaration.values[it] }
-        }
     }
 
     private fun addFunctionDependencies(references: MutableSet<String>) {

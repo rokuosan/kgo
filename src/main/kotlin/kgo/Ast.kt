@@ -15,6 +15,26 @@ data class FunctionDeclaration(
 ) : Declaration
 data class VariableDeclaration(val names: List<String>, val values: List<Expression>, val type: GoTypeSyntax? = null) : Declaration
 internal data class PackageVariableInitialization(val declaration: VariableDeclaration, val indices: List<Int>)
+
+internal fun packageVariableInitializations(
+    declarations: List<VariableDeclaration>
+): List<PackageVariableInitialization> = declarations.flatMap { declaration ->
+    when {
+        declaration.values.isEmpty() || declaration.values.size == 1 && declaration.names.size > 1 ->
+            listOf(PackageVariableInitialization(declaration, declaration.names.indices.toList()))
+        else -> declaration.names.indices.map { PackageVariableInitialization(declaration, listOf(it)) }
+    }
+}
+
+internal fun PackageVariableInitialization.initializerExpressions(): List<Expression> {
+    val declaration = declaration
+    return when {
+        declaration.values.isEmpty() -> emptyList()
+        declaration.values.size == 1 && indices.size > 1 -> declaration.values
+        else -> indices.map { declaration.values[it] }
+    }
+}
+
 data class ConstantDeclaration(
     val names: List<String>,
     val values: List<Expression>,

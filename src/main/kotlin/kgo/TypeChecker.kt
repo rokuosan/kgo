@@ -202,7 +202,7 @@ class TypeChecker(
         for (initialization in initialVariableOrder) {
             val declaration = initialization.declaration
             val names = initialization.indices.map(declaration.names::get)
-            val expressions = variableInitializerExpressions(initialization)
+            val expressions = initialization.initializerExpressions()
             val sourceFile = variableFiles.getValue(declaration)
             withFileImports(sourceFile) {
                 val previousDependencyExpression = dependencyExpression
@@ -446,13 +446,7 @@ class TypeChecker(
     private fun globalVariableInitializationOrder(
         variables: List<VariableDeclaration>
     ): List<PackageVariableInitialization> {
-        val initializations = variables.flatMap { declaration ->
-            when {
-                declaration.values.isEmpty() || declaration.values.size == 1 && declaration.names.size > 1 ->
-                    listOf(PackageVariableInitialization(declaration, declaration.names.indices.toList()))
-                else -> declaration.names.indices.map { PackageVariableInitialization(declaration, listOf(it)) }
-            }
-        }
+        val initializations = packageVariableInitializations(variables)
         val ownerByName = buildMap {
             initializations.forEachIndexed { index, initialization ->
                 initialization.indices.map(initialization.declaration.names::get).filter { it != "_" }
@@ -460,7 +454,7 @@ class TypeChecker(
             }
         }
         val dependencies = initializations.map { initialization ->
-            val expressions = variableInitializerExpressions(initialization)
+            val expressions = initialization.initializerExpressions()
             val references = expressions.flatMapTo(linkedSetOf(), ::referencedNames)
             val methodDependencies = expressions.flatMap { calledMethodsByExpression[it].orEmpty() }
             addFunctionDependencies(references, methodDependencies)
@@ -478,15 +472,6 @@ class TypeChecker(
             result += initializations[next]
         }
         return result
-    }
-
-    private fun variableInitializerExpressions(initialization: PackageVariableInitialization): List<Expression> {
-        val declaration = initialization.declaration
-        return when {
-            declaration.values.isEmpty() -> emptyList()
-            declaration.values.size == 1 && initialization.indices.size > 1 -> declaration.values
-            else -> initialization.indices.map { declaration.values[it] }
-        }
     }
 
     private data class GlobalConstantBinding(
