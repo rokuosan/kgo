@@ -4096,9 +4096,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val value = integerLiteral(expression.operand, env).not()
                 val scope = env ?: globals
                 val operandType = staticExpressionType(expression.operand, scope)?.let { resolveRuntimeType(it, scope) }
-                val underlyingType = operandType?.let(::underlying) as? NamedGoType
-                if (underlyingType?.name in setOf("uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte")) {
-                    val width = integerBitWidth(operandType!!)
+                if (operandType != null && isUnsignedInteger(operandType)) {
+                    val width = integerBitWidth(operandType)
                     value.and(BigInteger.ONE.shiftLeft(width).subtract(BigInteger.ONE))
                 } else value
             }
