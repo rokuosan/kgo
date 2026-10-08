@@ -5170,7 +5170,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val grownCapacity = minOf(capacity.toLong() * 2, Int.MAX_VALUE.toLong())
             val newCapacity = maxOf(required, maxOf(1L, grownCapacity)).toInt()
             val newBacking = zeroedSliceBacking(newCapacity, elementType)
-            repeat(length) { newBacking[it] = get(it) }
+            repeat(length) { newBacking[it] = copyForType(get(it), elementType) }
             values.forEachIndexed { i, value -> newBacking[length + i] = copyForType(value, elementType) }
             return GoSlice(elementType, newBacking, 0, length + values.size, newCapacity, namedType, type, packagePath)
         }
