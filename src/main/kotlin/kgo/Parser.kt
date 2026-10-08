@@ -35,7 +35,6 @@ class Parser(private val tokens: List<Token>) {
         val imports = mutableListOf<ImportSpecSyntax>()
         if (match(TokenKind.LPAREN)) {
             while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
-                if (match(TokenKind.SEMICOLON)) continue
                 val alias = if (at(TokenKind.IDENT) || at(TokenKind.PERIOD)) take().lexeme else null
                 imports += ImportSpecSyntax(alias, expect(TokenKind.STRING).lexeme)
                 semicolonOrClose(TokenKind.RPAREN)
