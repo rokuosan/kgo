@@ -3655,10 +3655,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             null -> emptyList()
             is GoString -> {
-                val destinationTypeSyntax = (destinationValue as? GoSlice)?.type
-                    ?: (destinationValue as? GoNilValue)?.type
-                    ?: SliceGoType(destinationType.element)
-                if (destinationTypeSyntax !is SliceGoType || !isByteElementType(destinationType.element))
+                if (!isByteElementType(destinationType.element))
                     throw RuntimeGoError("copy from string requires a byte slice")
                 source.bytes.map { (it.toInt() and 0xff).toLong() }
             }

@@ -2423,11 +2423,8 @@ class TypeChecker(
                     destination is SliceGoType && source is SliceGoType ->
                         if (!sameType(destination.element, source.element)) error("copy slice element types do not match")
                     destination is SliceGoType && types[1] == nilType -> Unit
-                    destination is SliceGoType && isString(types[1]) ->
-                        if (types[0] !is SliceGoType || !isByteElementType((types[0] as SliceGoType).element))
-                            error("copy from string requires a byte slice")
+                    isString(types[1]) && assignable(types[0], SliceGoType(predeclaredUint8Type)) -> Unit
                     types[0] == nilType && source is SliceGoType -> Unit
-                    types[0] == nilType && isString(types[1]) -> Unit
                     else -> error("copy requires slices, or a byte slice and string")
                 }
                 listOf(predeclaredIntType)
