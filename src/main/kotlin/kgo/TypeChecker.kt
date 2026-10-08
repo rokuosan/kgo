@@ -558,7 +558,7 @@ class TypeChecker(
         is ElidedCompositeLiteral -> referencedCompositeElements(expression.elements, expectedType)
         is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
             expression.parameters, expression.resultNames, expression.body,
-            compositeType = ::dependencyCompositeType
+            resolveType = ::dependencyType
         )
     }
 
@@ -593,8 +593,8 @@ class TypeChecker(
         }.toSet()
     }
 
-    private fun dependencyCompositeType(literal: CompositeLiteral): GoTypeSyntax? =
-        runCatching { underlying(resolveLocalType(literal.type, globals)) }.getOrNull()
+    private fun dependencyType(type: GoTypeSyntax): GoTypeSyntax? =
+        runCatching { underlying(resolveLocalType(type, globals)) }.getOrNull()
 
     private fun addFunctionDependencies(
         references: MutableSet<String>,
@@ -608,8 +608,8 @@ class TypeChecker(
             val function = pending.removeFirst()
             if (!visited.add(function)) continue
             val file = sourceFilesByFunction[function]
-            val functionReferences = if (file == null) GoPackageDependencies.functionReferences(function, ::dependencyCompositeType)
-                else withFileImports(file) { GoPackageDependencies.functionReferences(function, ::dependencyCompositeType) }
+            val functionReferences = if (file == null) GoPackageDependencies.functionReferences(function, ::dependencyType)
+                else withFileImports(file) { GoPackageDependencies.functionReferences(function, ::dependencyType) }
             references += functionReferences
             functionReferences.mapNotNull(functions::get).forEach(pending::addLast)
             calledMethodsByFunction[function].orEmpty().forEach(pending::addLast)

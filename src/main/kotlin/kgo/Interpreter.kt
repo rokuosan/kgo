@@ -1668,8 +1668,8 @@ class Interpreter(
             if (!visited.add(name)) continue
             val function = functions[name] ?: continue
             val functionReferences = withRuntimeImports(functionImports[function]) {
-                GoPackageDependencies.functionReferences(function) { literal ->
-                    runCatching { resolveRuntimeType(literal.type, globals) }.getOrNull()
+                GoPackageDependencies.functionReferences(function) { type ->
+                    runCatching { resolveRuntimeType(type, globals) }.getOrNull()
                 }
             }
             functionReferences.filter { it !in references && it in functions }.forEach(pending::addLast)
@@ -1695,7 +1695,7 @@ class Interpreter(
         is ElidedCompositeLiteral -> referencedCompositeElements(expression.elements, expectedType)
         is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
             expression.parameters, expression.resultNames, expression.body,
-            compositeType = { literal -> runCatching { resolveRuntimeType(literal.type, globals) }.getOrNull() }
+            resolveType = { type -> runCatching { resolveRuntimeType(type, globals) }.getOrNull() }
         )
     }
 
