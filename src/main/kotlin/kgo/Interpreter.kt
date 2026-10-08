@@ -2577,8 +2577,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     nextIndex = at + 1
                 }
                 val size = type.length?.let {
-                    val length = number(evaluate(it, env), "array length")
-                    if (length < 0 || length > Int.MAX_VALUE) throw RuntimeGoError("array length out of range")
+                    val length = exactIntegerValue(evaluate(it, env), "array length")
+                    if (length.signum() < 0 || length > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
+                        throw RuntimeGoError("array length out of range")
                     length.toInt()
                 }
                     ?: (indices.maxOrNull()?.plus(1) ?: 0)
@@ -2636,8 +2637,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private suspend fun compositeIndex(expression: Expression, context: String, env: Environment): Int {
-        val index = number(evaluate(expression, env), context)
-        if (index < 0 || index >= Int.MAX_VALUE) throw RuntimeGoError("$context out of range")
+        val index = exactIntegerValue(evaluate(expression, env), context)
+        if (index.signum() < 0 || index >= BigInteger.valueOf(Int.MAX_VALUE.toLong()))
+            throw RuntimeGoError("$context out of range")
         return index.toInt()
     }
 
@@ -3929,7 +3931,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
 
     private fun integerLiteral(expression: Expression, env: Environment? = null): BigInteger = when (expression) {
-        is LiteralExpression -> integer(expression.token.lexeme)
+        is LiteralExpression -> if (expression.token.kind == TokenKind.FLOAT) {
+            GoRational.decimal(expression.token.lexeme).let { value ->
+                if (!value.isInteger()) throw RuntimeGoError("array length is not a constant integer expression")
+                value.numerator
+            }
+        } else integer(expression.token.lexeme)
         is NameExpression -> when (val value = env?.getOrNull(expression.name) ?: globals.getOrNull(expression.name)) {
             is BigInteger -> value
             is Long -> BigInteger.valueOf(value)

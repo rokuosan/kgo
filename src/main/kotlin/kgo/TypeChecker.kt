@@ -2138,7 +2138,7 @@ class TypeChecker(
         is SliceGoType -> SliceGoType(resolveLocalType(type.element, scope))
         is ArrayGoType -> {
             val length = type.length?.let { expression ->
-                requireInteger(expressionType(expression, scope), "array length")
+                requireIntegerValue(expressionType(expression, scope), expression, "array length", scope)
                 val value = constantInteger(expression, scope) ?: error("array length must be constant")
                 if (value.signum() < 0) error("array length must be non-negative")
                 requireIntegerConstantRepresentable(expression, predeclaredIntType, scope)
@@ -2179,7 +2179,7 @@ class TypeChecker(
             is SliceGoType, is ArrayGoType -> {
                 val element = if (type is SliceGoType) type.element else (type as ArrayGoType).element
                 val arrayLength = (type as? ArrayGoType)?.length?.let { length ->
-                    requireInteger(expressionType(length, scope), "array length")
+                    requireIntegerValue(expressionType(length, scope), length, "array length", scope)
                     val constant = constantInteger(length, scope) ?: error("array length must be constant")
                     if (constant.signum() < 0) error("array length must be non-negative")
                     requireIntegerConstantRepresentable(length, predeclaredIntType, scope)
@@ -2189,7 +2189,7 @@ class TypeChecker(
                 val usedIndices = mutableSetOf<BigInteger>()
                 elements.forEach { item ->
                     val index = item.key?.let { key ->
-                        requireInteger(expressionType(key, scope), "composite index")
+                        requireIntegerValue(expressionType(key, scope), key, "composite index", scope)
                         val constant = constantInteger(key, scope) ?: error("composite index must be constant")
                         if (constant.signum() < 0) error("composite index must be non-negative")
                         requireIntegerConstantRepresentable(key, predeclaredIntType, scope)
@@ -2940,7 +2940,7 @@ class TypeChecker(
             is SliceGoType -> validateType(type.element, active, true)
             is ArrayGoType -> {
                 val length = type.length ?: error("inferred array length is only valid in a composite literal")
-                requireInteger(expressionType(length, globals), "array length")
+                requireIntegerValue(expressionType(length, globals), length, "array length", globals)
                 val constant = constantInteger(length, globals) ?: error("array length must be constant")
                 if (constant.signum() < 0) error("array length must be non-negative")
                 requireIntegerConstantRepresentable(length, predeclaredIntType, globals)
