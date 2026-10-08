@@ -1245,6 +1245,10 @@ class Interpreter(
         }
         is ParenthesizedExpression -> staticExpressionType(expression.expression, env)
         is CompositeLiteral -> resolveRuntimeType(expression.type, env)
+        is FunctionLiteralExpression -> FunctionGoType(
+            expression.parameters.map { it.copy(type = resolveRuntimeType(it.type, env)) },
+            expression.results.map { resolveRuntimeType(it, env) }
+        )
         is TypeAssertionExpression -> resolveRuntimeType(expression.type, env)
         is SelectorExpression -> {
             val packageAlias = (expression.receiver as? NameExpression)?.name
@@ -1278,6 +1282,7 @@ class Interpreter(
             TokenKind.AND -> staticExpressionType(expression.operand, env)?.let(::PointerGoType)
             TokenKind.MUL -> (staticExpressionType(expression.operand, env)?.let(::underlying) as? PointerGoType)?.element
             TokenKind.ADD, TokenKind.SUB, TokenKind.XOR, TokenKind.NOT -> staticExpressionType(expression.operand, env)
+            TokenKind.ARROW -> staticExpressionResultType(expression, 0, env)
             else -> null
         }
         is CallExpression -> staticExpressionResultType(expression, 0, env)
