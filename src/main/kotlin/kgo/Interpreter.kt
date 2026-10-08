@@ -1730,6 +1730,7 @@ class Interpreter(
 
     private fun functionSelectorReceiverTypes(function: FunctionDeclaration): IdentityHashMap<Expression, GoTypeSyntax?> {
         val receiverTypes = IdentityHashMap<Expression, GoTypeSyntax?>()
+        val localTypeNames = IdentityHashMap<MutableMap<String, GoTypeSyntax?>, MutableSet<String>>()
         val functionScope = linkedMapOf<String, GoTypeSyntax?>()
         function.parameters.forEachIndexed { index, name ->
             name?.takeIf { it != "_" }?.let { functionScope[it] = function.parameterTypes.getOrNull(index) }
@@ -1746,6 +1747,18 @@ class Interpreter(
         ): Pair<Boolean, GoTypeSyntax?> {
             scopes.asReversed().forEach { scope -> if (name in scope) return true to scope[name] }
             return false to null
+        }
+        fun isLocalType(scopes: List<MutableMap<String, GoTypeSyntax?>>, name: String): Boolean {
+            scopes.asReversed().forEach { scope ->
+                if (name in scope) return name in localTypeNames[scope].orEmpty()
+            }
+            return false
+        }
+        fun rootName(expression: Expression): String? = when (val target = expression.unparenthesized()) {
+            is NameExpression -> target.name
+            is SelectorExpression -> rootName(target.receiver)
+            is UnaryExpression -> rootName(target.operand)
+            else -> null
         }
         fun resolveDependencyType(
             type: GoTypeSyntax, scopes: List<MutableMap<String, GoTypeSyntax?>>
@@ -1793,6 +1806,7 @@ class Interpreter(
                     ?.let { resolveDependencyType(it, listOf(functionScope)) }
             }
         }
+        lateinit var methodExpressionReceiverType: (Expression, List<MutableMap<String, GoTypeSyntax?>>) -> GoTypeSyntax?
         fun infer(
             expression: Expression, scopes: List<MutableMap<String, GoTypeSyntax?>>, resultIndex: Int = 0
         ): GoTypeSyntax? {
@@ -1833,6 +1847,18 @@ class Interpreter(
             val isLocalName = target is NameExpression && lookup(scopes, target.name).first
             return if (isLocalName) resolved else staticExpressionResultType(expression, resultIndex, globals) ?: resolved
         }
+        methodExpressionReceiverType = methodReceiver@{ expression, scopes ->
+            val target = expression.unparenthesized()
+            if (target is NameExpression && isLocalType(scopes, target.name))
+                return@methodReceiver infer(target, scopes)
+            if (expression is ParenthesizedExpression && target is UnaryExpression &&
+                target.operator == TokenKind.MUL && rootName(target.operand)?.let { isLocalType(scopes, it) } == true) {
+                return@methodReceiver infer(target.operand, scopes)?.let(::PointerGoType)
+            }
+            val root = rootName(expression)
+            if (root != null && lookup(scopes, root).first) null
+            else methodExpressionReceiver(expression, globals)
+        }
         fun rangeTypes(range: RangeClause, scopes: List<MutableMap<String, GoTypeSyntax?>>): List<GoTypeSyntax> {
             val source = infer(range.expression, scopes)?.let(::underlying) ?: return rangeVariableTypes(range, globals)
             val pair = when (source) {
@@ -1871,7 +1897,8 @@ class Interpreter(
                 is CallExpression -> { visitExpression(expression.function, scopes); expression.arguments.forEach { visitExpression(it, scopes) } }
                 is SelectorExpression -> {
                     visitExpression(expression.receiver, scopes)
-                    receiverTypes[expression] = infer(expression.receiver, scopes)
+                    receiverTypes[expression] = methodExpressionReceiverType(expression.receiver, scopes)
+                        ?: infer(expression.receiver, scopes)
                 }
                 is IndexExpression -> { visitExpression(expression.receiver, scopes); visitExpression(expression.index, scopes) }
                 is SliceExpression -> {
@@ -1926,6 +1953,7 @@ class Interpreter(
                                 }
                         }
                         scopes.last()[declaration.name] = NamedGoType(identity)
+                        localTypeNames.getOrPut(scopes.last()) { mutableSetOf() } += declaration.name
                         typeDefinitions[identity] = runCatching {
                             resolveDependencyType(declaration.type, scopes)
                         }.getOrDefault(declaration.type)
