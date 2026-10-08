@@ -111,28 +111,7 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
 
 private data class GoExactComplex(val real: GoRational, val imaginary: GoRational)
 private class GoGoroutineRuntime(private val scope: CoroutineScope) {
-    private val lock = Any()
-    private val pending = mutableListOf<suspend () -> Unit>()
-    private var initializationComplete = false
-
-    fun launch(task: suspend () -> Unit) {
-        val startNow = synchronized(lock) {
-            if (initializationComplete) true
-            else {
-                pending += task
-                false
-            }
-        }
-        if (startNow) scope.launch { task() }
-    }
-
-    fun startAfterInitialization() {
-        val ready = synchronized(lock) {
-            initializationComplete = true
-            pending.toList().also { pending.clear() }
-        }
-        ready.forEach { task -> scope.launch { task() } }
-    }
+    fun launch(task: suspend () -> Unit) = scope.launch { task() }
 }
 private data class RuntimeImports(val packages: Map<String, String> = emptyMap(), val dotPackages: Set<String> = emptySet())
 private val untypedRuneRuntimeType = NamedGoType("#untyped-rune")
@@ -215,7 +194,6 @@ class Interpreter(
                 packageVariableInitializationOrder = rootVariableInitializationOrder
                 preparePackage(files)
                 initializePackage(files)
-                goroutineRuntime.startAfterInitialization()
                 val main = functions["main"] ?: throw RuntimeGoError("main function not found")
                 val mainExecution = async { invoke(main, emptyList()) }
                 selectUnbiased<Unit> {
