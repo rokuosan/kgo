@@ -690,17 +690,64 @@ class TypeChecker(
         visit(body, 0, 0, emptySet(), emptySet())
     }
 
-    private fun endsWithGo10Exit(block: BlockStatement): Boolean = endsWithGo10Exit(block.statements)
+    private fun endsWithGo10Exit(block: BlockStatement): Boolean =
+        endsWithGo10Exit(block.statements, label = "")
 
-    private fun endsWithGo10Exit(statements: List<Statement>): Boolean =
-        statements.lastOrNull { it != EmptyStatement }?.let { statement ->
-            when (val finalStatement = unwrapLabels(statement)) {
-                is ReturnStatement -> true
-                is ExpressionStatement -> (finalStatement.expression.unparenthesized() as? CallExpression)
-                    ?.let(terminatingPanicCalls::contains) == true
-                else -> false
-            }
-        } == true
+    private fun endsWithGo10Exit(statements: List<Statement>, label: String): Boolean =
+        statements.lastOrNull { it != EmptyStatement }?.let { endsWithGo10Exit(it, label) } == true
+
+    private fun endsWithGo10Exit(statement: Statement, label: String = ""): Boolean = when (statement) {
+        is LabeledStatement -> endsWithGo10Exit(statement.statement, statement.label)
+        is ReturnStatement -> true
+        is BranchStatement -> statement.kind == TokenKind.GOTO || statement.kind == TokenKind.FALLTHROUGH
+        is BlockStatement -> endsWithGo10Exit(statement.statements, label = "")
+        is ExpressionStatement -> (statement.expression.unparenthesized() as? CallExpression)
+            ?.let(terminatingPanicCalls::contains) == true
+        is IfStatement -> statement.elseBranch != null &&
+            endsWithGo10Exit(statement.thenBranch) && endsWithGo10Exit(statement.elseBranch)
+        is ForStatement -> statement.rangeClause == null && statement.condition == null &&
+            !hasBreak(statement.body, label, implicit = true)
+        is SwitchStatement -> isTerminatingSwitch(statement.clauses.map { (it.expressions == null) to it.statements }, label)
+        is TypeSwitchStatement -> isTerminatingSwitch(statement.clauses.map { (it.types == null) to it.statements }, label)
+        is SelectStatement -> statement.cases.all { clause ->
+            endsWithGo10Exit(clause.statements, label = "") &&
+                !hasBreak(clause.statements, label, implicit = true)
+        }
+        else -> false
+    }
+
+    private fun isTerminatingSwitch(clauses: List<Pair<Boolean, List<Statement>>>, label: String): Boolean {
+        var hasDefault = false
+        for ((isDefault, statements) in clauses) {
+            if (isDefault) hasDefault = true
+            if (!endsWithGo10Exit(statements, label = "") || hasBreak(statements, label, implicit = true))
+                return false
+        }
+        return hasDefault
+    }
+
+    private fun hasBreak(statement: Statement, label: String, implicit: Boolean): Boolean = when (statement) {
+        is BranchStatement -> statement.kind == TokenKind.BREAK &&
+            (statement.label?.let { it == label } ?: implicit)
+        is LabeledStatement -> hasBreak(statement.statement, label, implicit)
+        is BlockStatement -> hasBreak(statement.statements, label, implicit)
+        is IfStatement -> hasBreak(statement.thenBranch, label, implicit) ||
+            (statement.elseBranch?.let { hasBreak(it, label, implicit) } ?: false)
+        is ForStatement -> label.isNotEmpty() && hasBreak(statement.body, label, implicit = false)
+        is SwitchStatement -> label.isNotEmpty() && statement.clauses.any {
+            hasBreak(it.statements, label, implicit = false)
+        }
+        is TypeSwitchStatement -> label.isNotEmpty() && statement.clauses.any {
+            hasBreak(it.statements, label, implicit = false)
+        }
+        is SelectStatement -> label.isNotEmpty() && statement.cases.any {
+            hasBreak(it.statements, label, implicit = false)
+        }
+        else -> false
+    }
+
+    private fun hasBreak(statements: List<Statement>, label: String, implicit: Boolean): Boolean =
+        statements.any { hasBreak(it, label, implicit) }
 
     private fun <T> withLocalTypeScope(action: () -> T): T {
         val previous = typeDeclarations.toMap()

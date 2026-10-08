@@ -56,9 +56,9 @@ The `runtime` import exposes the Go 1.0 `Error` interface, including its
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
 an incomplete subset of the Go 1.0 type system. The Go 1.0 specification leaves
-the exact return requirement undefined; this checker follows the Go 1.0 compiler
-behavior of requiring a final explicit `return` or call to `panic` in functions
-with results.
+the exact return requirement undefined; this checker follows the Go compiler's
+terminating-statement rules for functions with results, including terminating
+`if`, `switch`, `select`, and unconditional `for` statements.
 Constant comparisons retain the untyped boolean result, and comparison results
 can be assigned to any boolean type.
 
