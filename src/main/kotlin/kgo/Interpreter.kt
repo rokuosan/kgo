@@ -1769,7 +1769,21 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                         binary(comparedLeft, expression.operator, comparedRight)
                     }
                 } else {
-                    binary(left, expression.operator, right)
+                    val contextualOperands = expression.operator in setOf(
+                        TokenKind.ADD, TokenKind.SUB, TokenKind.MUL, TokenKind.QUO, TokenKind.REM,
+                        TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT
+                    )
+                    if (contextualOperands) {
+                        val leftType = runtimeComparisonOperandType(expression.left, left, env)
+                        val rightType = runtimeComparisonOperandType(expression.right, right, env)
+                        val contextualLeft = if (isUntypedNumericConstantExpression(expression.left, env))
+                            contextualRuntimeConstant(left, expression.left, rightType, env) else left
+                        val contextualRight = if (isUntypedNumericConstantExpression(expression.right, env))
+                            contextualRuntimeConstant(right, expression.right, leftType, env) else right
+                        binary(contextualLeft, expression.operator, contextualRight)
+                    } else {
+                        binary(left, expression.operator, right)
+                    }
                 }
             }
         }
