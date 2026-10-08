@@ -2919,7 +2919,7 @@ class TypeChecker(
                     error("invalid recursive type ${type.name}")
                 }
                 typeDeclarations[type.name]?.let { declaredType ->
-                    validateType(declaredType, active + type.name)
+                    validateType(declaredType, active + type.name, indirect)
                     val struct = underlying(NamedGoType(type.name)) as? StructGoType
                     struct?.fields?.flatMap { field ->
                         field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }
