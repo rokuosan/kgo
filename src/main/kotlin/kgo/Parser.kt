@@ -611,7 +611,6 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenKind.LBRACE)
         val fields = mutableListOf<StructFieldSyntax>()
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             val names: List<String>
             val type: GoTypeSyntax
             if (at(TokenKind.MUL)) {
@@ -650,7 +649,6 @@ class Parser(private val tokens: List<Token>) {
         val methods = mutableListOf<InterfaceMethodSyntax>()
         val embedded = mutableListOf<GoTypeSyntax>()
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             val name = expect(TokenKind.IDENT).lexeme
             val typeName = if (match(TokenKind.PERIOD)) QualifiedGoType(name, expect(TokenKind.IDENT).lexeme)
                 else NamedGoType(name)
