@@ -1767,7 +1767,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
             val path = alias?.let(env.imports.packages::get)
-            if (path != null && expression.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
+            if (path == "runtime" && expression.field in GoRuntimePackage.exportedTypes)
+                QualifiedGoType(path, expression.field)
+            else if (path != null && expression.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
                 QualifiedGoType(path, expression.field) else null
         }
         else -> null
@@ -1870,8 +1872,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     return@forEach
                 }
                 if (current is GoInterfaceValue) {
-                    val member = if (current.value is GoRuntimeErrorValue && name == "Error")
-                        RuntimeErrorMethodValue(current.value)
+                    val member = if (current.value is GoRuntimeErrorValue && name in setOf("Error", "RuntimeError"))
+                        RuntimeErrorMethodValue(current.value, name)
                     else (current.implementationOwner ?: this)
                         .selectStructMember(current.value, name, receiverExpression, env)
                     candidates += Candidate(null, null, current, resolvedMember = member)
@@ -1879,7 +1881,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
                 val struct = current as? GoStruct
                 if (struct == null) {
-                    if (current is GoRuntimeErrorValue && name == "Error") {
+                    if (current is GoRuntimeErrorValue && name in setOf("Error", "RuntimeError")) {
                         candidates += Candidate(null, null, current, current)
                         return@forEach
                     }
@@ -1909,7 +1911,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val candidate = candidates.single()
                 candidate.resolvedMember?.let { return it }
                 candidate.owner?.let { owner -> return owner.fields[name] }
-                candidate.runtimeError?.let { return RuntimeErrorMethodValue(it) }
+                candidate.runtimeError?.let { return RuntimeErrorMethodValue(it, name) }
                 val method = candidate.method ?: throw RuntimeGoError("unknown selector $name")
                 val pointerReceiver = method.receiver?.type is PointerGoType
                 val methodReceiver = when {
@@ -2201,8 +2203,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 return if (exportedValues.isEmpty()) null else if (exportedValues.size == 1) exportedValues.single() else GoMultiValue(exportedValues)
             }
             is RuntimeErrorMethodValue -> {
-                if (args.isNotEmpty()) throw RuntimeGoError("Error expects no arguments")
-                return GoString(target.receiver.message.toByteArray(Charsets.UTF_8), NamedGoType("string"))
+                if (args.isNotEmpty()) throw RuntimeGoError("${target.name} expects no arguments")
+                return if (target.name == "Error")
+                    GoString(target.receiver.message.toByteArray(Charsets.UTF_8), NamedGoType("string"))
+                else null
             }
             is MethodExpressionValue -> {
                 val receiver = args.firstOrNull() ?: throw RuntimeGoError("method expression requires a receiver")
@@ -2728,7 +2732,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 value.owner.externalizeRuntimeType(signature, it) as FunctionGoType
             } ?: signature else signature
         }
-        is RuntimeErrorMethodValue -> value.type ?: FunctionGoType(emptyList(), listOf(NamedGoType("string")))
+        is RuntimeErrorMethodValue -> value.type ?: if (value.name == "Error")
+            FunctionGoType(emptyList(), listOf(NamedGoType("string"))) else FunctionGoType(emptyList(), emptyList())
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> NamedGoType("int")
@@ -3077,7 +3082,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val actual = underlying(type)
         if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
         if (type == runtimeErrorValueType) return mapOf(
-            "Error" to FunctionGoType(emptyList(), listOf(NamedGoType("string")))
+            "Error" to FunctionGoType(emptyList(), listOf(NamedGoType("string"))),
+            "RuntimeError" to FunctionGoType(emptyList(), emptyList())
         )
         val result = linkedMapOf<String, FunctionGoType>()
         data class SearchNode(val type: GoTypeSyntax, val pointer: Boolean, val ancestors: Set<String>)
@@ -4741,7 +4747,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     )
     private class PanicState(var activePanic: PanicSignal? = null, var recoverAllowed: Boolean = false)
     private data class GoRuntimeErrorValue(val message: String)
-    private data class RuntimeErrorMethodValue(val receiver: GoRuntimeErrorValue, val type: GoTypeSyntax? = null)
+    private data class RuntimeErrorMethodValue(
+        val receiver: GoRuntimeErrorValue,
+        val name: String,
+        val type: GoTypeSyntax? = null
+    )
     private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
         var recovered: Boolean = false
     }
