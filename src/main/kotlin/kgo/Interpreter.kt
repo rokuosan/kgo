@@ -551,7 +551,7 @@ class Interpreter(
             }
             is SendStatement -> {
                 val channel = evaluate(statement.channel, env)
-                val value = evaluate(statement.value, env)
+                val value = evaluate(statement.value, env, channelElementType(channel, statement.channel, env))
                 when (channel) {
                     is GoChannel -> channel.send(
                         if (underlying(channel.elementType) is InterfaceGoType)
@@ -801,7 +801,8 @@ class Interpreter(
                 null -> null
                 is SendStatement -> {
                     val channelValue = evaluate(communication.channel, env)
-                    val sendValue = evaluate(communication.value, env)
+                    val sendValue = evaluate(communication.value, env,
+                        channelElementType(channelValue, communication.channel, env))
                     val channel = selectChannelOrNull(channelValue) ?: return@mapIndexedNotNull null
                     val value = if (underlying(channel.elementType) is InterfaceGoType)
                         defaultConstantValue(sendValue, communication.value, env) else sendValue
@@ -2483,7 +2484,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private suspend fun evaluateCompositeValue(expression: Expression, type: GoTypeSyntax, env: Environment): Any? = when {
         expression !is ElidedCompositeLiteral -> {
-            val value = evaluate(expression, env)
+            val value = evaluate(expression, env, type)
             if (underlying(type) is InterfaceGoType) defaultConstantValue(value, expression, env) else value
         }
         underlying(type) is PointerGoType -> {
@@ -2491,6 +2492,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             addressableCell(composite(CompositeLiteral(pointerType.element, expression.elements), env), pointerType.element)
         }
         else -> composite(CompositeLiteral(type, expression.elements), env)
+    }
+
+    private fun channelElementType(channel: Any?, expression: Expression, env: Environment): GoTypeSyntax? = when (channel) {
+        is GoChannel -> channel.elementType
+        is GoNilValue -> (underlying(channel.type) as? ChannelGoType)?.element
+        else -> (staticExpressionType(expression, env)?.let(::underlying) as? ChannelGoType)?.element
     }
 
     private fun underlying(type: GoTypeSyntax): GoTypeSyntax = when (type) {
