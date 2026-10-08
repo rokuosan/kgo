@@ -2840,8 +2840,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             "Modf" -> {
                 count(1)
                 val value = x()
-                val integral = if (value < 0.0) ceil(value) else floor(value)
-                GoMultiValue(listOf(integral, value - integral))
+                if (value == 0.0) GoMultiValue(listOf(0.0, value))
+                else {
+                    val integral = if (value < 0.0) ceil(value) else floor(value)
+                    GoMultiValue(listOf(integral, value - integral))
+                }
             }
             "Frexp" -> {
                 count(1)
