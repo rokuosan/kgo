@@ -2526,7 +2526,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val receiver = evaluateIndexReceiver(expression.receiver, env)
             val key = collectionIndex(evaluate(expression.index, env, predeclaredIntRuntimeType), "index")
             when (receiver) {
-                is GoSlice -> receiver.pointerAt(key)
+                is GoSlice -> receiver.pointerAt(key).also { registerUnsafeSliceBacking(receiver) }
                 is GoArray -> receiver.pointerAt(key)
                 is GoPointer -> (receiver.get() as? GoArray)?.pointerAt(key)
                     ?: throw RuntimeGoError("address-of index requires pointer to array")
@@ -4377,6 +4377,30 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         return if (remainder == 0L) address else Math.addExact(address, alignment - remainder)
     }
 
+    private fun registerUnsafeSliceBacking(slice: GoSlice) {
+        val count = slice.backingLength()
+        if (count == 0) return
+        synchronized(unsafeAddressByLocation) {
+            val first = slice.backingPointerAt(0)
+            val firstIdentity = first.locationIdentity ?: return
+            if (unsafeAddressByLocation.containsKey(firstIdentity)) return
+            val layout = runCatching {
+                GoUnsafePackage.layout(slice.elementType, ::underlying) { integerLiteral(it, globals) }
+            }.getOrNull()
+            val alignment = layout?.align ?: 8L
+            val stride = layout?.size ?: 8L
+            val address = alignUnsafeAddress(nextUnsafeAddress, alignment)
+            val reservedSize = maxOf(8L, Math.multiplyExact(count.toLong(), stride))
+            nextUnsafeAddress = alignUnsafeAddress(Math.addExact(address, reservedSize), 8L)
+            repeat(count) { index ->
+                val pointer = slice.backingPointerAt(index)
+                val elementAddress = Math.addExact(address, Math.multiplyExact(index.toLong(), stride))
+                pointer.locationIdentity?.let { unsafeAddressByLocation.putIfAbsent(it, elementAddress) }
+                unsafePointerByAddress.putIfAbsent(elementAddress, pointer)
+            }
+        }
+    }
+
     private fun registerUnsafeSubaddresses(pointer: GoPointer, base: Long, ancestors: MutableSet<String>) {
         val identity = pointer.locationIdentity ?: return
         unsafeAddressByLocation.putIfAbsent(identity, base)
@@ -5808,6 +5832,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val absolute = start + index
             return elementPointer(backing, absolute, elementType)
         }
+        fun backingPointerAt(index: Int): GoPointer = elementPointer(backing, index, elementType)
+        fun backingLength(): Int = backing.size
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
             return GoSlice(elementType, backing, start + low, high - low, max - low, namedType, type, packagePath,
