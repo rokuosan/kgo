@@ -63,8 +63,16 @@ private fun isUnicodeScalarValue(codePoint: Int): Boolean =
 
 internal fun decodeGoStringLiteralBytes(text: String): ByteArray {
     if (text.length < 2) throw RuntimeGoError("invalid string literal")
-    if (text.first() == '`') return text.substring(1, text.length - 1).replace("\r", "")
-        .toByteArray(Charsets.UTF_8)
+    if (text.first() == '`') {
+        val body = text.substring(1, text.length - 1).replace("\r", "")
+        var offset = 0
+        while (offset < body.length) {
+            val codePoint = body.codePointAt(offset)
+            if (!isUnicodeScalarValue(codePoint)) throw RuntimeGoError("invalid Unicode code point")
+            offset += Character.charCount(codePoint)
+        }
+        return body.toByteArray(Charsets.UTF_8)
+    }
     val body = text.substring(1, text.length - 1)
     val bytes = mutableListOf<Byte>()
     fun appendCodePoint(codePoint: Int) { bytes += encodeGoCodePoint(codePoint).toList() }
