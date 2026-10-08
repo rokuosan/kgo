@@ -128,13 +128,15 @@ class Interpreter(
     private val output: (String) -> Unit = { print(it) },
     private val outputBytes: ((ByteArray) -> Unit)? = null
 ) {
+    private data class UnsafePointerLocation(val pointer: GoPointer, val byteOffset: Int)
+
     private val functions = mutableMapOf<String, FunctionDeclaration>()
     private val methods = mutableMapOf<String, FunctionDeclaration>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val globals = Environment()
     private val elementPointers = IdentityHashMap<MutableList<Any?>, MutableMap<Int, GoPointer>>()
     private val unsafeAddressByLocation = IdentityHashMap<Any, Long>()
-    private val unsafePointerByAddress = mutableMapOf<Long, MutableList<GoPointer>>()
+    private val unsafePointerByAddress = mutableMapOf<Long, MutableList<UnsafePointerLocation>>()
     private var nextUnsafeAddress = 0x10000L
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
@@ -4391,9 +4393,15 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun rememberUnsafePointer(address: Long, pointer: GoPointer) {
-        val pointers = unsafePointerByAddress.getOrPut(address) { mutableListOf() }
-        if (pointers.none { it.locationIdentity === pointer.locationIdentity && it.pointeeType == pointer.pointeeType })
-            pointers += pointer
+        rememberUnsafePointer(address, pointer, 0)
+    }
+
+    private fun rememberUnsafePointer(address: Long, pointer: GoPointer, byteOffset: Int) {
+        val locations = unsafePointerByAddress.getOrPut(address) { mutableListOf() }
+        if (locations.none {
+                it.pointer.locationIdentity === pointer.locationIdentity &&
+                    it.pointer.pointeeType == pointer.pointeeType && it.byteOffset == byteOffset
+            }) locations += UnsafePointerLocation(pointer, byteOffset)
     }
 
     private fun alignUnsafeAddress(address: Long, alignment: Long): Long {
@@ -4430,6 +4438,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val identity = pointer.locationIdentity ?: return
         unsafeAddressByLocation.putIfAbsent(identity, base)
         rememberUnsafePointer(base, pointer)
+        pointer.pointeeType?.let(::unsafeScalarRepresentation)?.let { (_, bits) ->
+            repeat(bits / 8) { offset ->
+                if (offset > 0) rememberUnsafePointer(Math.addExact(base, offset.toLong()), pointer, offset)
+            }
+        }
         val type = pointer.pointeeType?.let(::underlying) ?: return
         val addressable = runCatching { pointer.get() }.getOrNull()
         val arrayLength: (Expression) -> BigInteger = { integerLiteral(it, globals) }
@@ -4467,17 +4480,20 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun unsafePointer(address: Long, elementType: GoTypeSyntax, pointerType: GoTypeSyntax): GoPointer {
         if (address == 0L) return GoPointer.nil(elementType, pointerType)
         synchronized(unsafeAddressByLocation) {
-            val pointers = unsafePointerByAddress[address].orEmpty()
-            val pointer = pointers.firstOrNull { it.pointeeType == elementType }
-                ?: pointers.firstOrNull { candidate ->
-                    candidate.pointeeType?.let { sameRuntimeType(it, elementType) } == true
-                }
+            val locations = unsafePointerByAddress[address].orEmpty()
+            val pointer = locations.firstOrNull { it.byteOffset == 0 && it.pointer.pointeeType == elementType }?.pointer
+                ?: locations.firstOrNull { location -> location.byteOffset == 0 &&
+                    location.pointer.pointeeType?.let { sameRuntimeType(it, elementType) } == true
+                }?.pointer
             if (pointer != null) return pointer.retype(elementType, pointerType)
-            val scalarSource = pointers.firstOrNull { candidate ->
-                candidate.pointeeType?.let { canUnsafeScalarView(it, elementType) } == true
+            val scalarSource = locations.firstOrNull { location ->
+                location.pointer.pointeeType?.let {
+                    canUnsafeScalarView(it, elementType, location.byteOffset)
+                } == true
             }
             if (scalarSource != null) return unsafeScalarPointerView(
-                scalarSource, scalarSource.pointeeType!!, elementType, pointerType
+                scalarSource.pointer, scalarSource.pointer.pointeeType!!, elementType, pointerType,
+                scalarSource.byteOffset
             )
             return GoPointer.address(address, elementType, pointerType)
         }
@@ -4496,26 +4512,28 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
     }
 
-    private fun canUnsafeScalarView(source: GoTypeSyntax, target: GoTypeSyntax): Boolean {
+    private fun canUnsafeScalarView(source: GoTypeSyntax, target: GoTypeSyntax, byteOffset: Int): Boolean {
         val sourceRepresentation = unsafeScalarRepresentation(source) ?: return false
         val targetRepresentation = unsafeScalarRepresentation(target) ?: return false
-        return targetRepresentation.second <= sourceRepresentation.second
+        return byteOffset >= 0 && targetRepresentation.second / 8 <= sourceRepresentation.second / 8 - byteOffset
     }
 
     private fun unsafeScalarPointerView(
         source: GoPointer,
         sourceType: GoTypeSyntax,
         targetType: GoTypeSyntax,
-        pointerType: GoTypeSyntax
+        pointerType: GoTypeSyntax,
+        byteOffset: Int
     ): GoPointer = source.view(targetType, pointerType,
         get = {
             val sourceBytes = encodeUnsafeScalar(source.get(), sourceType)
-            decodeUnsafeScalar(sourceBytes.copyOf(unsafeScalarWidth(targetType)), targetType)
+            val width = unsafeScalarWidth(targetType)
+            decodeUnsafeScalar(sourceBytes.copyOfRange(byteOffset, byteOffset + width), targetType)
         },
         set = { assigned ->
             val sourceBytes = encodeUnsafeScalar(source.get(), sourceType)
             val targetBytes = encodeUnsafeScalar(assigned, targetType)
-            targetBytes.copyInto(sourceBytes)
+            targetBytes.copyInto(sourceBytes, byteOffset)
             source.set(decodeUnsafeScalar(sourceBytes, sourceType))
         }
     )
