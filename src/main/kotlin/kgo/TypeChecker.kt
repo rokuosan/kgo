@@ -1680,8 +1680,10 @@ class TypeChecker(
             }
         }
         is BinaryExpression -> {
-            val left = expressionType(expression.left, scope)
-            val right = expressionType(expression.right, scope)
+            val logical = expression.operator == TokenKind.LAND || expression.operator == TokenKind.LOR
+            val logicalContext = expectedType?.takeIf(::isBoolean).takeIf { logical }
+            val left = expressionType(expression.left, scope, logicalContext)
+            val right = expressionType(expression.right, scope, logicalContext)
             if (expression.operator in setOf(TokenKind.SHL, TokenKind.SHR)) {
                 val shiftContext = if (nonConstantUntypedShift(expression, scope) != null && expectedType != null) {
                     if (underlying(expectedType) is InterfaceGoType)
@@ -1718,7 +1720,8 @@ class TypeChecker(
                     if (leftContext == null) left else expressionType(expression.left, scope, leftContext),
                     expression.operator,
                     if (rightContext == null) right else expressionType(expression.right, scope, rightContext),
-                    expression.left, expression.right, scope
+                    expression.left, expression.right, scope,
+                    expectedType?.takeIf { comparison && isBoolean(it) }
                 )
             }
         }
@@ -2551,10 +2554,17 @@ class TypeChecker(
         right: GoTypeSyntax,
         leftExpression: Expression? = null,
         rightExpression: Expression? = null,
-        scope: Scope = globals
+        scope: Scope = globals,
+        comparisonContext: GoTypeSyntax? = null
     ): GoTypeSyntax {
         var operandLeft = left
         var operandRight = right
+        if (operator in setOf(TokenKind.LAND, TokenKind.LOR, TokenKind.EQL, TokenKind.NEQ)) {
+            if (leftExpression?.let(::isComparisonExpression) == true && isBoolean(operandRight) && !isUntyped(operandRight))
+                operandLeft = operandRight
+            if (rightExpression?.let(::isComparisonExpression) == true && isBoolean(operandLeft) && !isUntyped(operandLeft))
+                operandRight = operandLeft
+        }
         if (operator != TokenKind.SHL && operator != TokenKind.SHR) {
             if (leftExpression?.let { nonConstantUntypedShift(it, scope) } != null &&
                 !isUntyped(operandRight) && isInteger(operandRight)) {
@@ -2610,12 +2620,12 @@ class TypeChecker(
             } else if (!isComparable(operandLeft) || !isComparable(operandRight)) {
                 error("cannot compare values of type $operandLeft and $operandRight")
             }
-            return comparisonResultType()
+            return comparisonResultType(comparisonContext)
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
             if (!((isOrderedNumeric(operandLeft) && isOrderedNumeric(operandRight)) || (isString(operandLeft) && isString(operandRight)))) error("invalid ordered comparison")
             requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
-            return comparisonResultType()
+            return comparisonResultType(comparisonContext)
         }
         if (operator == TokenKind.ADD && isString(operandLeft) && isString(operandRight)) {
             requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
@@ -2677,7 +2687,13 @@ class TypeChecker(
         }
     }
 
-    private fun comparisonResultType(): GoTypeSyntax = predeclaredBoolType
+    private fun comparisonResultType(expectedType: GoTypeSyntax? = null): GoTypeSyntax =
+        expectedType?.takeIf(::isBoolean) ?: predeclaredBoolType
+
+    private fun isComparisonExpression(expression: Expression): Boolean =
+        (expression.unparenthesized() as? BinaryExpression)?.operator in setOf(
+            TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ
+        )
 
     private fun requireSameOperands(
         left: GoTypeSyntax,
@@ -2746,7 +2762,10 @@ class TypeChecker(
                 )
             } else error("left operand of shift must be integer in this context")
         }
-        val contextualFrom = if (expression != null && containsNonConstantUntypedShift(expression, scope)) {
+        val contextualFrom = if (expression != null && (
+                containsNonConstantUntypedShift(expression, scope) ||
+                    isBoolean(to) && containsBooleanComparison(expression)
+            )) {
             val contextualType = if (underlying(to) is InterfaceGoType) {
                 if (isUntyped(from)) defaultType(from) else from
             } else to
@@ -2759,6 +2778,15 @@ class TypeChecker(
         if (!assignable(contextualFrom, to) && !integralFloatConstant && !comparisonResultAssignable)
             error("cannot use $contextualFrom as $to in $context")
         expression?.let { requireIntegerConstantRepresentable(it, to, scope) }
+    }
+
+    private fun containsBooleanComparison(expression: Expression): Boolean = when (expression) {
+        is ParenthesizedExpression -> containsBooleanComparison(expression.expression)
+        is BinaryExpression -> expression.operator in setOf(
+            TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ
+        ) || expression.operator in setOf(TokenKind.LAND, TokenKind.LOR) &&
+            (containsBooleanComparison(expression.left) || containsBooleanComparison(expression.right))
+        else -> false
     }
 
     private fun nonConstantUntypedShift(expression: Expression, scope: Scope): BinaryExpression? {
