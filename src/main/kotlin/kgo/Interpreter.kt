@@ -572,7 +572,7 @@ class Interpreter(
                     ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = adaptCallArguments(call, target,
-                    evaluateCallArguments(call, env, callParameterTypes(target)), env)
+                    evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call)), env)
                 goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState(), environment = env) }
             }
             is DeferStatement -> {
@@ -580,7 +580,7 @@ class Interpreter(
                     ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
                 val arguments = adaptCallArguments(call, target,
-                    evaluateCallArguments(call, env, callParameterTypes(target)), env)
+                    evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call)), env)
                 env.defer { call(target, arguments, call.expandLastArgument, env.panicState, deferredCall = true, environment = env) }
             }
             is BranchStatement -> when (statement.kind) {
