@@ -1405,6 +1405,8 @@ class TypeChecker(
                         leftBoolean != null && rightBoolean != null -> leftBoolean == rightBoolean
                         constantRational(expression.left, scope) != null && constantRational(expression.right, scope) != null ->
                             constantRational(expression.left, scope) == constantRational(expression.right, scope)
+                        constantComplex(expression.left, scope) != null && constantComplex(expression.right, scope) != null ->
+                            constantComplex(expression.left, scope) == constantComplex(expression.right, scope)
                         constantStringIdentity(expression.left, scope) != null && constantStringIdentity(expression.right, scope) != null ->
                             constantStringIdentity(expression.left, scope) == constantStringIdentity(expression.right, scope)
                         else -> null
