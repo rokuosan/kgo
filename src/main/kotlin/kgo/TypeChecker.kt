@@ -1808,14 +1808,21 @@ class TypeChecker(
     }
 
     private fun methodExpressionReceiver(expression: Expression, scope: Scope): GoTypeSyntax? = when (expression) {
+        is NameExpression, is SelectorExpression -> methodExpressionBaseType(expression, scope)
+        is ParenthesizedExpression -> {
+            val pointer = expression.expression as? UnaryExpression
+            if (pointer?.operator == TokenKind.MUL)
+                methodExpressionBaseType(pointer.operand, scope)?.let(::PointerGoType)
+            else null
+        }
+        else -> null
+    }
+
+    private fun methodExpressionBaseType(expression: Expression, scope: Scope): GoTypeSyntax? = when (expression) {
         is NameExpression -> if (scope.getOrNull(expression.name) != null || !isTypeName(expression.name, scope)) null else {
             resolveLocalType(scope.typeBinding(expression.name)?.let(::NamedGoType) ?: NamedGoType(expression.name), scope)
         }
-        is ParenthesizedExpression -> methodExpressionReceiver(expression.expression, scope)
         is SelectorExpression -> importedPackageType(expression, scope)
-        is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
-            methodExpressionReceiver(expression.operand, scope)?.let(::PointerGoType)
-        } else null
         else -> null
     }
 

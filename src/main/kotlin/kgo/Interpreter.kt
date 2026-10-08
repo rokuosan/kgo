@@ -1748,21 +1748,28 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun methodExpressionReceiver(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
+        is NameExpression, is SelectorExpression -> methodExpressionBaseType(expression, env)
+        is ParenthesizedExpression -> {
+            val pointer = expression.expression as? UnaryExpression
+            if (pointer?.operator == TokenKind.MUL)
+                methodExpressionBaseType(pointer.operand, env)?.let(::PointerGoType)
+            else null
+        }
+        else -> null
+    }
+
+    private fun methodExpressionBaseType(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
         is NameExpression -> if (env.contains(expression.name)) null else {
             env.typeBinding(expression.name) ?: if (expression.name in env.imports.packages) null
             else typeDefinitions[expression.name]?.let { NamedGoType(expression.name) }
                 ?: if (expression.name in builtinTypes) NamedGoType(expression.name) else null
         }
-        is ParenthesizedExpression -> methodExpressionReceiver(expression.expression, env)
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
             val path = alias?.let(env.imports.packages::get)
             if (path != null && expression.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty())
                 QualifiedGoType(path, expression.field) else null
         }
-        is UnaryExpression -> if (expression.operator == TokenKind.MUL) {
-            methodExpressionReceiver(expression.operand, env)?.let(::PointerGoType)
-        } else null
         else -> null
     }
 
