@@ -373,7 +373,7 @@ class Interpreter(
             parent,
             panicState = panicState,
             imports = functionImports[function] ?: parent.imports
-        )
+        ).also { it.functionResultTypes = signature.results }
         function.receiver?.let { env.define(it.name ?: "", copyForType(receiver, it.type), it.type) }
         function.parameters.zip(boundArguments).forEachIndexed { i, (name, value) ->
             name?.let { parameterName ->
@@ -510,7 +510,9 @@ class Interpreter(
             is BlockStatement -> executeBlock(statement, env)
             is VariableStatement -> initialize(statement.names, statement.values, env, statement.type)
             is ReturnStatement -> {
-                val evaluated = statement.values.map { copyValue(evaluate(it, env)) }
+                val evaluated = statement.values.mapIndexed { index, value ->
+                    copyValue(evaluate(value, env, env.functionResultTypes.getOrNull(index)))
+                }
                 val values = if (statement.values.size == 1 && evaluated.singleOrNull() is GoMultiValue)
                     (evaluated.single() as GoMultiValue).values else evaluated
                 val runeConstants = if (values.size == statement.values.size) statement.values.mapIndexed { index, expression ->
@@ -563,14 +565,16 @@ class Interpreter(
                 val call = statement.call.unparenthesized() as? CallExpression
                     ?: throw RuntimeGoError("go statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = adaptCallArguments(call, target, evaluateCallArguments(call, env), env)
+                val arguments = adaptCallArguments(call, target,
+                    evaluateCallArguments(call, env, callParameterTypes(target)), env)
                 goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState(), environment = env) }
             }
             is DeferStatement -> {
                 val call = statement.call.unparenthesized() as? CallExpression
                     ?: throw RuntimeGoError("defer statement requires a function call")
                 val target = evaluate(call.function, env)
-                val arguments = adaptCallArguments(call, target, evaluateCallArguments(call, env), env)
+                val arguments = adaptCallArguments(call, target,
+                    evaluateCallArguments(call, env, callParameterTypes(target)), env)
                 env.defer { call(target, arguments, call.expandLastArgument, env.panicState, deferredCall = true, environment = env) }
             }
             is BranchStatement -> when (statement.kind) {
@@ -597,7 +601,9 @@ class Interpreter(
             // then performs writes left-to-right. Resolve every target before evaluating the RHS.
             val locations = statement.targets.map { resolveTarget(it, env) }
             val previous = if (statement.operator == TokenKind.ASSIGN) emptyList() else locations.map { it.get() }
-            val values = expandValues(evaluateRhs(statement.values, statement.targets.size, env), statement.targets.size)
+            val values = expandValues(evaluateRhs(
+                statement.values, statement.targets.size, env, locations.map { it.type ?: NamedGoType("int") }
+            ), statement.targets.size)
             assignToLocations(locations, statement.operator, assignedValues(locations, values, statement.values, env), previous)
         }
     }
@@ -1408,7 +1414,9 @@ class Interpreter(
 
     private suspend fun initialize(names: List<String>, expressions: List<Expression>, env: Environment, type: GoTypeSyntax? = null) {
         val resolvedType = type?.let { resolveRuntimeType(it, env) }
-        val values = expandValues(evaluateRhs(expressions, names.size, env), names.size)
+        val values = expandValues(evaluateRhs(
+            expressions, names.size, env, resolvedType?.let { type -> List(expressions.size) { type } }
+        ), names.size)
         if (values.isNotEmpty() && values.size != names.size) throw RuntimeGoError("initializer count mismatch")
         names.forEachIndexed { i, name ->
             val value = if (values.isNotEmpty()) values[i].let {
@@ -1437,14 +1445,14 @@ class Interpreter(
         val scope = target.child()
         val iotaIsShadowed = "iota" in scope.imports.packages ||
             if (target === globals) packageShadowsIota else target.binding("iota") != null
-        if (!iotaIsShadowed) scope.define("iota", BigInteger.valueOf(declaration.iotaIndex.toLong()))
+        if (!iotaIsShadowed) scope.defineConstant("iota", BigInteger.valueOf(declaration.iotaIndex.toLong()))
         val values = expandValues(declaration.values.map { evaluate(it, scope) }, declaration.names.size)
         if (values.size != declaration.names.size) throw RuntimeGoError("constant initializer count mismatch")
         declaration.names.zip(values).forEachIndexed { index, (name, value) ->
             val expression = declaration.values.getOrNull(index)
             val initialized = resolvedType?.let { convert(it, defaultRuneValue(value, expression, scope)) } ?: value
             val type = resolvedType ?: if (expression != null && isRuneConstantExpression(expression, scope)) untypedRuneRuntimeType else null
-            if (name != "_") target.define(name, initialized, type)
+            if (name != "_") target.defineConstant(name, initialized, type)
         }
     }
 
@@ -1511,7 +1519,9 @@ class Interpreter(
         )
     }
 
-    private suspend fun evaluateRhs(expressions: List<Expression>, arity: Int, env: Environment): List<Any?> {
+    private suspend fun evaluateRhs(
+        expressions: List<Expression>, arity: Int, env: Environment, expectedTypes: List<GoTypeSyntax>? = null
+    ): List<Any?> {
         if (expressions.size == 1 && arity == 2 && expressions[0] is TypeAssertionExpression) {
             val assertion = expressions[0] as TypeAssertionExpression
             return listOf(assertType(evaluate(assertion.receiver, env), assertion.type))
@@ -1538,10 +1548,10 @@ class Interpreter(
                 return listOf(MapLookupResult(zeroValue(mapType.value), false))
             }
         }
-        return expressions.map { evaluate(it, env) }
+        return expressions.mapIndexed { index, expression -> evaluate(expression, env, expectedTypes?.getOrNull(index)) }
     }
 
-private suspend fun evaluate(expression: Expression, env: Environment): Any? = when (expression) {
+private suspend fun evaluate(expression: Expression, env: Environment, expectedType: GoTypeSyntax? = null): Any? = when (expression) {
         is NameExpression -> {
             val binding = env.binding(expression.name)
             val dotImportedFunction = env.imports.dotPackages.firstNotNullOfOrNull { path ->
@@ -1584,7 +1594,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 }
         }
         is LiteralExpression -> literal(expression.token)
-        is ParenthesizedExpression -> evaluate(expression.expression, env)
+        is ParenthesizedExpression -> evaluate(expression.expression, env, expectedType)
         is UnaryExpression -> when (expression.operator) {
             TokenKind.AND -> addressOf(expression.operand, env)
             TokenKind.MUL -> {
@@ -1598,7 +1608,16 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             else -> unary(expression.operator, evaluate(expression.operand, env))
         }
         is BinaryExpression -> {
-            val left = copyValue(evaluate(expression.left, env))
+            val shift = expression.takeIf { it.operator == TokenKind.SHL || it.operator == TokenKind.SHR }
+            val untypedShiftLeft = shift != null && isUntypedIntegerRuntimeExpression(expression.left, env)
+            val constantShift = untypedShiftLeft && isRuntimeConstantExpression(expression.right, env)
+            val directShiftContext = if (untypedShiftLeft && !constantShift)
+                expectedType?.takeUnless { underlying(it) is InterfaceGoType } ?: predeclaredIntRuntimeType else null
+            val leftShiftContext = if (shift == null && isNonConstantUntypedShiftRuntimeExpression(expression.left, env))
+                contextualIntegerType(expression.right, env) ?: expectedType else null
+            val rightShiftContext = if (shift == null && isNonConstantUntypedShiftRuntimeExpression(expression.right, env))
+                contextualIntegerType(expression.left, env) ?: expectedType else null
+            val left = copyValue(evaluate(expression.left, env, leftShiftContext))
             if (expression.operator == TokenKind.LAND || expression.operator == TokenKind.LOR) {
                 val leftBoolean = booleanValue(left, expression.operator.name)
                 val result = when {
@@ -1608,8 +1627,13 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 }
                 logicalResultType(expression.left, left, expression.right, env)?.let { GoBoolean(result, it) } ?: result
             } else {
-                val right = copyValue(evaluate(expression.right, env))
-                if (expression.operator == TokenKind.EQL || expression.operator == TokenKind.NEQ) {
+                val right = copyValue(evaluate(expression.right, env, rightShiftContext))
+                if (constantShift) {
+                    exactConstantBinary(left, expression.operator, right)
+                } else if (directShiftContext != null) {
+                    val typedLeft = convert(directShiftContext, defaultRuneValue(left, expression.left, env))
+                    binary(typedLeft, expression.operator, right)
+                } else if (expression.operator == TokenKind.EQL || expression.operator == TokenKind.NEQ) {
                     val (comparedLeft, comparedRight) = interfaceComparisonOperands(
                         expression.left, left, expression.right, right, env
                     )
@@ -1937,9 +1961,10 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
     private suspend fun call(call: CallExpression, env: Environment): Any? {
         val parenthesizedType = call.function.unparenthesized() as? TypeExpression
         if (parenthesizedType != null && call.arguments.size == 1 && !call.expandLastArgument) {
-            val value = evaluate(call.arguments.single(), env)
+            val targetType = resolveRuntimeType(parenthesizedType.type, env)
+            val value = evaluate(call.arguments.single(), env, targetType)
             val source = call.arguments.single()
-            return convert(resolveRuntimeType(parenthesizedType.type, env), defaultRuneValue(value, source, env))
+            return convert(targetType, defaultRuneValue(value, source, env))
         }
         unsafeIntrinsicName(call.function, env)?.let { name ->
             val argument = call.arguments.singleOrNull() ?: throw RuntimeGoError("unsafe intrinsic requires one argument")
@@ -1954,7 +1979,7 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             staticRangeArrayLength(call.arguments.single(), env)?.let { return it.toLong() }
         }
         val target = evaluate(call.function, env)
-        val rawArgs = evaluateCallArguments(call, env)
+        val rawArgs = evaluateCallArguments(call, env, callParameterTypes(target))
         val args = adaptCallArguments(call, target, rawArgs, env).let { arguments ->
             if (target is TypeValue && arguments.size == 1 && call.arguments.size == 1 && !call.expandLastArgument)
                 listOf(defaultRuneValue(arguments.single(), call.arguments.single(), env))
@@ -2017,13 +2042,29 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         }
     }
 
-    private suspend fun evaluateCallArguments(call: CallExpression, env: Environment): List<Any?> {
+    private fun callParameterTypes(target: Any?): List<GoTypeSyntax> = when (target) {
+        is FunctionValue -> target.owner.checkedFunctionType(target.function).parameters.map { it.type }
+        is MethodValue -> target.owner.checkedFunctionType(target.function).parameters.map { it.type }
+        is MethodExpressionValue -> (target.type as? FunctionGoType)?.parameters?.map { it.type }.orEmpty()
+        else -> emptyList()
+    }
+
+    private suspend fun evaluateCallArguments(
+        call: CallExpression, env: Environment, expectedTypes: List<GoTypeSyntax> = emptyList()
+    ): List<Any?> {
+        runtimeTypeConversion(call, env)?.let { conversionType ->
+            if (!call.expandLastArgument && call.arguments.size == 1) {
+                val value = evaluate(call.arguments.single(), env, conversionType)
+                if (value is GoMultiValue) return value.values.map(::copyValue)
+                return listOf(copyValue(value))
+            }
+        }
         if (!call.expandLastArgument && call.arguments.size == 1) {
-            val value = evaluate(call.arguments.single(), env)
+            val value = evaluate(call.arguments.single(), env, expectedTypes.singleOrNull())
             if (value is GoMultiValue) return value.values.map(::copyValue)
             return listOf(copyValue(value))
         }
-        return call.arguments.map { copyValue(evaluate(it, env)) }
+        return call.arguments.mapIndexed { index, expression -> copyValue(evaluate(expression, env, expectedTypes.getOrNull(index))) }
     }
 
     private fun runtimeTypeConversion(call: CallExpression, env: Environment): GoTypeSyntax? = when (val target = call.function.unparenthesized()) {
@@ -4319,6 +4360,60 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         return decodeGoUtf8Rune(bytes, offset)
     }
 
+    private fun contextualIntegerType(expression: Expression, env: Environment): GoTypeSyntax? {
+        val type = staticExpressionType(expression, env) ?: when (val value = expression.unparenthesized()) {
+            is BinaryExpression -> staticExpressionType(value.left, env) ?: staticExpressionType(value.right, env)
+            else -> null
+        }
+        return type?.let { resolveRuntimeType(it, env) }?.takeIf { resolved ->
+            (underlying(resolved) as? NamedGoType)?.name in integerTypeNames
+        }
+    }
+
+    private fun isNonConstantUntypedShiftRuntimeExpression(expression: Expression, env: Environment): Boolean {
+        val shift = expression.unparenthesized() as? BinaryExpression ?: return false
+        return shift.operator in setOf(TokenKind.SHL, TokenKind.SHR) &&
+            isUntypedIntegerRuntimeExpression(shift.left, env) && !isRuntimeConstantExpression(shift.right, env)
+    }
+
+    private fun isUntypedIntegerRuntimeExpression(expression: Expression, env: Environment): Boolean = when (expression) {
+        is LiteralExpression -> expression.token.kind in setOf(TokenKind.INT, TokenKind.CHAR, TokenKind.FLOAT)
+        is NameExpression -> env.isConstant(expression.name) && env.typeOf(expression.name) == null
+        is ParenthesizedExpression -> isUntypedIntegerRuntimeExpression(expression.expression, env)
+        is UnaryExpression -> expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.XOR) &&
+            isUntypedIntegerRuntimeExpression(expression.operand, env)
+        is BinaryExpression -> expression.operator !in setOf(
+            TokenKind.SHL, TokenKind.SHR, TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ,
+            TokenKind.GTR, TokenKind.GEQ, TokenKind.LAND, TokenKind.LOR
+        ) && isUntypedIntegerRuntimeExpression(expression.left, env) &&
+            isUntypedIntegerRuntimeExpression(expression.right, env)
+        else -> false
+    }
+
+    private fun isRuntimeConstantExpression(expression: Expression, env: Environment): Boolean = when (expression) {
+        is LiteralExpression -> expression.token.kind in setOf(
+            TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING
+        )
+        is NameExpression -> env.isConstant(expression.name)
+        is ParenthesizedExpression -> isRuntimeConstantExpression(expression.expression, env)
+        is UnaryExpression -> expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.NOT, TokenKind.XOR) &&
+            isRuntimeConstantExpression(expression.operand, env)
+        is BinaryExpression -> isRuntimeConstantExpression(expression.left, env) &&
+            isRuntimeConstantExpression(expression.right, env)
+        is CallExpression -> {
+            val builtin = (expression.function as? NameExpression)?.name
+            val constantLength = builtin in setOf("len", "cap") && expression.arguments.size == 1 &&
+                builtin?.let { !env.contains(it) && env.typeBinding(it) == null && it !in env.imports.packages &&
+                    it !in functions && !typeDefinitions.containsKey(it) } == true &&
+                !containsCallOrReceive(expression.arguments.single(), env) &&
+                (isRuntimeConstantExpression(expression.arguments.single(), env) ||
+                    staticRangeArrayLength(expression.arguments.single(), env) != null)
+            constantLength || (runtimeTypeConversion(expression, env) != null &&
+                expression.arguments.all { isRuntimeConstantExpression(it, env) })
+        }
+        else -> false
+    }
+
     private inner class Environment(
         private val parent: Environment? = null,
         private val deferredCalls: MutableList<suspend () -> Unit> = mutableListOf(),
@@ -4328,13 +4423,20 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
         private val values = mutableMapOf<String, Any?>()
         private val types = mutableMapOf<String, GoTypeSyntax>()
         private val namedTypes = mutableMapOf<String, NamedGoType>()
+        private val constants = mutableSetOf<String>()
         private val addresses = mutableMapOf<String, GoPointer>()
+        var functionResultTypes: List<GoTypeSyntax> = parent?.functionResultTypes.orEmpty()
         fun child() = Environment(this, deferredCalls, panicState, imports)
         fun containsLocal(name: String) = values.containsKey(name)
         fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
             values[name] = type?.let { copyForType(value, it) } ?: copyValue(value)
             if (type != null) types[name] = type
         }
+        fun defineConstant(name: String, value: Any?, type: GoTypeSyntax? = null) {
+            define(name, value, type)
+            constants += name
+        }
+        fun isConstant(name: String): Boolean = if (name in values) name in constants else parent?.isConstant(name) == true
         fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
         fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
         fun binding(name: String): Lookup? = when {
