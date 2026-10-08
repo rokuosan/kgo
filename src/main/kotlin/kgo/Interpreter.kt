@@ -1685,8 +1685,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val receiver = evaluate(expression.receiver, env)
                 if (receiver is GoPointer && receiver.isNil) {
                     val baseType = receiver.pointeeType ?: throw RuntimeGoError("nil pointer has no static type")
-                    val (owner, method) = methodDeclaration(baseType, expression.field)
-                        ?: throw RuntimeGoError("unknown field or method: ${expression.field}")
+                    val (owner, method) = methodDeclaration(baseType, expression.field) ?: run {
+                        if (runtimeMethodSet(PointerGoType(baseType)).containsKey(expression.field))
+                            throw RuntimeGoError("invalid memory address or nil pointer dereference")
+                        throw RuntimeGoError("unknown field or method: ${expression.field}")
+                    }
                     if (method.receiver?.type !is PointerGoType)
                         throw RuntimeGoError("invalid memory address or nil pointer dereference")
                     MethodValue(method, receiver, owner)
@@ -1821,8 +1824,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             level.forEach { node ->
                 if (node.value is GoPointer && node.value.isNil) {
                     val embeddedType = node.value.pointeeType
-                    if (embeddedType != null) methodDeclaration(embeddedType, name)?.let { (owner, method) ->
-                        candidates += Candidate(null, method, node.value, methodOwner = owner)
+                    if (embeddedType != null) {
+                        val directMethod = methodDeclaration(embeddedType, name)
+                        if (directMethod != null) {
+                            val (owner, method) = directMethod
+                            candidates += Candidate(null, method, node.value, methodOwner = owner)
+                        } else if (runtimeMethodSet(PointerGoType(embeddedType)).containsKey(name)) {
+                            throw RuntimeGoError("invalid memory address or nil pointer dereference")
+                        }
                     }
                     return@forEach
                 }
