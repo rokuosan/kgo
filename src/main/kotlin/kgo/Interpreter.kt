@@ -1067,11 +1067,9 @@ class Interpreter(
         else -> type
     }
 
-    private fun interfaceOperandType(expression: Expression, env: Environment): GoTypeSyntax = when (expression) {
-        is NameExpression -> env.typeOf(expression.name) ?: InterfaceGoType(emptyList())
-        is ParenthesizedExpression -> interfaceOperandType(expression.expression, env)
-        else -> InterfaceGoType(emptyList())
-    }
+    private fun interfaceOperandType(expression: Expression, env: Environment): GoTypeSyntax =
+        staticExpressionType(expression, env)?.takeIf { underlying(it) is InterfaceGoType }
+            ?: InterfaceGoType(emptyList())
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
         val onlyIndexIsUsed = range.targets.size <= 1 || range.targets.getOrNull(1).isBlankIdentifier()
@@ -1242,6 +1240,8 @@ class Interpreter(
         is NameExpression -> env.typeOf(expression.name) ?: functions[expression.name]?.let(::checkedFunctionType)
             ?: env.imports.dotPackages.firstNotNullOfOrNull { path ->
             importedRuntimePackages[path]?.exportedFunction(expression.name)?.function?.let { importedFunctionType(path, it) }
+        } ?: env.imports.dotPackages.firstNotNullOfOrNull { path ->
+            importedRuntimePackages[path]?.exportedIdentifierType(expression.name)
         }
         is ParenthesizedExpression -> staticExpressionType(expression.expression, env)
         is CompositeLiteral -> resolveRuntimeType(expression.type, env)
@@ -1253,6 +1253,7 @@ class Interpreter(
                 importedRuntimePackages[importedPath]?.exportedFunction(expression.field)?.function?.let {
                     return importedFunctionType(importedPath, it)
                 }
+                importedRuntimePackages[importedPath]?.exportedIdentifierType(expression.field)?.let { return it }
             }
             val receiverType = staticExpressionType(expression.receiver, env)?.let { resolveRuntimeType(it, env) }
             val method = receiverType?.let { methodDeclaration(it, expression.field) }
