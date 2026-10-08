@@ -1185,9 +1185,21 @@ class Interpreter(
                 catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                 catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
             }
-            is GoNilValue -> when (underlying(value.type)) {
+            is GoNilValue -> when (val type = underlying(value.type)) {
                 is SliceGoType, is MapGoType -> Unit
                 is ChannelGoType -> awaitCancellation()
+                is PointerGoType -> {
+                    val arrayType = underlying(type.element) as? ArrayGoType
+                        ?: throw RuntimeGoError("range over this pointer type is not implemented")
+                    val length = staticRangeArrayLength(range.expression, env)
+                        ?: throw RuntimeGoError("range over pointer requires an array with a known length")
+                    rangeIndexed(length, range, body, loopEnv, labels, declarationTypes) { index ->
+                        if (onlyIndexIsUsed) listOf(index.toLong()) else {
+                            val array = GoPointer.nil(arrayType, value.type).get() as GoArray
+                            listOf(index.toLong(), array.values[index])
+                        }
+                    }
+                }
                 else -> throw RuntimeGoError("range over this value is not implemented")
             }
             is GoString -> {
