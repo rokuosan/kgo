@@ -670,8 +670,20 @@ class TypeChecker(
         visit(body, 0, 0, emptySet(), emptySet())
     }
 
-    private fun endsWithGo10Exit(block: BlockStatement): Boolean =
-        block.statements.lastOrNull { it != EmptyStatement }?.let(::isGo10Exit) == true
+    private fun endsWithGo10Exit(block: BlockStatement): Boolean = endsWithGo10Exit(block.statements)
+
+    private fun endsWithGo10Exit(statements: List<Statement>): Boolean =
+        statements.lastOrNull { it != EmptyStatement }?.let(::isGo10Exit) == true
+
+    private fun switchExits(clauses: List<SwitchClause>): Boolean {
+        if (clauses.none { it.expressions == null }) return false
+        fun exitsFrom(index: Int): Boolean {
+            val statement = clauses.getOrNull(index)?.statements?.lastOrNull { it != EmptyStatement } ?: return false
+            val branch = unwrapLabels(statement) as? BranchStatement
+            return if (branch?.kind == TokenKind.FALLTHROUGH) exitsFrom(index + 1) else isGo10Exit(statement)
+        }
+        return clauses.indices.all(::exitsFrom)
+    }
 
     private fun isGo10Exit(statement: Statement): Boolean = when (statement) {
         is ReturnStatement -> true
@@ -680,6 +692,10 @@ class TypeChecker(
         is BlockStatement -> endsWithGo10Exit(statement)
         is IfStatement -> statement.elseBranch != null &&
             isGo10Exit(statement.thenBranch) && isGo10Exit(statement.elseBranch)
+        is SwitchStatement -> switchExits(statement.clauses)
+        is TypeSwitchStatement -> statement.clauses.any { it.types == null } &&
+            statement.clauses.all { endsWithGo10Exit(it.statements) }
+        is SelectStatement -> statement.cases.all { endsWithGo10Exit(it.statements) }
         is LabeledStatement -> isGo10Exit(statement.statement)
         else -> false
     }
