@@ -1068,7 +1068,7 @@ class Interpreter(
         // Keep that scope separate so a same-named variable in the enclosing block
         // is shadowed, and reuse the new bindings across Go 1.0 loop iterations.
         val loopEnv = if (range.operator == TokenKind.DEFINE) env.child() else env
-        if (range.targets.size <= 1) {
+        if (range.targets.size <= 1 && !containsCallOrReceive(range.expression, env)) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
                 // Go 1.0 skips an array range expression when its length is constant
