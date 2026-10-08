@@ -539,35 +539,60 @@ class TypeChecker(
         return result
     }
 
-    private fun referencedNames(
-        expression: Expression,
-        isStructLiteral: (CompositeLiteral) -> Boolean = ::isStructCompositeLiteral
-    ): Set<String> = when (expression) {
+    private fun referencedNames(expression: Expression, expectedType: GoTypeSyntax? = null): Set<String> = when (expression) {
         is NameExpression -> setOf(expression.name)
         is LiteralExpression, is TypeExpression -> emptySet()
-        is UnaryExpression -> referencedNames(expression.operand, isStructLiteral)
-        is BinaryExpression -> referencedNames(expression.left, isStructLiteral) + referencedNames(expression.right, isStructLiteral)
-        is CallExpression -> referencedNames(expression.function, isStructLiteral) + expression.arguments.flatMap { referencedNames(it, isStructLiteral) }
-        is SelectorExpression -> referencedNames(expression.receiver, isStructLiteral)
-        is IndexExpression -> referencedNames(expression.receiver, isStructLiteral) + referencedNames(expression.index, isStructLiteral)
-        is SliceExpression -> referencedNames(expression.receiver, isStructLiteral) +
-            listOfNotNull(expression.low, expression.high).flatMap { referencedNames(it, isStructLiteral) }
-        is TypeAssertionExpression -> referencedNames(expression.receiver, isStructLiteral)
-        is TypeSwitchGuardExpression -> referencedNames(expression.receiver, isStructLiteral)
-        is ParenthesizedExpression -> referencedNames(expression.expression, isStructLiteral)
-        is CompositeLiteral -> expression.elements.flatMap { element ->
-            listOfNotNull(element.key.takeUnless { isStructLiteral(expression) }, element.value)
-                .flatMap { referencedNames(it, isStructLiteral) }
-        }.toSet()
-        is ElidedCompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value)
-            .flatMap { referencedNames(it, isStructLiteral) } }.toSet()
+        is UnaryExpression -> referencedNames(expression.operand)
+        is BinaryExpression -> referencedNames(expression.left) + referencedNames(expression.right)
+        is CallExpression -> referencedNames(expression.function) + expression.arguments.flatMap(::referencedNames)
+        is SelectorExpression -> referencedNames(expression.receiver)
+        is IndexExpression -> referencedNames(expression.receiver) + referencedNames(expression.index)
+        is SliceExpression -> referencedNames(expression.receiver) + listOfNotNull(expression.low, expression.high).flatMap(::referencedNames)
+        is TypeAssertionExpression -> referencedNames(expression.receiver)
+        is TypeSwitchGuardExpression -> referencedNames(expression.receiver)
+        is ParenthesizedExpression -> referencedNames(expression.expression)
+        is CompositeLiteral -> {
+            val literalType = runCatching { resolveLocalType(expression.type, globals) }.getOrNull()
+            referencedCompositeElements(expression.elements, literalType)
+        }
+        is ElidedCompositeLiteral -> referencedCompositeElements(expression.elements, expectedType)
         is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
-            expression.parameters, expression.resultNames, expression.body, isStructLiteral = isStructLiteral
+            expression.parameters, expression.resultNames, expression.body,
+            compositeType = ::dependencyCompositeType
         )
     }
 
-    private fun isStructCompositeLiteral(literal: CompositeLiteral): Boolean =
-        runCatching { underlying(resolveLocalType(literal.type, globals)) is StructGoType }.getOrDefault(false)
+    private fun referencedCompositeElements(
+        elements: List<CompositeElement>,
+        literalType: GoTypeSyntax?
+    ): Set<String> {
+        val actual = literalType?.let { type ->
+            val resolved = runCatching { resolveLocalType(type, globals) }.getOrDefault(type)
+            val unwrapped = underlying(resolved)
+            if (unwrapped is PointerGoType) underlying(unwrapped.element) else unwrapped
+        }
+        val fields = (actual as? StructGoType)?.fields?.flatMap { field ->
+            field.names.ifEmpty { listOf(embeddedFieldName(field.type)) }.map { it to field.type }
+        }.orEmpty()
+        return elements.flatMapIndexed { index, element ->
+            val fieldType = when (actual) {
+                is ArrayGoType -> actual.element
+                is SliceGoType -> actual.element
+                is MapGoType -> actual.value
+                is StructGoType -> {
+                    val fieldName = (element.key as? NameExpression)?.name
+                    if (fieldName != null) fields.firstOrNull { it.first == fieldName }?.second
+                    else fields.getOrNull(index)?.second
+                }
+                else -> null
+            }
+            listOfNotNull(element.key.takeUnless { actual is StructGoType }, element.value)
+                .flatMap { referencedNames(it, fieldType) }
+        }.toSet()
+    }
+
+    private fun dependencyCompositeType(literal: CompositeLiteral): GoTypeSyntax? =
+        runCatching { underlying(resolveLocalType(literal.type, globals)) }.getOrNull()
 
     private fun addFunctionDependencies(
         references: MutableSet<String>,
@@ -581,8 +606,8 @@ class TypeChecker(
             val function = pending.removeFirst()
             if (!visited.add(function)) continue
             val file = sourceFilesByFunction[function]
-            val functionReferences = if (file == null) GoPackageDependencies.functionReferences(function, ::isStructCompositeLiteral)
-                else withFileImports(file) { GoPackageDependencies.functionReferences(function, ::isStructCompositeLiteral) }
+            val functionReferences = if (file == null) GoPackageDependencies.functionReferences(function, ::dependencyCompositeType)
+                else withFileImports(file) { GoPackageDependencies.functionReferences(function, ::dependencyCompositeType) }
             references += functionReferences
             functionReferences.mapNotNull(functions::get).forEach(pending::addLast)
             calledMethodsByFunction[function].orEmpty().forEach(pending::addLast)
