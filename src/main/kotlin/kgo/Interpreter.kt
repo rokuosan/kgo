@@ -3959,7 +3959,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             else -> throw RuntimeGoError("invalid integer constant expression")
         }
-        is BinaryExpression -> {
+        is BinaryExpression -> if (containsFloatingArrayConstant(expression, env)) {
+            val value = rationalArrayConstant(expression, env)
+                ?: throw RuntimeGoError("array length is not a constant integer expression")
+            if (!value.isInteger()) throw RuntimeGoError("array length is not a constant integer expression")
+            value.numerator
+        } else {
             val left = integerLiteral(expression.left, env)
             val right = integerLiteral(expression.right, env)
             when (expression.operator) {
@@ -4013,6 +4018,49 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
         }
         else -> throw RuntimeGoError("array length is not a constant integer expression")
+    }
+
+    private fun containsFloatingArrayConstant(expression: Expression, env: Environment?): Boolean = when (expression) {
+        is LiteralExpression -> expression.token.kind == TokenKind.FLOAT
+        is NameExpression -> (env?.getOrNull(expression.name) ?: globals.getOrNull(expression.name)) is GoRational
+        is ParenthesizedExpression -> containsFloatingArrayConstant(expression.expression, env)
+        is UnaryExpression -> containsFloatingArrayConstant(expression.operand, env)
+        is BinaryExpression -> containsFloatingArrayConstant(expression.left, env) ||
+            containsFloatingArrayConstant(expression.right, env)
+        else -> false
+    }
+
+    private fun rationalArrayConstant(expression: Expression, env: Environment?): GoRational? = when (expression) {
+        is LiteralExpression -> when (expression.token.kind) {
+            TokenKind.INT -> GoRational.of(integer(expression.token.lexeme))
+            TokenKind.FLOAT -> GoRational.decimal(expression.token.lexeme)
+            else -> null
+        }
+        is NameExpression -> when (val value = env?.getOrNull(expression.name) ?: globals.getOrNull(expression.name)) {
+            is GoRational -> value
+            is GoInteger -> GoRational.of(integerValue(value, "array length"))
+            is BigInteger -> GoRational.of(value)
+            is Long -> GoRational.of(BigInteger.valueOf(value))
+            else -> null
+        }
+        is ParenthesizedExpression -> rationalArrayConstant(expression.expression, env)
+        is UnaryExpression -> rationalArrayConstant(expression.operand, env)?.let { value -> when (expression.operator) {
+            TokenKind.ADD -> value
+            TokenKind.SUB -> GoRational.of(value.numerator.negate(), value.denominator)
+            else -> null
+        } }
+        is BinaryExpression -> {
+            val left = rationalArrayConstant(expression.left, env)
+            val right = rationalArrayConstant(expression.right, env)
+            if (left == null || right == null) null else when (expression.operator) {
+                TokenKind.ADD -> left + right
+                TokenKind.SUB -> left - right
+                TokenKind.MUL -> left * right
+                TokenKind.QUO -> if (right.numerator.signum() == 0) null else left / right
+                else -> null
+            }
+        }
+        else -> null
     }
 
     private fun constantArrayLength(expression: Expression, env: Environment): BigInteger? {
