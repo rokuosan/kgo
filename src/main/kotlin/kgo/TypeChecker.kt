@@ -2020,7 +2020,9 @@ class TypeChecker(
     }
 
     private fun isAddressable(expression: Expression, scope: Scope): Boolean = when (expression) {
-        is NameExpression -> scope.isVariable(expression.name) || dotImportedVariable(expression.name) != null
+        is NameExpression -> scope.isVariable(expression.name) ||
+            (scope.getOrNull(expression.name) == null && scope.typeBinding(expression.name) == null &&
+                dotImportedVariable(expression.name) != null)
         is ParenthesizedExpression -> isAddressable(expression.expression, scope)
         is CompositeLiteral -> true
         is UnaryExpression -> expression.operator == TokenKind.MUL &&
@@ -2031,7 +2033,7 @@ class TypeChecker(
             is PointerGoType -> underlying(receiver.element) is ArrayGoType
             else -> false
         }
-        is SelectorExpression -> importedPackageVariable(expression) != null || selectorFieldAddressable(expression, scope)
+        is SelectorExpression -> importedPackageVariable(expression, scope) != null || selectorFieldAddressable(expression, scope)
         else -> false
     }
 
@@ -2039,8 +2041,9 @@ class TypeChecker(
         importedPackages[path]?.exportedVariableType(name, path)?.let { path to it }
     }
 
-    private fun importedPackageVariable(expression: SelectorExpression): Pair<String, GoTypeSyntax>? {
+    private fun importedPackageVariable(expression: SelectorExpression, scope: Scope): Pair<String, GoTypeSyntax>? {
         val alias = (expression.receiver as? NameExpression)?.name ?: return null
+        if (scope.getOrNull(alias) != null || scope.typeBinding(alias) != null) return null
         val path = packagePaths[alias] ?: return null
         if (standardPackageName(path) in setOf("fmt", "math", "unsafe")) return null
         return importedPackages[path]?.exportedVariableType(expression.field, path)?.let { path to it }
