@@ -1022,6 +1022,17 @@ class Interpreter(
         return sameRuntimeType(underlying(canonicalLeft), underlying(canonicalRight))
     }
 
+    private fun runtimeChannelAssignable(from: GoTypeSyntax, to: GoTypeSyntax): Boolean {
+        val canonicalFrom = canonicalAliasType(from)
+        val canonicalTo = canonicalAliasType(to)
+        val source = underlying(canonicalFrom) as? ChannelGoType ?: return false
+        val target = underlying(canonicalTo) as? ChannelGoType ?: return false
+        fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType &&
+            (!type.name.startsWith("#") || type.name.startsWith("#predeclared-"))
+        return source.direction == ChannelDirection.SEND_RECEIVE &&
+            sameRuntimeType(source.element, target.element) && (!isNamed(canonicalFrom) || !isNamed(canonicalTo))
+    }
+
     private fun containsStructLiteral(type: GoTypeSyntax): Boolean = when (type) {
         is PointerGoType -> containsStructLiteral(type.element)
         is SliceGoType -> containsStructLiteral(type.element)
@@ -4311,7 +4322,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             if (leftType is PointerGoType && rightType is PointerGoType)
                 return sameRuntimeType(leftType.element, rightType.element)
             if (leftType is ChannelGoType && rightType is ChannelGoType)
-                return compatibleRuntimeType(leftType.element, rightType.element)
+                return runtimeChannelAssignable(left.type, right.type) || runtimeChannelAssignable(right.type, left.type)
             return false
         }
         if (left is GoInterfaceValue || right is GoInterfaceValue) {

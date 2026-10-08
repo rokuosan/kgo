@@ -2588,19 +2588,7 @@ class TypeChecker(
         leftExpression: Expression?,
         rightExpression: Expression?,
         scope: Scope
-    ): Boolean {
-        if (constantOperandsAssignable(left, right, leftExpression, rightExpression, scope)) return true
-        val leftChannel = underlying(left) as? ChannelGoType ?: return false
-        val rightChannel = underlying(right) as? ChannelGoType ?: return false
-        if (isNamed(left) && isNamed(right)) return false
-        return compatibleType(leftChannel.element, rightChannel.element)
-    }
-
-    private fun compatibleType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
-        if (sameType(left, right)) return true
-        if (isNamed(left) == isNamed(right)) return false
-        return sameType(underlying(left), underlying(right))
-    }
+    ): Boolean = constantOperandsAssignable(left, right, leftExpression, rightExpression, scope)
 
     private fun constantOperandAssignable(
         from: GoTypeSyntax,
