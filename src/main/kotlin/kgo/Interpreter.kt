@@ -1248,7 +1248,9 @@ class Interpreter(
         is TypeAssertionExpression -> resolveRuntimeType(expression.type, env)
         is SelectorExpression -> {
             val packageAlias = (expression.receiver as? NameExpression)?.name
-            val importedPath = packageAlias?.let(env.imports.packages::get)
+            val importedPath = packageAlias
+                ?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
+                ?.let(env.imports.packages::get)
             if (importedPath != null) {
                 importedRuntimePackages[importedPath]?.exportedFunction(expression.field)?.function?.let {
                     return importedFunctionType(importedPath, it)
