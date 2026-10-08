@@ -33,6 +33,8 @@ class TypeChecker(
     private val checkedRuntimeTypeDeclarations = linkedMapOf<String, GoTypeSyntax>()
     private val checkedFunctionTypes = IdentityHashMap<FunctionDeclaration, FunctionGoType>()
     private val functions = linkedMapOf<String, FunctionDeclaration>()
+    private val sourceFilesByVariable = IdentityHashMap<VariableDeclaration, GoFile>()
+    private val sourceFilesByFunction = IdentityHashMap<FunctionDeclaration, GoFile>()
     private val initFunctions = mutableListOf<FunctionDeclaration>()
     private val methods = linkedMapOf<String, FunctionDeclaration>()
     private val packagePaths = linkedMapOf<String, String>()
@@ -77,6 +79,13 @@ class TypeChecker(
             if (initCount > 1) error("multiple init functions in one source file")
         }
         val declarations = files.flatMap { file -> file.declarations.map { file to it } }
+        sourceFilesByVariable.clear()
+        sourceFilesByFunction.clear()
+        declarations.forEach { (file, declaration) -> when (declaration) {
+            is VariableDeclaration -> sourceFilesByVariable[declaration] = file
+            is FunctionDeclaration -> sourceFilesByFunction[declaration] = file
+            else -> Unit
+        } }
         packageLevelNames = declarations.flatMap { (_, declaration) -> when (declaration) {
             is VariableDeclaration -> declaration.names
             is ConstantDeclaration -> declaration.names
@@ -475,7 +484,12 @@ class TypeChecker(
         }
         val dependencies = initializations.map { initialization ->
             val expressions = initialization.initializerExpressions()
-            val references = expressions.flatMapTo(linkedSetOf(), ::referencedNames)
+            val references = linkedSetOf<String>()
+            expressions.forEach { expression ->
+                val file = sourceFilesByVariable[initialization.declaration]
+                if (file == null) references += referencedNames(expression)
+                else withFileImports(file) { references += referencedNames(expression) }
+            }
             val methodDependencies = expressions.flatMap { calledMethodsByExpression[it].orEmpty() }
             addFunctionDependencies(references, methodDependencies)
             references.mapNotNull(ownerByName::get).distinct().toSet()
@@ -525,24 +539,35 @@ class TypeChecker(
         return result
     }
 
-    private fun referencedNames(expression: Expression): Set<String> = when (expression) {
+    private fun referencedNames(
+        expression: Expression,
+        isStructLiteral: (CompositeLiteral) -> Boolean = ::isStructCompositeLiteral
+    ): Set<String> = when (expression) {
         is NameExpression -> setOf(expression.name)
         is LiteralExpression, is TypeExpression -> emptySet()
-        is UnaryExpression -> referencedNames(expression.operand)
-        is BinaryExpression -> referencedNames(expression.left) + referencedNames(expression.right)
-        is CallExpression -> referencedNames(expression.function) + expression.arguments.flatMap(::referencedNames)
-        is SelectorExpression -> referencedNames(expression.receiver)
-        is IndexExpression -> referencedNames(expression.receiver) + referencedNames(expression.index)
-        is SliceExpression -> referencedNames(expression.receiver) + listOfNotNull(expression.low, expression.high).flatMap(::referencedNames)
-        is TypeAssertionExpression -> referencedNames(expression.receiver)
-        is TypeSwitchGuardExpression -> referencedNames(expression.receiver)
-        is ParenthesizedExpression -> referencedNames(expression.expression)
-        is CompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
-        is ElidedCompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value).flatMap(::referencedNames) }.toSet()
+        is UnaryExpression -> referencedNames(expression.operand, isStructLiteral)
+        is BinaryExpression -> referencedNames(expression.left, isStructLiteral) + referencedNames(expression.right, isStructLiteral)
+        is CallExpression -> referencedNames(expression.function, isStructLiteral) + expression.arguments.flatMap { referencedNames(it, isStructLiteral) }
+        is SelectorExpression -> referencedNames(expression.receiver, isStructLiteral)
+        is IndexExpression -> referencedNames(expression.receiver, isStructLiteral) + referencedNames(expression.index, isStructLiteral)
+        is SliceExpression -> referencedNames(expression.receiver, isStructLiteral) +
+            listOfNotNull(expression.low, expression.high).flatMap { referencedNames(it, isStructLiteral) }
+        is TypeAssertionExpression -> referencedNames(expression.receiver, isStructLiteral)
+        is TypeSwitchGuardExpression -> referencedNames(expression.receiver, isStructLiteral)
+        is ParenthesizedExpression -> referencedNames(expression.expression, isStructLiteral)
+        is CompositeLiteral -> expression.elements.flatMap { element ->
+            listOfNotNull(element.key.takeUnless { isStructLiteral(expression) }, element.value)
+                .flatMap { referencedNames(it, isStructLiteral) }
+        }.toSet()
+        is ElidedCompositeLiteral -> expression.elements.flatMap { listOfNotNull(it.key, it.value)
+            .flatMap { referencedNames(it, isStructLiteral) } }.toSet()
         is FunctionLiteralExpression -> GoPackageDependencies.functionLiteralReferences(
-            expression.parameters, expression.resultNames, expression.body
+            expression.parameters, expression.resultNames, expression.body, isStructLiteral = isStructLiteral
         )
     }
+
+    private fun isStructCompositeLiteral(literal: CompositeLiteral): Boolean =
+        runCatching { underlying(resolveLocalType(literal.type, globals)) is StructGoType }.getOrDefault(false)
 
     private fun addFunctionDependencies(
         references: MutableSet<String>,
@@ -555,7 +580,9 @@ class TypeChecker(
         while (pending.isNotEmpty()) {
             val function = pending.removeFirst()
             if (!visited.add(function)) continue
-            val functionReferences = GoPackageDependencies.functionReferences(function)
+            val file = sourceFilesByFunction[function]
+            val functionReferences = if (file == null) GoPackageDependencies.functionReferences(function, ::isStructCompositeLiteral)
+                else withFileImports(file) { GoPackageDependencies.functionReferences(function, ::isStructCompositeLiteral) }
             references += functionReferences
             functionReferences.mapNotNull(functions::get).forEach(pending::addLast)
             calledMethodsByFunction[function].orEmpty().forEach(pending::addLast)
