@@ -1355,12 +1355,7 @@ class TypeChecker(
             }
         }
         is CallExpression -> {
-            val target = when (val function = expression.function) {
-                is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
-                    NamedGoType(function.name) else null
-                else -> null
-            }
+            val target = constantConversionTarget(expression, scope)
             when {
                 expression.function == NameExpression("complex") && expression.arguments.size == 2 -> {
                     val real = constantRealValue(expression.arguments[0], scope)
@@ -1435,12 +1430,7 @@ class TypeChecker(
             }
         }
         is CallExpression -> {
-            val target = when (val function = expression.function) {
-                is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
-                    NamedGoType(function.name) else null
-                else -> null
-            }
+            val target = constantConversionTarget(expression, scope)
             if (target != null && underlying(target) == boolType && expression.arguments.size == 1 && !expression.expandLastArgument)
                 constantBoolean(expression.arguments.single(), scope) else null
         }
@@ -1461,12 +1451,7 @@ class TypeChecker(
             if (left != null && right != null) left + right else null
         } else null
         is CallExpression -> {
-            val target = when (val function = expression.function) {
-                is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
-                    NamedGoType(function.name) else null
-                else -> null
-            }
+            val target = constantConversionTarget(expression, scope)
             if (target == null || !isString(target) || expression.arguments.size != 1 || expression.expandLastArgument) null
             else constantStringIdentity(expression.arguments.single(), scope) ?: constantInteger(expression.arguments.single(), scope)?.let { value ->
                 val codePoint = runCatching { value.intValueExact() }.getOrNull()
@@ -3207,12 +3192,7 @@ class TypeChecker(
             isConstantExpression(expression.operand, scope)
         is BinaryExpression -> isConstantExpression(expression.left, scope) && isConstantExpression(expression.right, scope)
         is CallExpression -> {
-            val target = when (val function = expression.function) {
-                is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
-                    NamedGoType(function.name) else null
-                else -> null
-            }
+            val target = constantConversionTarget(expression, scope)
             when {
                 target != null -> expression.arguments.size == 1 && isConstantValueType(target) &&
                     isConstantExpression(expression.arguments.single(), scope)
@@ -3229,6 +3209,15 @@ class TypeChecker(
 
     private fun isConstantValueType(type: GoTypeSyntax): Boolean =
         isBoolean(type) || isNumeric(type) || isString(type)
+
+    private fun constantConversionTarget(call: CallExpression, scope: Scope): GoTypeSyntax? =
+        when (val function = call.function.unparenthesized()) {
+            is TypeExpression -> resolveLocalType(function.type, scope)
+            is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
+                resolveLocalType(NamedGoType(function.name), scope) else null
+            is SelectorExpression -> importedPackageType(function, scope)
+            else -> null
+        }
 
     private fun constantRational(expression: Expression, scope: Scope = globals): GoRational? = when (expression) {
         is NameExpression -> scope.constantRational(expression.name) ?: if (scope.getOrNull(expression.name) == null)
@@ -3278,12 +3267,7 @@ class TypeChecker(
                 }
         }
         is CallExpression -> {
-            val target = when (val function = expression.function) {
-                is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
-                    NamedGoType(function.name) else null
-                else -> null
-            }
+            val target = constantConversionTarget(expression, scope)
             if (target == null || !isNumeric(target) || expression.arguments.size != 1 || expression.expandLastArgument) null
             else constantRational(expression.arguments.single(), scope)
         }
@@ -3332,12 +3316,7 @@ class TypeChecker(
                 } else null
             } else null
             if (lengthConstant != null) lengthConstant else {
-                val target = when (val function = expression.function) {
-                    is TypeExpression -> function.type
-                    is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
-                        NamedGoType(function.name) else null
-                    else -> null
-                }
+                val target = constantConversionTarget(expression, scope)
                 if (target != null && isInteger(target) && expression.arguments.size == 1)
                     constantInteger(expression.arguments.single(), scope) else null
             }
@@ -3440,12 +3419,7 @@ class TypeChecker(
             if (left != null && right != null) left + right else null
         } else null
         is CallExpression -> {
-            val target = when (val function = expression.function) {
-                is TypeExpression -> function.type
-                is NameExpression -> if (scope.getOrNull(function.name) == null && isTypeName(function.name, scope))
-                    NamedGoType(function.name) else null
-                else -> null
-            }
+            val target = constantConversionTarget(expression, scope)
             if (target == null || !isString(target) || expression.arguments.size != 1 || expression.expandLastArgument) null
             else constantStringLength(expression.arguments.single(), scope) ?: constantInteger(expression.arguments.single(), scope)?.let { value ->
                 val codePoint = runCatching { value.intValueExact() }.getOrNull()
