@@ -3380,7 +3380,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 namedTypeName(type), type, namedTypePackage(type))
         }
         is SliceGoType -> {
-            if (value is GoString && (isByteElementType(target.element) || isRuneElementType(target.element))) {
+            if (type is SliceGoType && value is GoString &&
+                (isByteElementType(target.element) || isRuneElementType(target.element))) {
                 if (value.bytes.isEmpty()) GoNilValue(type)
                 else {
                     val converted = if (isByteElementType(target.element))
@@ -3425,8 +3426,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 is BigInteger -> GoString(encodeGoCodePoint(value), type)
                 is GoInteger -> GoString(encodeGoCodePoint(integerValue(value, "string conversion")), type)
                 is GoSlice -> when {
-                    isByteElementType(value.elementType) -> GoString(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), type)
-                    isRuneElementType(value.elementType) -> GoString(value.toList().flatMap {
+                    isByteOrRuneSlice(value.type ?: SliceGoType(value.elementType)) && isByteElementType(value.elementType) ->
+                        GoString(value.toList().map { number(it, "string conversion").toInt().toByte() }.toByteArray(), type)
+                    isByteOrRuneSlice(value.type ?: SliceGoType(value.elementType)) && isRuneElementType(value.elementType) ->
+                        GoString(value.toList().flatMap {
                         encodeGoCodePoint(number(it, "string conversion")).toList()
                     }.toByteArray(), type)
                     else -> throw RuntimeGoError("cannot convert slice to string")
@@ -3509,7 +3512,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun isByteElementType(type: GoTypeSyntax): Boolean =
         canonicalAliasType(type) == predeclaredUInt8RuntimeType
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
+        (type as? SliceGoType)?.element?.let { isByteElementType(it) || isRuneElementType(it) } == true
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
         canonicalAliasType(type) == predeclaredIntRuntimeType
@@ -3652,7 +3655,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             null -> emptyList()
             is GoString -> {
-                if (!isByteElementType(destinationType.element)) throw RuntimeGoError("copy from string requires a byte slice")
+                val destinationTypeSyntax = (destinationValue as? GoSlice)?.type
+                    ?: (destinationValue as? GoNilValue)?.type
+                    ?: SliceGoType(destinationType.element)
+                if (destinationTypeSyntax !is SliceGoType || !isByteElementType(destinationType.element))
+                    throw RuntimeGoError("copy from string requires a byte slice")
                 source.bytes.map { (it.toInt() and 0xff).toLong() }
             }
             else -> throw RuntimeGoError("copy source must be a slice or string")

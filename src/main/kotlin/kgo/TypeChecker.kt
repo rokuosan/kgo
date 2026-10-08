@@ -2424,7 +2424,8 @@ class TypeChecker(
                         if (!sameType(destination.element, source.element)) error("copy slice element types do not match")
                     destination is SliceGoType && types[1] == nilType -> Unit
                     destination is SliceGoType && isString(types[1]) ->
-                        if (!isByteElementType(destination.element)) error("copy from string requires a byte slice")
+                        if (types[0] !is SliceGoType || !isByteElementType((types[0] as SliceGoType).element))
+                            error("copy from string requires a byte slice")
                     types[0] == nilType && source is SliceGoType -> Unit
                     types[0] == nilType && isString(types[1]) -> Unit
                     else -> error("copy requires slices, or a byte slice and string")
@@ -2801,7 +2802,7 @@ class TypeChecker(
     }
 
     private fun isByteOrRuneSlice(type: GoTypeSyntax): Boolean {
-        val slice = underlying(type) as? SliceGoType ?: return false
+        val slice = type as? SliceGoType ?: return false
         return isByteElementType(slice.element) || isRuneElementType(slice.element)
     }
 
