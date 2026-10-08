@@ -3282,11 +3282,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     namedTypePackage(literal.type))
             }
             is ArrayGoType -> {
-                val indices = mutableListOf<Int>()
+                val entries = mutableListOf<Pair<Int, Any?>>()
                 var nextIndex = 0
                 literal.elements.forEach { element ->
                     val at = element.key?.let { compositeIndex(it, "array literal index", env) } ?: nextIndex
-                    indices += at
+                    if (at < 0 || at == Int.MAX_VALUE) throw RuntimeGoError("array literal index out of range")
+                    val value = copyForType(evaluateCompositeValue(element.value, type.element, env), type.element)
+                    entries += at to value
                     nextIndex = at + 1
                 }
                 val size = type.length?.let {
@@ -3295,15 +3297,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                         throw RuntimeGoError("array length out of range")
                     length.toInt()
                 }
-                    ?: (indices.maxOrNull()?.plus(1) ?: 0)
+                    ?: (entries.maxOfOrNull { it.first }?.plus(1) ?: 0)
                 if (size < 0) throw RuntimeGoError("negative array length")
                 val values = MutableList(size) { zeroValue(type.element) }
                 val usedIndices = mutableSetOf<Int>()
-                literal.elements.forEachIndexed { index, element ->
-                    val at = indices[index]
+                entries.forEach { (at, value) ->
                     if (at !in values.indices) throw RuntimeGoError("array literal index out of range")
                     if (!usedIndices.add(at)) throw RuntimeGoError("duplicate array literal index")
-                    values[at] = copyForType(evaluateCompositeValue(element.value, type.element, env), type.element)
+                    values[at] = value
                 }
                 GoArray(type.element, values, namedTypeName(literal.type), literal.type, namedTypePackage(literal.type))
             }
