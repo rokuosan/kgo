@@ -121,7 +121,6 @@ class Lexer(private val source: String) {
             val c = peek()
             if (c == quote) { advance(); return Token(TokenKind.STRING, source.substring(begin, offset), start) }
             if (quote == '`') {
-                if (c == '\r') { advance(); continue }
                 advance()
             } else {
                 if (c == '\n') throw ScanError("newline in interpreted string", start)
