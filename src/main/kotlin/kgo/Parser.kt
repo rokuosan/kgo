@@ -661,7 +661,7 @@ class Parser(private val tokens: List<Token>) {
     private fun List<Expression>.singleOrFail() = if (size == 1) single() else fail("expected one expression")
 
     companion object {
-        // Filled with legal assignment forms; communication statements are added with channel support.
+        // Sends are parsed as communication statements; these are assignment operators.
         private val assignmentOperators = setOf(TokenKind.ASSIGN, TokenKind.DEFINE, TokenKind.ADD_ASSIGN,
             TokenKind.SUB_ASSIGN, TokenKind.MUL_ASSIGN, TokenKind.QUO_ASSIGN, TokenKind.REM_ASSIGN,
             TokenKind.AND_ASSIGN, TokenKind.OR_ASSIGN, TokenKind.XOR_ASSIGN, TokenKind.SHL_ASSIGN,
