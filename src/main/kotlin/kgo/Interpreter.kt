@@ -176,6 +176,18 @@ class Interpreter(
         if (files.any { it.packageName != packageName })
             throw RuntimeGoError("source files declare different package names")
         if (packageName != "main") throw RuntimeGoError("cannot run package $packageName: package name must be main")
+        val mainDeclaration = files.asSequence().flatMap { it.declarations.asSequence() }
+            .filterIsInstance<FunctionDeclaration>()
+            .firstOrNull { it.receiver == null && it.name == "main" }
+            ?: throw RuntimeGoError("main function not found")
+        val mainSignature = rootFunctionTypes[mainDeclaration] ?: FunctionGoType(
+            mainDeclaration.parameterTypes.mapIndexed { index, type ->
+                ParameterSyntax(mainDeclaration.parameters.getOrNull(index), type)
+            },
+            mainDeclaration.resultTypes
+        )
+        if (mainSignature.parameters.isNotEmpty() || mainSignature.results.isNotEmpty())
+            throw GoTypeError("main function must have no arguments or results")
         runBlocking {
             val goroutineFailure = CompletableDeferred<Throwable>()
             val failureHandler = CoroutineExceptionHandler { _, failure -> goroutineFailure.complete(failure) }
