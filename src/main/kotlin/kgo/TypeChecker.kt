@@ -586,8 +586,10 @@ class TypeChecker(
                 }
                 else -> null
             }
-            listOfNotNull(element.key.takeUnless { actual is StructGoType }, element.value)
-                .flatMap { referencedNames(it, fieldType) }
+            buildList {
+                if (actual !is StructGoType) element.key?.let { add(it to (actual as? MapGoType)?.key) }
+                add(element.value to fieldType)
+            }.flatMap { (expression, expectedType) -> referencedNames(expression, expectedType) }
         }.toSet()
     }
 

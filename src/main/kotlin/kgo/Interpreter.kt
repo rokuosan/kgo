@@ -1710,8 +1710,10 @@ class Interpreter(
                 }
                 else -> null
             }
-            listOfNotNull(element.key.takeUnless { actual is StructGoType }, element.value)
-                .flatMap { expressionNames(it, valueType) }
+            buildList {
+                if (actual !is StructGoType) element.key?.let { add(it to (actual as? MapGoType)?.key) }
+                add(element.value to valueType)
+            }.flatMap { (expression, expectedType) -> expressionNames(expression, expectedType) }
         }.toSet()
     }
 

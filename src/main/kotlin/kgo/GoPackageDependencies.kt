@@ -184,8 +184,12 @@ internal object GoPackageDependencies {
                 }
                 else -> null
             }
-            listOfNotNull(element.key.takeUnless { actual is StructGoType }, element.value)
-                .flatMap { expressionReferences(it, locals, compositeType, valueType) }
+            buildList {
+                if (actual !is StructGoType) element.key?.let { add(it to (actual as? MapGoType)?.key) }
+                add(element.value to valueType)
+            }.flatMap { (expression, expectedType) ->
+                expressionReferences(expression, locals, compositeType, expectedType)
+            }
         }.toSet()
     }
 
