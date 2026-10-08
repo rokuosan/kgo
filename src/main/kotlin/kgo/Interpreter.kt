@@ -35,7 +35,7 @@ import kotlin.math.sqrt
 
 open class RuntimeGoError(message: String) : RuntimeException(message)
 
-private class GoString(val bytes: ByteArray, val type: GoTypeSyntax = NamedGoType("string")) {
+private class GoString(val bytes: ByteArray, val type: GoTypeSyntax) {
     override fun equals(other: Any?) = other is GoString && bytes.contentEquals(other.bytes)
     override fun hashCode() = bytes.contentHashCode()
     override fun toString() = decodeGoUtf8Text(bytes)
@@ -2815,9 +2815,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             value.type == NamedGoType("rune") && !typeDefinitions.containsKey("rune") -> predeclaredIntRuntimeType
             else -> value.type
         }
-        is GoRational -> NamedGoType("float64")
+        is GoRational -> predeclaredFloat64RuntimeType
         is GoExactComplex -> predeclaredComplex128RuntimeType
-        is BigInteger -> NamedGoType("int")
+        is BigInteger -> predeclaredIntRuntimeType
         is GoMap -> value.namedType?.let { runtimeNamedType(it, value.packagePath) } ?: value.type ?: MapGoType(value.keyType, value.valueType)
         is FunctionValue -> value.type ?: value.owner.checkedFunctionType(value.function)
         is MethodValue -> value.type ?: value.owner.checkedFunctionType(value.function).let { signature ->
@@ -2829,8 +2829,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             FunctionGoType(emptyList(), listOf(predeclaredStringRuntimeType)) else FunctionGoType(emptyList(), emptyList())
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
-        is Long -> NamedGoType("int")
-        is Double -> NamedGoType("float64")
+        is Long -> predeclaredIntRuntimeType
+        is Double -> predeclaredFloat64RuntimeType
         is GoString -> value.type
         is Boolean -> predeclaredBoolRuntimeType
         else -> null
@@ -3310,7 +3310,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             GoStruct(fields, namedTypeName(type), fieldTypes, embeddedFields, type, namedTypePackage(type))
         }
         else if ((value is BigInteger || value is GoRational || value is GoExactComplex || value is Boolean ||
-                value is GoString && value.type == NamedGoType("string")) && actual is InterfaceGoType)
+                value is GoString && value.type in setOf(NamedGoType("string"), predeclaredStringRuntimeType)) && actual is InterfaceGoType)
             defaultConstantValue(value)
         else if (actual is NamedGoType && (actual.name in integerTypeNames || actual.name in setOf("complex64", "complex128", "float32", "float64"))) convert(type, value)
         else copyValue(value)
@@ -4450,7 +4450,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         value is GoRational -> GoFloat(value.toDouble(), predeclaredFloat64RuntimeType)
         value is GoExactComplex -> GoComplex(value.real.toDouble(), value.imaginary.toDouble(), predeclaredComplex128RuntimeType)
         value is Boolean -> GoBoolean(value, predeclaredBoolRuntimeType)
-        value is GoString && value.type == NamedGoType("string") ->
+        value is GoString && value.type in setOf(NamedGoType("string"), predeclaredStringRuntimeType) ->
             GoString(value.bytes.copyOf(), predeclaredStringRuntimeType)
         else -> defaultIntegerValue(value)
     }
@@ -4562,7 +4562,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         else -> throw RuntimeGoError("invalid compound assignment")
     }
 
-    private fun decodeString(text: String): GoString = GoString(decodeGoStringLiteralBytes(text))
+    private fun decodeString(text: String): GoString =
+        GoString(decodeGoStringLiteralBytes(text), predeclaredStringRuntimeType)
 
     private fun decodeUtf8Runes(bytes: ByteArray): List<Int> {
         val runes = mutableListOf<Int>()
