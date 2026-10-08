@@ -4409,6 +4409,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val elementAddress = Math.addExact(address, Math.multiplyExact(index.toLong(), stride))
                 pointer.locationIdentity?.let { unsafeAddressByLocation.putIfAbsent(it, elementAddress) }
                 unsafePointerByAddress.putIfAbsent(elementAddress, pointer)
+                registerUnsafeSubaddresses(pointer, elementAddress, mutableSetOf())
             }
         }
     }
