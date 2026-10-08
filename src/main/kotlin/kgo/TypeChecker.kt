@@ -2295,14 +2295,8 @@ class TypeChecker(
                 when (underlying(type)) {
                     is SliceGoType -> {
                         if (args.size !in 2..3) error("make slice requires length and optional capacity")
-                        val sizes = args.drop(1).mapIndexed { index, expression ->
+                        args.drop(1).forEachIndexed { index, expression ->
                             requireMakeSize(expression, types[index + 1], scope)
-                        }
-                        if (sizes.size == 2) {
-                            val length = sizes[0]
-                            val capacity = sizes[1]
-                            if (length != null && capacity != null && capacity < length)
-                                error("make slice capacity is smaller than length")
                         }
                     }
                     is MapGoType -> {
@@ -3497,12 +3491,11 @@ class TypeChecker(
     }
     private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
         dotImportedType(name) != null || (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
-    private fun requireMakeSize(expression: Expression, type: GoTypeSyntax, scope: Scope): BigInteger? {
+    private fun requireMakeSize(expression: Expression, type: GoTypeSyntax, scope: Scope) {
         if (!isInteger(type)) error("make size must be integer")
         requireIntegerConstantRepresentable(expression, predeclaredIntType, scope)
-        return constantInteger(expression, scope)?.also { value ->
-            if (value.signum() < 0) error("make size must be non-negative")
-        }
+        // Go 1.0 specifies negative sizes and a capacity below the length as
+        // run-time panics, so leave those checks to the make implementation.
     }
 
     private fun builtinTypeArgument(expression: Expression, scope: Scope): GoTypeSyntax {
