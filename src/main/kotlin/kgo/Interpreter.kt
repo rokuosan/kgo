@@ -110,6 +110,30 @@ internal class GoRational private constructor(val numerator: BigInteger, val den
 }
 
 private data class GoExactComplex(val real: GoRational, val imaginary: GoRational)
+private class GoGoroutineRuntime(private val scope: CoroutineScope) {
+    private val lock = Any()
+    private val pending = mutableListOf<suspend () -> Unit>()
+    private var initializationComplete = false
+
+    fun launch(task: suspend () -> Unit) {
+        val startNow = synchronized(lock) {
+            if (initializationComplete) true
+            else {
+                pending += task
+                false
+            }
+        }
+        if (startNow) scope.launch { task() }
+    }
+
+    fun startAfterInitialization() {
+        val ready = synchronized(lock) {
+            initializationComplete = true
+            pending.toList().also { pending.clear() }
+        }
+        ready.forEach { task -> scope.launch { task() } }
+    }
+}
 private data class RuntimeImports(val packages: Map<String, String> = emptyMap(), val dotPackages: Set<String> = emptySet())
 private val untypedRuneRuntimeType = NamedGoType("#untyped-rune")
 
@@ -142,6 +166,7 @@ class Interpreter(
     private var packageIdentity: String? = null
     private var packageVariableInitializationOrder: List<PackageVariableInitialization>? = null
     private lateinit var goroutines: CoroutineScope
+    private lateinit var goroutineRuntime: GoGoroutineRuntime
 
     fun run(file: GoFile) = run(listOf(file), emptyList())
 
@@ -166,6 +191,7 @@ class Interpreter(
             val goroutineFailure = CompletableDeferred<Throwable>()
             val failureHandler = CoroutineExceptionHandler { _, failure -> goroutineFailure.complete(failure) }
             goroutines = CoroutineScope(SupervisorJob() + Dispatchers.Default + failureHandler)
+            goroutineRuntime = GoGoroutineRuntime(goroutines)
             try {
                 knownPackageNames = sourcePackages.associate { it.importPath to it.packageName }
                 val runtimes = linkedMapOf<String, Interpreter>()
@@ -173,6 +199,7 @@ class Interpreter(
                     val runtime = Interpreter(output, outputBytes)
                     runtime.packageIdentity = sourcePackage.importPath
                     runtime.goroutines = goroutines
+                    runtime.goroutineRuntime = goroutineRuntime
                     runtime.importedRuntimePackages = runtimes.toMap()
                     runtime.knownPackageNames = knownPackageNames
                     runtime.checkedTypeDefinitions = importedTypeDefinitions[sourcePackage.importPath].orEmpty()
@@ -188,6 +215,7 @@ class Interpreter(
                 packageVariableInitializationOrder = rootVariableInitializationOrder
                 preparePackage(files)
                 initializePackage(files)
+                goroutineRuntime.startAfterInitialization()
                 val main = functions["main"] ?: throw RuntimeGoError("main function not found")
                 val mainExecution = async { invoke(main, emptyList()) }
                 selectUnbiased<Unit> {
@@ -575,7 +603,9 @@ class Interpreter(
                 val target = evaluate(call.function, env)
                 val arguments = adaptCallArguments(call, target,
                     evaluateCallArguments(call, env, runtimeCallArgumentTypes(target, call, env)), env)
-                goroutines.launch { call(target, arguments, call.expandLastArgument, PanicState(), environment = env) }
+                goroutineRuntime.launch {
+                    call(target, arguments, call.expandLastArgument, PanicState(), environment = env)
+                }
             }
             is DeferStatement -> {
                 val call = statement.call.unparenthesized() as? CallExpression
