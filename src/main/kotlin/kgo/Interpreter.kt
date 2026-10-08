@@ -2527,9 +2527,21 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val key = collectionIndex(evaluate(expression.index, env, predeclaredIntRuntimeType), "index")
             when (receiver) {
                 is GoSlice -> receiver.pointerAt(key).also { registerUnsafeSliceBacking(receiver) }
-                is GoArray -> receiver.pointerAt(key)
-                is GoPointer -> (receiver.get() as? GoArray)?.pointerAt(key)
-                    ?: throw RuntimeGoError("address-of index requires pointer to array")
+                is GoArray -> receiver.pointerAt(key).also {
+                    val owner = if (expression.receiver.unparenthesized() is CompositeLiteral) {
+                        val type = receiver.type
+                            ?: throw RuntimeGoError("cannot determine addressable array type")
+                        GoPointer.reference({ receiver }, { assigned ->
+                            preserveAggregateStorage(receiver, copyForType(assigned, type), type)
+                        }, type)
+                    } else addressOf(expression.receiver, env)
+                    unsafeAddress(owner)
+                }
+                is GoPointer -> {
+                    val array = receiver.get() as? GoArray
+                        ?: throw RuntimeGoError("address-of index requires pointer to array")
+                    array.pointerAt(key).also { unsafeAddress(receiver) }
+                }
                 else -> throw RuntimeGoError("address-of index requires an array or slice element")
             }
         }
