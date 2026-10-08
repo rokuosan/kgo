@@ -2690,7 +2690,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is GoPointer -> if (value.isNil) encodeGoUtf8Text("<nil>")
             else concatenateFormatted(encodeGoUtf8Text("&"), formatValueBytes(value.get()))
         is GoSlice -> joinFormatted(value.toList().map(::formatValueBytes), "[", " ", "]")
-        is GoArray -> joinFormatted(value.values.map(::formatValueBytes), "[", " ", "]")
+        is GoArray -> joinFormatted(value.valueSnapshot().map(::formatValueBytes), "[", " ", "]")
         is GoMap -> joinFormatted(value.snapshot().entries.map { (key, item) ->
             concatenateFormatted(formatValueBytes(key.value), encodeGoUtf8Text(":"), formatValueBytes(item))
         }, "map[", " ", "]")
@@ -3495,7 +3495,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             value.fieldSnapshot().mapValuesTo(linkedMapOf()) { copyValue(it.value) },
             value.namedType, value.fieldTypes, value.embeddedFields, value.staticType, value.packagePath
         )
-        is GoArray -> GoArray(value.elementType, value.values.mapTo(mutableListOf(), ::copyValue), value.namedType, value.type, value.packagePath)
+        is GoArray -> GoArray(value.elementType, value.valueSnapshot().mapTo(mutableListOf(), ::copyValue), value.namedType, value.type, value.packagePath)
         is GoInterfaceValue -> GoInterfaceValue(value.dynamicType, copyValue(value.value), value.implementationOwner)
         else -> value
     }
@@ -3513,7 +3513,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         else if (value is GoString && actual == NamedGoType("string")) GoString(value.bytes.copyOf(), type)
         else if (value is GoPointer && actual is PointerGoType) value.retype(actual.element, type)
         else if (value is GoArray && actual is ArrayGoType)
-            GoArray(actual.element, value.values.mapTo(mutableListOf()) { copyForType(it, actual.element) },
+            GoArray(actual.element, value.valueSnapshot().mapTo(mutableListOf()) { copyForType(it, actual.element) },
                 namedTypeName(type), type, namedTypePackage(type))
         else if (value is GoSlice && actual is SliceGoType) value.retype(actual.element, namedTypeName(type), type, namedTypePackage(type))
         else if (value is GoMap && actual is MapGoType) value.retype(actual.key, actual.value, namedTypeName(type), type, namedTypePackage(type))
@@ -3653,7 +3653,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         is ArrayGoType -> {
             if (value !is GoArray) throw RuntimeGoError("cannot convert value to $type")
-            GoArray(target.element, value.values.mapTo(mutableListOf()) { copyForType(it, target.element) },
+            GoArray(target.element, value.valueSnapshot().mapTo(mutableListOf()) { copyForType(it, target.element) },
                 namedTypeName(type), type, namedTypePackage(type))
         }
         is SliceGoType -> {
@@ -4643,9 +4643,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         if (left is GoFloat || right is GoFloat) return real(left) == real(right)
         if (left is Double && right is Double) return left == right
-        if (left is GoArray && right is GoArray)
-            return left.values.size == right.values.size &&
-                left.values.indices.all { goEqual(left.values[it], right.values[it]) }
+        if (left is GoArray && right is GoArray) {
+            val leftValues = left.valueSnapshot()
+            val rightValues = right.valueSnapshot()
+            return leftValues.size == rightValues.size &&
+                leftValues.indices.all { goEqual(leftValues[it], rightValues[it]) }
+        }
         if (left is GoStruct && right is GoStruct) return left == right
         return left == right
     }
@@ -4691,7 +4694,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is Double -> if (value == 0.0) 0 else value.hashCode()
         is GoFloat -> if (value.value == 0.0) 0 else value.value.hashCode()
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
-        is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
+        is GoArray -> value.valueSnapshot().fold(1) { hash, element -> 31 * hash + goHash(element) }
         is GoStruct -> value.fieldSnapshot().entries.filterNot { isBlankStorageKey(it.key) }
             .fold(0) { hash, (name, element) ->
                 31 * (31 * hash + name.hashCode()) + goHash(element)
@@ -4843,7 +4846,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is GoString -> value.toString()
         is FunctionValue -> "<function ${value.function.name}>"
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
-        is GoArray -> value.values.joinToString(prefix = "[", postfix = "]") { stringify(it) }
+        is GoArray -> value.valueSnapshot().joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoMap -> value.snapshot().entries.joinToString(prefix = "map[", postfix = "]") { "${stringify(it.key.value)}:${stringify(it.value)}" }
         is GoStruct -> value.fieldSnapshot().values.joinToString(prefix = "{", postfix = "}") { stringify(it) }
         else -> value.toString()
@@ -5202,24 +5205,28 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     )
     private inner class GoArray(
         val elementType: GoTypeSyntax,
-        val values: MutableList<Any?>,
+        values: MutableList<Any?>,
         val namedType: String? = null,
         val type: GoTypeSyntax? = null,
         val packagePath: String? = packageIdentity
     ) {
+        val values: MutableList<Any?> = Collections.synchronizedList(values)
+        fun valueSnapshot(): List<Any?> = synchronized(values) { values.toList() }
         fun pointerAt(index: Int): GoPointer {
             if (index !in values.indices) throw RuntimeGoError("array index out of range")
             return elementPointer(values, index, elementType)
         }
         override fun equals(other: Any?) = other is GoArray &&
             (namedType == null || other.namedType == null ||
-                namedType == other.namedType && packagePath == other.packagePath) && values.size == other.values.size &&
-            values.indices.all { goEqual(values[it], other.values[it]) }
-        override fun hashCode() = values.hashCode()
+                namedType == other.namedType && packagePath == other.packagePath) &&
+            valueSnapshot().let { own -> other.valueSnapshot().let { theirs ->
+                own.size == theirs.size && own.indices.all { goEqual(own[it], theirs[it]) }
+            } }
+        override fun hashCode() = valueSnapshot().hashCode()
     }
     private inner class GoSlice(
         val elementType: GoTypeSyntax,
-        private val backing: MutableList<Any?>,
+        backing: MutableList<Any?>,
         private val start: Int,
         val length: Int,
         val capacity: Int,
@@ -5227,6 +5234,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val type: GoTypeSyntax? = null,
         val packagePath: String? = packageIdentity
     ) {
+        private val backing: MutableList<Any?> = Collections.synchronizedList(backing)
         fun get(index: Int): Any? {
             if (index !in 0 until length) throw RuntimeGoError("slice index out of range")
             return backing[start + index]
