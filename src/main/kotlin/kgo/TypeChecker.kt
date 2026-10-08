@@ -524,7 +524,7 @@ class TypeChecker(
 
     private fun checkFunction(function: FunctionDeclaration) {
         val signature = functionType(function)
-        val scope = globals.child()
+        val scope = globals.child(trackLocalUsage = true)
         function.receiver?.let { receiver ->
             val receiverType = resolveLocalType(receiver.type, globals)
             validateType(receiverType)
@@ -568,6 +568,7 @@ class TypeChecker(
         try {
             validateBranchTargets(body)
             checkBlock(body, scope, reuseScope = true)
+            scope.unusedLocalVariable()?.let { error("$it declared and not used") }
             if (signature.results.isNotEmpty() && !endsWithGo10Exit(body))
                 error("missing return at end of function ${function.name}")
             val unused = functionLabels.keys - usedLabels
@@ -794,7 +795,7 @@ class TypeChecker(
                         declaration.names.forEachIndexed { i, name ->
                             if (name != "_") {
                                 if (scope.containsLocal(name)) error("$name redeclared in this block")
-                                scope.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType))
+                                scope.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType), trackUsage = true)
                             }
                         }
                     }
@@ -858,7 +859,7 @@ class TypeChecker(
                 statement.names.forEachIndexed { i, name ->
                     if (name != "_") {
                         if (scope.containsLocal(name)) error("$name redeclared in this block")
-                        scope.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType))
+                        scope.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType), trackUsage = true)
                     }
                 }
             }
@@ -972,7 +973,7 @@ class TypeChecker(
                 else {
                     val targetType = defaultType(valueTypes[i])
                     statement.values.getOrNull(i)?.let { requireIntegerConstantRepresentable(it, targetType, scope) }
-                    scope.define(name, targetType)
+                    scope.define(name, targetType, trackUsage = true)
                     added++
                 }
             }
@@ -981,7 +982,9 @@ class TypeChecker(
         }
         statement.targets.forEach { requireAssignmentTarget(it, scope, allowBlank = statement.operator == TokenKind.ASSIGN) }
         val leftTypes = statement.targets.map { target ->
-            if (isBlankIdentifier(target)) null else expressionType(target, scope)
+            if (isBlankIdentifier(target)) null
+            else if (statement.operator == TokenKind.ASSIGN) assignmentTargetType(target, scope)
+            else expressionType(target, scope)
         }
         val rightTypes = expressionTypes(statement.values, leftTypes.size, scope)
         if (leftTypes.size != rightTypes.size) error("assignment count mismatch")
@@ -1026,13 +1029,13 @@ class TypeChecker(
             if (names.none { it != "_" }) error("range declaration must introduce a variable")
             range.targets.forEachIndexed { i, target ->
                 val name = (target as? NameExpression)?.name ?: error("range declaration requires identifiers")
-                if (name != "_") scope.define(name, defaultType(types[i]))
+                if (name != "_") scope.define(name, defaultType(types[i]), trackUsage = true)
             }
         } else if (range.operator == TokenKind.ASSIGN) {
             range.targets.zip(types).forEach { (target, type) ->
                 requireAssignmentTarget(target, scope)
                 if (!isBlankIdentifier(target))
-                    requireAssignable(type, expressionType(target, scope), "range assignment")
+                    requireAssignable(type, assignmentTargetType(target, scope), "range assignment")
             }
         }
         checkBlock(body, scope)
@@ -1070,12 +1073,13 @@ class TypeChecker(
                         requireUniqueNames(names, "receive declaration")
                         if (names.none { it != "_" }) error("receive declaration must introduce a variable")
                         names.forEachIndexed { i, name ->
-                            if (name != "_") caseScope.define(name, if (i == 0) defaultType(channel.element) else boolType)
+                            if (name != "_") caseScope.define(name, if (i == 0) defaultType(channel.element) else boolType,
+                                trackUsage = true)
                         }
                     } else {
                         communication.targets.forEach { requireAssignmentTarget(it, caseScope) }
                         val targets = communication.targets.map { target ->
-                            if (isBlankIdentifier(target)) null else expressionType(target, caseScope)
+                            if (isBlankIdentifier(target)) null else assignmentTargetType(target, caseScope)
                         }
                         if (targets.size !in 1..2) error("invalid receive assignment")
                         targets.first()?.let { requireAssignable(channel.element, it, "receive assignment") }
@@ -1395,7 +1399,7 @@ class TypeChecker(
             val singleType = clause.types?.singleOrNull()?.takeUnless { it == NamedGoType("nil") }
                 ?.let { resolveLocalType(it, switchScope) }
             if (statement.guard.name != null && statement.guard.name != "_")
-                caseScope.define(statement.guard.name, singleType ?: interfaceType)
+                caseScope.define(statement.guard.name, singleType ?: interfaceType, trackUsage = true)
             inLabelBlock(clause) {
                 withLocalTypeScope {
                     clause.statements.forEachIndexed { index, child ->
@@ -1453,7 +1457,7 @@ class TypeChecker(
     }
 
     private fun expressionType(expression: Expression, scope: Scope): GoTypeSyntax = when (expression) {
-        is NameExpression -> scope.getOrNull(expression.name) ?: when {
+        is NameExpression -> scope.getOrNull(expression.name)?.also { scope.markUsed(expression.name) } ?: when {
             scope.typeBinding(expression.name) != null || typeDeclarations.containsKey(expression.name) ||
                 dotImportedType(expression.name) != null || isBuiltinType(expression.name) ->
                 error("type ${expression.name} is not an expression")
@@ -1480,7 +1484,7 @@ class TypeChecker(
         is FunctionLiteralExpression -> {
             val parameters = expression.parameters.map { it.copy(type = resolveLocalType(it.type, scope)) }
             val results = expression.results.map { resolveLocalType(it, scope) }
-            val literalScope = scope.child()
+            val literalScope = scope.child(trackLocalUsage = true)
             parameters.forEach { parameter ->
                 validateType(parameter.type)
                 val name = parameter.name
@@ -1513,6 +1517,7 @@ class TypeChecker(
             try {
                 validateBranchTargets(expression.body)
                 checkBlock(expression.body, literalScope, reuseScope = true)
+                literalScope.unusedLocalVariable()?.let { error("$it declared and not used") }
                 if (results.isNotEmpty() && !endsWithGo10Exit(expression.body))
                     error("missing return at end of function literal")
                 val unused = functionLabels.keys - usedLabels
@@ -1877,6 +1882,12 @@ class TypeChecker(
         }
         val isMapIndex = target is IndexExpression && underlying(expressionType(target.receiver, scope)) is MapGoType
         if (!isMapIndex && !isAddressable(target, scope)) error("assignment target is not addressable")
+    }
+
+    private fun assignmentTargetType(expression: Expression, scope: Scope): GoTypeSyntax = when (expression) {
+        is ParenthesizedExpression -> assignmentTargetType(expression.expression, scope)
+        is NameExpression -> scope.getOrNull(expression.name) ?: expressionType(expression, scope)
+        else -> expressionType(expression, scope)
     }
 
     private fun isBlankIdentifier(expression: Expression): Boolean = when (expression) {
@@ -3385,12 +3396,21 @@ class TypeChecker(
         if (declared.size != declared.toSet().size) error("repeated name in $context")
     }
 
-    private class Scope(private val parent: Scope? = null) {
+    private class LocalUsage(val name: String, var used: Boolean = false)
+
+    private class Scope(
+        private val parent: Scope? = null,
+        private val localUsage: MutableList<LocalUsage>? = parent?.localUsage
+    ) {
         private val values = linkedMapOf<String, GoTypeSyntax>()
+        private val trackedLocals = linkedMapOf<String, LocalUsage>()
         private val typeNames = linkedMapOf<String, String>()
         private val integerConstants = linkedMapOf<String, BigInteger>()
         private val constantNames = linkedSetOf<String>()
-        fun child() = Scope(this)
+        fun child(trackLocalUsage: Boolean = false) = Scope(
+            this,
+            if (trackLocalUsage) mutableListOf() else localUsage
+        )
         private val stringLengths = linkedMapOf<String, BigInteger>()
         private val rationalConstants = linkedMapOf<String, GoRational>()
         private val stringIdentities = linkedMapOf<String, String>()
@@ -3407,9 +3427,16 @@ class TypeChecker(
             stringIdentity: String? = null,
             booleanConstant: Boolean? = null,
             isFunction: Boolean = false,
-            complexConstant: ConstantComplexValue? = null
+            complexConstant: ConstantComplexValue? = null,
+            trackUsage: Boolean = false
         ) {
             values[name] = type
+            if (trackUsage && localUsage != null) {
+                LocalUsage(name).also {
+                    trackedLocals[name] = it
+                    localUsage += it
+                }
+            } else trackedLocals.remove(name)
             if (isFunction) functionNames += name else functionNames -= name
             if (integerConstant == null) integerConstants.remove(name) else integerConstants[name] = integerConstant
             if (stringLength == null) stringLengths.remove(name) else stringLengths[name] = stringLength
@@ -3426,6 +3453,11 @@ class TypeChecker(
         fun containsLocal(name: String) = name in values || name in typeNames
         fun get(name: String): GoTypeSyntax = getOrNull(name) ?: throw GoTypeError("undefined: $name")
         fun getOrNull(name: String): GoTypeSyntax? = values[name] ?: parent?.getOrNull(name)
+        fun markUsed(name: String) {
+            if (name in values) trackedLocals[name]?.used = true
+            else parent?.markUsed(name)
+        }
+        fun unusedLocalVariable(): String? = localUsage?.firstOrNull { !it.used }?.name
         fun isVariable(name: String): Boolean = if (name in values)
             name !in constantNames && name !in functionNames else parent?.isVariable(name) == true
         fun constantInteger(name: String): BigInteger? = if (name in values) integerConstants[name] else parent?.constantInteger(name)
