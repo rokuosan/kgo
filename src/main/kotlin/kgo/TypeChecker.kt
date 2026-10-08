@@ -2829,6 +2829,7 @@ class TypeChecker(
         from: GoTypeSyntax, to: GoTypeSyntax, context: String, expression: Expression? = null, scope: Scope = globals
     ) {
         if (expression != null && isUntyped(from) && underlying(to) is InterfaceGoType &&
+            nonConstantUntypedShift(expression, scope) == null &&
             interfaceMethods(to).isEmpty()) {
             if (!isConstantExpression(expression, scope))
                 error("untyped value is not assignable to $to in $context")
