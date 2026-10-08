@@ -1174,20 +1174,17 @@ class Interpreter(
             ?: InterfaceGoType(emptyList())
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
-        if (range.targets.size == 2 && range.targets[1].isBlankIdentifier()) {
-            executeRange(range.copy(targets = range.targets.take(1)), body, env, labels)
-            return
-        }
         val onlyIndexIsUsed = range.targets.size <= 1
         val declarationTypes = if (range.operator == TokenKind.DEFINE) rangeVariableTypes(range, env) else null
         // A := range clause declares its variables in the for statement's scope.
         // Keep that scope separate so a same-named variable in the enclosing block
         // is shadowed, and reuse the new bindings across Go 1.0 loop iterations.
         val loopEnv = if (range.operator == TokenKind.DEFINE) env.child() else env
-        if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
+        if (onlyIndexIsUsed) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
-                // The array length is constant only when the expression has no calls or receives.
+                // Go does not evaluate an array or pointer-to-array range expression when
+                // only the index is used and its length is constant.
                 rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
@@ -1295,12 +1292,6 @@ class Interpreter(
             else -> null
         } ?: return emptyList()
         return listOfNotNull(pair.first, pair.second).take(range.targets.size)
-    }
-
-    private fun Expression?.isBlankIdentifier(): Boolean = when (this) {
-        is NameExpression -> name == "_"
-        is ParenthesizedExpression -> expression.isBlankIdentifier()
-        else -> false
     }
 
     private fun staticRangeArrayLength(expression: Expression, env: Environment): Int? {
