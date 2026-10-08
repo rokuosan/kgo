@@ -89,6 +89,11 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenKind.LPAREN)
         val parameters = mutableListOf<ParameterSyntax>()
         while (!at(TokenKind.RPAREN)) {
+            if (at(TokenKind.IDENT) && tokens.getOrNull(index + 1)?.kind == TokenKind.PERIOD) {
+                parameters += ParameterSyntax(null, parseType())
+                if (!match(TokenKind.COMMA)) break
+                continue
+            }
             val names = mutableListOf<String>()
             val first: String?
             if (at(TokenKind.IDENT)) {
