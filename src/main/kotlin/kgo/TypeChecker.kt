@@ -2534,6 +2534,9 @@ class TypeChecker(
                 if (!isNilable(operandRight)) error("cannot compare nil with $operandRight")
             } else if (operandRight == nilType) {
                 if (!isNilable(operandLeft)) error("cannot compare $operandLeft with nil")
+            } else if (underlying(operandLeft) is InterfaceGoType && underlying(operandRight) is InterfaceGoType &&
+                !sameType(operandLeft, operandRight)) {
+                error("interface values must have the same type to be compared: $operandLeft and $operandRight")
             } else if (!isComparable(operandLeft) || !isComparable(operandRight)) {
                 error("cannot compare values of type $operandLeft and $operandRight")
             }
