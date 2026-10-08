@@ -1193,19 +1193,25 @@ class Interpreter(
             ?: InterfaceGoType(emptyList())
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
-        val onlyIndexIsUsed = range.targets.size <= 1
-        val declarationTypes = if (range.operator == TokenKind.DEFINE) rangeVariableTypes(range, env) else null
+        val iterationTargets = if (range.targets.getOrNull(1)?.unparenthesized() == NameExpression("_")) {
+            range.targets.take(1)
+        } else range.targets
+        val effectiveRange = if (iterationTargets.size == range.targets.size) range else range.copy(targets = iterationTargets)
+        val onlyIndexIsUsed = iterationTargets.size <= 1
+        val declarationTypes = if (range.operator == TokenKind.DEFINE) {
+            rangeVariableTypes(range, env).take(iterationTargets.size)
+        } else null
         // A := range clause declares its variables in the for statement's scope.
         // Keep that scope separate so a same-named variable in the enclosing block
         // is shadowed, and reuse the new bindings across Go 1.0 loop iterations.
         val loopEnv = if (range.operator == TokenKind.DEFINE) env.child() else env
-        if (onlyIndexIsUsed && !containsCallOrReceive(range.expression, env)) {
+        if (onlyIndexIsUsed) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
                 // Go does not evaluate an array or pointer-to-array range expression when
                 // only the index is used and its length is constant. Function calls and
-                // channel receives make len non-constant, so those expressions still run.
-                rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
+                // channel receives in the expression do not change its statically known length.
+                rangeIndexed(arrayLength, effectiveRange, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
         }
@@ -1218,9 +1224,9 @@ class Interpreter(
             is GoChannel -> while (true) {
                 val received = value.receive()
                 if (!received.ok) break
-                if (range.targets.isNotEmpty()) {
-                    val values = listOf(received.value).take(range.targets.size)
-                    assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, loopEnv,
+                if (iterationTargets.isNotEmpty()) {
+                    val values = listOf(received.value).take(iterationTargets.size)
+                    assignValues(iterationTargets, range.operator ?: TokenKind.ASSIGN, values, loopEnv,
                         declaredTypes = declarationTypes)
                 }
                 try { executeBlock(body, loopEnv) }
@@ -1235,7 +1241,7 @@ class Interpreter(
                         ?: throw RuntimeGoError("range over this pointer type is not implemented")
                     val length = staticRangeArrayLength(range.expression, env)
                         ?: throw RuntimeGoError("range over pointer requires an array with a known length")
-                    rangeIndexed(length, range, body, loopEnv, labels, declarationTypes) { index ->
+                    rangeIndexed(length, effectiveRange, body, loopEnv, labels, declarationTypes) { index ->
                         if (onlyIndexIsUsed) listOf(index.toLong()) else {
                             val array = GoPointer.nil(arrayType, value.type).get() as GoArray
                             listOf(index.toLong(), array.values[index])
@@ -1249,9 +1255,9 @@ class Interpreter(
                 while (byteIndex < value.bytes.size) {
                     yield()
                     val (cp, width) = decodeUtf8Rune(value.bytes, byteIndex)
-                    if (range.targets.isNotEmpty()) {
-                        val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), predeclaredInt32RuntimeType)).take(range.targets.size)
-                        assignValues(range.targets, range.operator ?: TokenKind.ASSIGN, values, loopEnv,
+                    if (iterationTargets.isNotEmpty()) {
+                        val values = listOf(byteIndex.toLong(), GoInteger(cp.toLong(), predeclaredInt32RuntimeType)).take(iterationTargets.size)
+                        assignValues(iterationTargets, range.operator ?: TokenKind.ASSIGN, values, loopEnv,
                             declaredTypes = declarationTypes)
                     }
                     try { executeBlock(body, loopEnv) }
@@ -1260,7 +1266,7 @@ class Interpreter(
                     byteIndex += width
                 }
             }
-            is GoSlice -> rangeIndexed(value.length, range, body, loopEnv, labels, declarationTypes) { i ->
+            is GoSlice -> rangeIndexed(value.length, effectiveRange, body, loopEnv, labels, declarationTypes) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.get(i))
             }
             is GoPointer -> {
@@ -1268,14 +1274,14 @@ class Interpreter(
                     ?: if (!value.isNil) (value.get() as? GoArray)?.values?.size
                         ?: throw RuntimeGoError("range over pointer requires an array")
                     else throw RuntimeGoError("range over nil pointer requires a known array length")
-                rangeIndexed(arrayLength, range, body, loopEnv, labels, declarationTypes) { index ->
+                rangeIndexed(arrayLength, effectiveRange, body, loopEnv, labels, declarationTypes) { index ->
                     if (onlyIndexIsUsed) listOf(index.toLong()) else {
                         val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
                         listOf(index.toLong(), array.values[index])
                     }
                 }
             }
-            is GoArray -> rangeIndexed(value.values.size, range, body, loopEnv, labels, declarationTypes) { i ->
+            is GoArray -> rangeIndexed(value.values.size, effectiveRange, body, loopEnv, labels, declarationTypes) { i ->
                 if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
             }
             is GoMap -> {
@@ -1286,9 +1292,9 @@ class Interpreter(
                     yield()
                     if (!value.values.containsKey(key)) continue
                     val entryValue = if (onlyIndexIsUsed) null else value.values[key]
-                    if (range.targets.isNotEmpty()) assignValues(range.targets, range.operator ?: TokenKind.ASSIGN,
+                    if (iterationTargets.isNotEmpty()) assignValues(iterationTargets, range.operator ?: TokenKind.ASSIGN,
                         (if (onlyIndexIsUsed) listOf(copyValue(key.value)) else listOf(copyValue(key.value), entryValue))
-                            .take(range.targets.size), loopEnv, declaredTypes = declarationTypes)
+                            .take(iterationTargets.size), loopEnv, declaredTypes = declarationTypes)
                     try { executeBlock(body, loopEnv) }
                     catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
                     catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
