@@ -2816,8 +2816,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             "Y1" -> unary { besselY(1, it) }
             "Jn" -> { count(2); besselJ(number(args[0], "math.Jn order"), x()) }
             "Yn" -> { count(2); besselY(number(args[0], "math.Yn order"), x()) }
-            "Max" -> binary(Math::max)
-            "Min" -> binary(Math::min)
+            "Max" -> binary(::goMathMax)
+            "Min" -> binary(::goMathMin)
             "Mod" -> binary { a, b -> a % b }
             "Pow" -> binary(Math::pow)
             "Remainder" -> binary(Math::IEEEremainder)
@@ -2911,6 +2911,22 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             else -> throw RuntimeGoError("undefined math function $name")
         }
+    }
+
+    private fun goMathMax(x: Double, y: Double): Double = when {
+        x == Double.POSITIVE_INFINITY || y == Double.POSITIVE_INFINITY -> Double.POSITIVE_INFINITY
+        x.isNaN() || y.isNaN() -> Double.NaN
+        x == 0.0 && y == 0.0 -> if (x.toRawBits() < 0L) y else x
+        x > y -> x
+        else -> y
+    }
+
+    private fun goMathMin(x: Double, y: Double): Double = when {
+        x == Double.NEGATIVE_INFINITY || y == Double.NEGATIVE_INFINITY -> Double.NEGATIVE_INFINITY
+        x.isNaN() || y.isNaN() -> Double.NaN
+        x == 0.0 && y == 0.0 -> if (x.toRawBits() < 0L) x else y
+        x < y -> x
+        else -> y
     }
 
     private fun besselJ(order: Long, x: Double): Double {
