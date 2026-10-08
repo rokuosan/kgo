@@ -1584,7 +1584,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 expression.name in importedRuntimePackages[path]?.exportedVariableNames.orEmpty()
             }
             val dotImportedTypePath = env.imports.dotPackages.firstOrNull { path ->
-                expression.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty()
+                expression.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
+                    path == "runtime" && expression.name in GoRuntimePackage.exportedTypes
             }
             if (binding != null) binding.value
             else typeDefinitions[expression.name]?.let { TypeValue(NamedGoType(expression.name)) }
@@ -1762,6 +1763,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is NameExpression -> if (env.contains(expression.name)) null else {
             env.typeBinding(expression.name) ?: if (expression.name in env.imports.packages) null
             else typeDefinitions[expression.name]?.let { NamedGoType(expression.name) }
+                ?: env.imports.dotPackages.firstOrNull { path ->
+                    path == "runtime" && expression.name in GoRuntimePackage.exportedTypes
+                }?.let { QualifiedGoType(it, expression.name) }
                 ?: if (expression.name in builtinTypes) NamedGoType(expression.name) else null
         }
         is SelectorExpression -> {
@@ -2624,7 +2628,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private fun resolveRuntimeType(type: GoTypeSyntax, env: Environment): GoTypeSyntax = when (type) {
         is NamedGoType -> env.typeBinding(type.name) ?: env.imports.dotPackages.firstOrNull { path ->
-            type.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty()
+            type.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
+                path == "runtime" && type.name in GoRuntimePackage.exportedTypes
         }?.let { path -> QualifiedGoType(path, type.name) } ?: type
         is QualifiedGoType -> {
             val path = env.imports.packages[type.packageName] ?: type.packageName
