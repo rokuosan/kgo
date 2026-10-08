@@ -5159,7 +5159,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             GoMap(key, value, zeroValue(value), values, name, type, packagePath)
     }
     private inner class GoMapKey(val value: Any?) {
-        override fun equals(other: Any?) = other is GoMapKey && goEqual(value, other.value)
+        override fun equals(other: Any?) = this === other || other is GoMapKey && goEqual(value, other.value)
         override fun hashCode() = goHash(value)
     }
     private inner class GoStruct(
