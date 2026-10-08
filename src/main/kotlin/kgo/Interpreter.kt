@@ -2,6 +2,8 @@ package kgo
 
 import java.math.BigInteger
 import java.math.BigDecimal
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -4470,27 +4472,114 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 ?: pointers.firstOrNull { candidate ->
                     candidate.pointeeType?.let { sameRuntimeType(it, elementType) } == true
                 }
-                ?: pointers.firstOrNull { candidate ->
-                    candidate.pointeeType?.let { sameUnsafeScalarRepresentation(it, elementType) } == true
-                }
-            return pointer?.retype(elementType, pointerType) ?: GoPointer.address(address, elementType, pointerType)
+            if (pointer != null) return pointer.retype(elementType, pointerType)
+            val scalarSource = pointers.firstOrNull { candidate ->
+                candidate.pointeeType?.let { canUnsafeScalarView(it, elementType) } == true
+            }
+            if (scalarSource != null) return unsafeScalarPointerView(
+                scalarSource, scalarSource.pointeeType!!, elementType, pointerType
+            )
+            return GoPointer.address(address, elementType, pointerType)
         }
     }
 
-    private fun sameUnsafeScalarRepresentation(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
-        fun representation(type: GoTypeSyntax): Pair<String, Int>? {
-            val name = (underlying(type) as? NamedGoType)?.name ?: return null
-            return when {
-                name in integerTypeNames -> "integer" to integerBitWidth(type)
-                name in setOf("float32", "#predeclared-float32") -> "float" to 32
-                name in setOf("float64", "#predeclared-float64") -> "float" to 64
-                name in setOf("complex64", "#predeclared-complex64") -> "complex" to 64
-                name in setOf("complex128", "#predeclared-complex128") -> "complex" to 128
-                name in setOf("bool", "#predeclared-bool") -> "boolean" to 8
-                else -> null
-            }
+    private fun unsafeScalarRepresentation(type: GoTypeSyntax): Pair<String, Int>? {
+        val name = (underlying(type) as? NamedGoType)?.name ?: return null
+        return when {
+            name in integerTypeNames -> "integer" to integerBitWidth(type)
+            name in setOf("float32", "#predeclared-float32") -> "float" to 32
+            name in setOf("float64", "#predeclared-float64") -> "float" to 64
+            name in setOf("complex64", "#predeclared-complex64") -> "complex" to 64
+            name in setOf("complex128", "#predeclared-complex128") -> "complex" to 128
+            name in setOf("bool", "#predeclared-bool") -> "boolean" to 8
+            else -> null
         }
-        return representation(left)?.let { it == representation(right) } == true
+    }
+
+    private fun canUnsafeScalarView(source: GoTypeSyntax, target: GoTypeSyntax): Boolean {
+        val sourceRepresentation = unsafeScalarRepresentation(source) ?: return false
+        val targetRepresentation = unsafeScalarRepresentation(target) ?: return false
+        return targetRepresentation.second <= sourceRepresentation.second
+    }
+
+    private fun unsafeScalarPointerView(
+        source: GoPointer,
+        sourceType: GoTypeSyntax,
+        targetType: GoTypeSyntax,
+        pointerType: GoTypeSyntax
+    ): GoPointer = source.view(targetType, pointerType,
+        get = {
+            val sourceBytes = encodeUnsafeScalar(source.get(), sourceType)
+            decodeUnsafeScalar(sourceBytes.copyOf(unsafeScalarWidth(targetType)), targetType)
+        },
+        set = { assigned ->
+            val sourceBytes = encodeUnsafeScalar(source.get(), sourceType)
+            val targetBytes = encodeUnsafeScalar(assigned, targetType)
+            targetBytes.copyInto(sourceBytes)
+            source.set(decodeUnsafeScalar(sourceBytes, sourceType))
+        }
+    )
+
+    private fun unsafeScalarWidth(type: GoTypeSyntax): Int =
+        (unsafeScalarRepresentation(type)?.second ?: throw RuntimeGoError("unsupported unsafe scalar type")) / 8
+
+    private fun encodeUnsafeScalar(value: Any?, type: GoTypeSyntax): ByteArray {
+        val (kind, bits) = unsafeScalarRepresentation(type)
+            ?: throw RuntimeGoError("unsupported unsafe scalar type $type")
+        val buffer = ByteBuffer.allocate(bits / 8).order(ByteOrder.nativeOrder())
+        when (kind) {
+            "integer" -> {
+                val integer = (value as? GoInteger)?.value
+                    ?: throw RuntimeGoError("invalid unsafe integer value")
+                when (bits) {
+                    8 -> buffer.put(integer.toByte())
+                    16 -> buffer.putShort(integer.toShort())
+                    32 -> buffer.putInt(integer.toInt())
+                    else -> buffer.putLong(integer)
+                }
+            }
+            "float" -> if (bits == 32) buffer.putInt(java.lang.Float.floatToRawIntBits(
+                (value as? GoFloat)?.value?.toFloat() ?: throw RuntimeGoError("invalid unsafe float value")
+            )) else buffer.putLong(java.lang.Double.doubleToRawLongBits(
+                (value as? GoFloat)?.value ?: throw RuntimeGoError("invalid unsafe float value")
+            ))
+            "complex" -> {
+                val complex = value as? GoComplex ?: throw RuntimeGoError("invalid unsafe complex value")
+                if (bits == 64) {
+                    buffer.putInt(java.lang.Float.floatToRawIntBits(complex.real.toFloat()))
+                    buffer.putInt(java.lang.Float.floatToRawIntBits(complex.imaginary.toFloat()))
+                } else {
+                    buffer.putLong(java.lang.Double.doubleToRawLongBits(complex.real))
+                    buffer.putLong(java.lang.Double.doubleToRawLongBits(complex.imaginary))
+                }
+            }
+            "boolean" -> buffer.put(if ((value as? GoBoolean)?.value == true) 1 else 0)
+        }
+        return buffer.array()
+    }
+
+    private fun decodeUnsafeScalar(bytes: ByteArray, type: GoTypeSyntax): Any {
+        val (kind, bits) = unsafeScalarRepresentation(type)
+            ?: throw RuntimeGoError("unsupported unsafe scalar type $type")
+        if (bytes.size != bits / 8) throw RuntimeGoError("invalid unsafe scalar width")
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder())
+        return when (kind) {
+            "integer" -> {
+                val raw = when (bits) {
+                    8 -> (buffer.get().toLong() and 0xffL).let { if (isUnsignedInteger(type)) it else it.toByte().toLong() }
+                    16 -> (buffer.short.toLong() and 0xffffL).let { if (isUnsignedInteger(type)) it else it.toShort().toLong() }
+                    32 -> (buffer.int.toLong() and 0xffffffffL).let { if (isUnsignedInteger(type)) it else it.toInt().toLong() }
+                    else -> buffer.long
+                }
+                GoInteger(raw, type)
+            }
+            "float" -> GoFloat(if (bits == 32) Float.fromBits(buffer.int).toDouble() else Double.fromBits(buffer.long), type)
+            "complex" -> if (bits == 64) GoComplex(
+                Float.fromBits(buffer.int).toDouble(), Float.fromBits(buffer.int).toDouble(), type
+            ) else GoComplex(Double.fromBits(buffer.long), Double.fromBits(buffer.long), type)
+            "boolean" -> GoBoolean(buffer.get().toInt() != 0, type)
+            else -> throw RuntimeGoError("unsupported unsafe scalar type $type")
+        }
     }
 
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
@@ -5968,24 +6057,32 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         private val location: GoLocation?,
         val pointeeType: GoTypeSyntax? = null,
         val rawAddress: Long? = null,
-        val valueType: GoTypeSyntax? = null
+        val valueType: GoTypeSyntax? = null,
+        private val identity: Any? = null
     ) {
         val isNil: Boolean get() = location == null && (rawAddress == null || rawAddress == 0L)
-        val locationIdentity: Any? get() = location
+        val locationIdentity: Any? get() = identity ?: location
         fun get(): Any? = location?.get() ?: if (location == null)
             throw RuntimeGoError("invalid memory address or nil pointer dereference") else null
-        fun retype(type: GoTypeSyntax, pointerType: GoTypeSyntax? = valueType) = GoPointer(location, type, rawAddress, pointerType)
+        fun retype(type: GoTypeSyntax, pointerType: GoTypeSyntax? = valueType) =
+            GoPointer(location, type, rawAddress, pointerType, locationIdentity)
+        fun view(
+            type: GoTypeSyntax,
+            pointerType: GoTypeSyntax,
+            get: () -> Any?,
+            set: (Any?) -> Unit
+        ) = GoPointer(GoLocation(get, set), type, rawAddress, pointerType, locationIdentity)
         fun set(value: Any?) {
             val target = location ?: throw RuntimeGoError("invalid memory address or nil pointer dereference")
             target.set(value)
         }
         override fun equals(other: Any?) = other is GoPointer && when {
             isNil || other.isNil -> isNil && other.isNil
-            location != null && other.location != null -> location === other.location
+            locationIdentity != null && other.locationIdentity != null -> locationIdentity === other.locationIdentity
             rawAddress != null || other.rawAddress != null -> rawAddress != null && rawAddress == other.rawAddress
-            else -> location === other.location
+            else -> locationIdentity === other.locationIdentity
         }
-        override fun hashCode() = if (isNil) 0 else rawAddress?.hashCode() ?: System.identityHashCode(location)
+        override fun hashCode() = if (isNil) 0 else rawAddress?.hashCode() ?: System.identityHashCode(locationIdentity)
 
         companion object {
             fun reference(get: () -> Any?, set: (Any?) -> Unit, pointeeType: GoTypeSyntax? = null) =
