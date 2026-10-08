@@ -2064,8 +2064,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private suspend fun call(call: CallExpression, env: Environment): Any? {
         val parenthesizedType = call.function.unparenthesized() as? TypeExpression
-        if (parenthesizedType != null && call.arguments.size == 1 && !call.expandLastArgument) {
-            val targetType = resolveRuntimeType(parenthesizedType.type, env)
+        val conversionType = parenthesizedType?.type ?: parenthesizedPointerConversionType(call.function, env)
+        if (conversionType != null && call.arguments.size == 1 && !call.expandLastArgument) {
+            val targetType = resolveRuntimeType(conversionType, env)
             val value = evaluate(call.arguments.single(), env, targetType)
             val source = call.arguments.single()
             return convert(targetType, defaultRuneValue(value, source, env))
@@ -2090,6 +2091,40 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             else arguments
         }
         return call(target, args, call.expandLastArgument, env.panicState, environment = env)
+    }
+
+    private fun parenthesizedPointerConversionType(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
+        is ParenthesizedExpression -> when (val inner = expression.expression) {
+            is UnaryExpression -> if (inner.operator == TokenKind.MUL)
+                runtimeTypeOperand(inner.operand, env)?.let(::PointerGoType) else null
+            else -> parenthesizedPointerConversionType(inner, env)
+        }
+        else -> null
+    }
+
+    private fun runtimeTypeOperand(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
+        is NameExpression -> if (!env.contains(expression.name)) {
+            env.typeBinding(expression.name) ?: when {
+                typeDefinitions.containsKey(expression.name) -> NamedGoType(expression.name)
+                else -> env.imports.dotPackages.firstOrNull { path ->
+                    expression.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
+                        path == "runtime" && expression.name in GoRuntimePackage.exportedTypes
+                }?.let { path -> QualifiedGoType(path, expression.name) }
+            }
+        } else null
+        is SelectorExpression -> {
+            val alias = (expression.receiver as? NameExpression)?.name
+            val path = alias?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
+                ?.let(env.imports.packages::get)
+            if (path != null && (expression.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
+                    path == "runtime" && expression.field in GoRuntimePackage.exportedTypes))
+                QualifiedGoType(path, expression.field) else null
+        }
+        is TypeExpression -> resolveRuntimeType(expression.type, env)
+        is ParenthesizedExpression -> runtimeTypeOperand(expression.expression, env)
+        is UnaryExpression -> if (expression.operator == TokenKind.MUL)
+            runtimeTypeOperand(expression.operand, env)?.let(::PointerGoType) else null
+        else -> null
     }
 
     private fun adaptCallArguments(

@@ -2278,9 +2278,11 @@ class TypeChecker(
                 return listOf(importedType)
             }
         }
-        if (target is TypeExpression) {
+        val conversionType = (target as? TypeExpression)?.type
+            ?: parenthesizedPointerConversionType(call.function, scope)
+        if (conversionType != null) {
             if (call.arguments.size != 1 || call.expandLastArgument) error("conversion requires one argument")
-            val to = resolveLocalType(target.type, scope)
+            val to = resolveLocalType(conversionType, scope)
             validateType(to)
             val from = expressionType(call.arguments.single(), scope)
             if (!convertible(from, to, isConstantExpression(call.arguments.single(), scope))) error("cannot convert $from to $to")
@@ -2331,6 +2333,27 @@ class TypeChecker(
             requireAssignable(argumentType, expected, "argument", call.arguments.getOrNull(i), scope)
         }
         return functionType.results
+    }
+
+    private fun parenthesizedPointerConversionType(expression: Expression, scope: Scope): GoTypeSyntax? = when (expression) {
+        is ParenthesizedExpression -> when (val inner = expression.expression) {
+            is UnaryExpression -> if (inner.operator == TokenKind.MUL)
+                typeOperand(inner.operand, scope)?.let(::PointerGoType) else null
+            else -> parenthesizedPointerConversionType(inner, scope)
+        }
+        else -> null
+    }
+
+    private fun typeOperand(expression: Expression, scope: Scope): GoTypeSyntax? = when (expression) {
+        is NameExpression -> if (scope.getOrNull(expression.name) == null && isTypeName(expression.name, scope))
+            resolveLocalType(scope.typeBinding(expression.name)?.let(::NamedGoType) ?: NamedGoType(expression.name), scope)
+        else null
+        is SelectorExpression -> importedPackageType(expression, scope)
+        is TypeExpression -> resolveLocalType(expression.type, scope)
+        is ParenthesizedExpression -> typeOperand(expression.expression, scope)
+        is UnaryExpression -> if (expression.operator == TokenKind.MUL)
+            typeOperand(expression.operand, scope)?.let(::PointerGoType) else null
+        else -> null
     }
 
     private fun builtinCall(name: String, args: List<Expression>, scope: Scope, expandLastArgument: Boolean = false): List<GoTypeSyntax>? {
