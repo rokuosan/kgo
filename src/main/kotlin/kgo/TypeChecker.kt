@@ -3048,8 +3048,12 @@ class TypeChecker(
                 TokenKind.OR -> left.or(right)
                 TokenKind.XOR -> left.xor(right)
                 TokenKind.AND_NOT -> left.andNot(right)
-                TokenKind.SHL -> left.shiftLeft(right.intValueExact())
-                TokenKind.SHR -> left.shiftRight(right.intValueExact())
+                TokenKind.SHL -> if (left.signum() == 0) BigInteger.ZERO else left.shiftLeft(right.intValueExact())
+                TokenKind.SHR -> when {
+                    right.signum() < 0 -> return@runCatching null
+                    right >= BigInteger.valueOf(left.bitLength().toLong()) -> if (left.signum() < 0) BigInteger.ONE.negate() else BigInteger.ZERO
+                    else -> left.shiftRight(right.intValueExact())
+                }
                 else -> return@runCatching null
             } }.getOrNull()
         }

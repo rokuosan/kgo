@@ -3708,8 +3708,12 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
                 TokenKind.OR -> left.or(right)
                 TokenKind.XOR -> left.xor(right)
                 TokenKind.AND_NOT -> left.and(right.not())
-                TokenKind.SHL -> left.shiftLeft(right.intValueExact())
-                TokenKind.SHR -> left.shiftRight(right.intValueExact())
+                TokenKind.SHL -> if (left.signum() == 0) BigInteger.ZERO else left.shiftLeft(right.intValueExact())
+                TokenKind.SHR -> when {
+                    right.signum() < 0 -> throw RuntimeGoError("negative shift count")
+                    right >= BigInteger.valueOf(left.bitLength().toLong()) -> if (left.signum() < 0) BigInteger.ONE.negate() else BigInteger.ZERO
+                    else -> left.shiftRight(right.intValueExact())
+                }
                 else -> throw RuntimeGoError("invalid integer constant expression")
             }
         }
@@ -3816,6 +3820,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             val leftInteger = exactRational(left).integerValue("shift")
             val count = exactRational(right).integerValue("shift count")
             if (count.signum() < 0) throw RuntimeGoError("negative shift count")
+            if (op == TokenKind.SHR && count >= BigInteger.valueOf(leftInteger.bitLength().toLong()))
+                return if (leftInteger.signum() < 0) BigInteger.ONE.negate() else BigInteger.ZERO
+            if (op == TokenKind.SHL && leftInteger.signum() == 0) return BigInteger.ZERO
             if (count > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
                 throw RuntimeGoError("untyped shift result exceeds implementation limits")
             return if (op == TokenKind.SHL) leftInteger.shiftLeft(count.toInt()) else leftInteger.shiftRight(count.toInt())
@@ -3949,6 +3956,9 @@ private suspend fun evaluate(expression: Expression, env: Environment): Any? = w
             }
             return GoInteger(wrapInteger(saturated.toLong(), integerType), integerType)
         }
+        if (op == TokenKind.SHR && shift >= BigInteger.valueOf(a.bitLength().toLong()))
+            return if (a.signum() < 0) BigInteger.ONE.negate() else BigInteger.ZERO
+        if (op == TokenKind.SHL && a.signum() == 0) return BigInteger.ZERO
         if (shift > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
             throw RuntimeGoError("untyped shift result exceeds implementation limits")
         val result = when (op) {
