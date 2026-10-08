@@ -3401,17 +3401,46 @@ class TypeChecker(
                 TokenKind.OR -> left.or(right)
                 TokenKind.XOR -> left.xor(right)
                 TokenKind.AND_NOT -> left.andNot(right)
-                TokenKind.SHL -> if (left.signum() == 0) BigInteger.ZERO else left.shiftLeft(right.intValueExact())
-                TokenKind.SHR -> when {
-                    right.signum() < 0 -> return@runCatching null
-                    right >= BigInteger.valueOf(left.bitLength().toLong()) -> if (left.signum() < 0) BigInteger.ONE.negate() else BigInteger.ZERO
-                    else -> left.shiftRight(right.intValueExact())
-                }
+                TokenKind.SHL, TokenKind.SHR -> constantShiftResult(expression, left, right, scope)
                 else -> return@runCatching null
             } }.getOrNull()
         }
         else -> null
         }
+    }
+
+    private fun constantShiftResult(
+        expression: BinaryExpression,
+        value: BigInteger,
+        count: BigInteger,
+        scope: Scope
+    ): BigInteger? {
+        if (count.signum() < 0) return null
+        if (expression.operator == TokenKind.SHR && count >= BigInteger.valueOf(value.bitLength().toLong()))
+            return if (value.signum() < 0) BigInteger.ONE.negate() else BigInteger.ZERO
+        if (expression.operator == TokenKind.SHL && value.signum() == 0) return BigInteger.ZERO
+
+        val leftType = runCatching { expressionType(expression.left, scope) }.getOrNull() ?: return null
+        if (isUntyped(leftType)) {
+            if (count > BigInteger.valueOf(Int.MAX_VALUE.toLong())) return null
+            return if (expression.operator == TokenKind.SHL) value.shiftLeft(count.toInt())
+            else value.shiftRight(count.toInt())
+        }
+
+        val width = integerBitWidth(leftType)
+        if (count >= BigInteger.valueOf(width.toLong())) {
+            return when {
+                expression.operator == TokenKind.SHL -> BigInteger.ZERO
+                isUnsignedInteger(leftType) || value.signum() >= 0 -> BigInteger.ZERO
+                else -> BigInteger.ONE.negate()
+            }
+        }
+        val shift = count.toInt()
+        if (expression.operator == TokenKind.SHR) return value.shiftRight(shift)
+
+        val modulus = BigInteger.ONE.shiftLeft(width)
+        val shifted = value.shiftLeft(shift).mod(modulus)
+        return if (!isUnsignedInteger(leftType) && shifted.testBit(width - 1)) shifted - modulus else shifted
     }
 
     private fun unsafeIntrinsicName(function: Expression, scope: Scope): String? = when (val target = function.unparenthesized()) {
