@@ -386,7 +386,7 @@ class Parser(private val tokens: List<Token>) {
     private fun parseFor(): ForStatement {
         if (at(TokenKind.LBRACE)) return ForStatement(null, null, null, parseBlock())
         if (match(TokenKind.RANGE)) {
-            val expression = expressionHeader { expression() }
+            val expression = rangeExpression()
             return ForStatement(null, null, null, parseBlock(), RangeClause(emptyList(), null, expression))
         }
         if (match(TokenKind.SEMICOLON)) {
@@ -399,7 +399,7 @@ class Parser(private val tokens: List<Token>) {
         val possibleTargets = expressionHeader { expressionList() }
         val possibleOperator = if (current().kind == TokenKind.DEFINE || current().kind == TokenKind.ASSIGN) take().kind else null
         if (possibleOperator != null && match(TokenKind.RANGE)) {
-            val expression = expressionHeader { expression() }
+            val expression = rangeExpression()
             return ForStatement(null, null, null, parseBlock(), RangeClause(possibleTargets, possibleOperator, expression))
         }
         if (possibleOperator == null && match(TokenKind.RANGE))
@@ -538,6 +538,9 @@ class Parser(private val tokens: List<Token>) {
     private fun <T> expressionHeader(block: () -> T): T {
         return withCompositeLiterals(false, block)
     }
+
+    private fun rangeExpression(): Expression = if (current().kind in setOf(TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT))
+        expressionWithComposite { expression() } else expressionHeader { expression() }
 
     private fun <T> expressionWithComposite(block: () -> T): T = withCompositeLiterals(true, block)
 
