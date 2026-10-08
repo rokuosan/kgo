@@ -2664,7 +2664,16 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun boxInterfaceValue(value: Any?, dynamicType: GoTypeSyntax): GoInterfaceValue =
-        GoInterfaceValue(canonicalAliasType(dynamicType), copyForType(value, dynamicType), this)
+        GoInterfaceValue(
+            canonicalAliasType(dynamicType), copyForType(value, dynamicType),
+            implementationOwner(dynamicType)
+        )
+
+    private fun implementationOwner(type: GoTypeSyntax): Interpreter = when (type) {
+        is QualifiedGoType -> importedRuntimePackages[type.packageName] ?: this
+        is PointerGoType -> implementationOwner(type.element)
+        else -> this
+    }
 
     private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
         is GoRuntimeErrorValue -> runtimeErrorValueType
