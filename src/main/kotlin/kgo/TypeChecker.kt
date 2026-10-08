@@ -2581,7 +2581,7 @@ class TypeChecker(
             }
             return if (isUntyped(operandLeft)) {
                 if (rightExpression?.let { isConstantExpression(it, scope) } == false) {
-                    predeclaredIntType
+                    defaultType(operandLeft)
                 } else untypedInt
             } else operandLeft
         }
