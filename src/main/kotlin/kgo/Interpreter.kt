@@ -367,8 +367,10 @@ class Interpreter(
             val sliceType = signature.parameters.lastOrNull()?.type as? SliceGoType
                 ?: throw RuntimeGoError("invalid variadic function signature")
             val extras = arguments.drop(fixedCount)
-            arguments.take(fixedCount) + GoSlice(sliceType.element, extras.mapTo(mutableListOf(), ::copyValue), 0, extras.size, extras.size,
-                type = sliceType)
+            val variadicSlice = if (extras.isEmpty()) GoNilValue(sliceType) else
+                GoSlice(sliceType.element, extras.mapTo(mutableListOf(), ::copyValue), 0, extras.size, extras.size,
+                    type = sliceType)
+            arguments.take(fixedCount) + variadicSlice
         }
         val body = function.body ?: throw RuntimeGoError("function ${function.name} has no Go body")
         val env = Environment(
