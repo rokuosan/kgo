@@ -1568,7 +1568,7 @@ class TypeChecker(
             val right = expressionType(expression.right, scope)
             if (expression.operator in setOf(TokenKind.SHL, TokenKind.SHR)) {
                 val shiftContext = if (nonConstantUntypedShift(expression, scope) != null && expectedType != null) {
-                    if (underlying(expectedType) is InterfaceGoType) defaultType(untypedInt)
+                    if (underlying(expectedType) is InterfaceGoType) defaultUntypedShiftType(left)
                     else expectedType
                 } else null
                 val contextualLeft = if (shiftContext == null) left else {
@@ -2426,7 +2426,9 @@ class TypeChecker(
                 error("shift count must have unsigned integer type")
             }
             return if (isUntyped(operandLeft)) {
-                if (rightExpression?.let { isConstantExpression(it, scope) } == false) predeclaredIntType else untypedInt
+                if (rightExpression?.let { isConstantExpression(it, scope) } == false) {
+                    if (operandLeft == untypedRune) predeclaredInt32Type else predeclaredIntType
+                } else untypedInt
             } else operandLeft
         }
         val l = underlying(operandLeft); val r = underlying(operandRight)
@@ -2539,11 +2541,16 @@ class TypeChecker(
                 return
             }
             if (underlying(to) is InterfaceGoType) {
-                requireIntegerConstantRepresentable(expression, defaultType(untypedInt), scope)
+                val shift = nonConstantUntypedShift(expression, scope)!!
+                requireIntegerConstantRepresentable(
+                    expression, defaultUntypedShiftType(expressionType(shift.left, scope)), scope
+                )
             } else error("left operand of shift must be integer in this context")
         }
         val contextualFrom = if (expression != null && containsNonConstantUntypedShift(expression, scope)) {
-            val contextualType = if (underlying(to) is InterfaceGoType) defaultType(untypedInt) else to
+            val contextualType = if (underlying(to) is InterfaceGoType) {
+                if (isUntyped(from)) defaultType(from) else from
+            } else to
             expressionType(expression, scope, contextualType)
         } else from
         val integralFloatConstant = constantIntegerAssignable(contextualFrom, to, expression, scope)
@@ -2592,7 +2599,8 @@ class TypeChecker(
         val shift = expression.unparenthesized() as? BinaryExpression
         if (shift != null && shift.operator in setOf(TokenKind.SHL, TokenKind.SHR) &&
             constantInteger(shift.right, scope) == null && isUntyped(expressionType(shift.left, scope))) {
-            val contextualType = if (underlying(target) is InterfaceGoType) defaultType(untypedInt) else target
+            val contextualType = if (underlying(target) is InterfaceGoType)
+                defaultUntypedShiftType(expressionType(shift.left, scope)) else target
             if (!isInteger(contextualType)) error("left operand of shift must be integer in this context")
             requireIntegerConstantRepresentable(shift.left, contextualType, scope)
             return
@@ -3419,6 +3427,9 @@ class TypeChecker(
         untypedBool -> predeclaredBoolType
         else -> type
     }
+
+    private fun defaultUntypedShiftType(type: GoTypeSyntax): GoTypeSyntax =
+        if (type == untypedRune) predeclaredInt32Type else predeclaredIntType
 
     private fun canonicalPredeclaredAlias(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         byteType -> if ("byte" !in typeDeclarations) predeclaredUint8Type else type

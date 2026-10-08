@@ -1612,8 +1612,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val shift = expression.takeIf { it.operator == TokenKind.SHL || it.operator == TokenKind.SHR }
             val untypedShiftLeft = shift != null && isUntypedIntegerRuntimeExpression(expression.left, env)
             val constantShift = untypedShiftLeft && isRuntimeConstantExpression(expression.right, env)
+            val defaultShiftType = if (untypedShiftLeft && isRuneConstantExpression(expression.left, env))
+                predeclaredInt32RuntimeType else predeclaredIntRuntimeType
             val directShiftContext = if (untypedShiftLeft && !constantShift)
-                expectedType?.takeUnless { underlying(it) is InterfaceGoType } ?: predeclaredIntRuntimeType else null
+                expectedType?.takeUnless { underlying(it) is InterfaceGoType } ?: defaultShiftType else null
             val leftShiftContext = if (shift == null && containsNonConstantUntypedShiftRuntimeExpression(expression.left, env))
                 contextualIntegerType(expression.right, env) ?: expectedType else null
             val rightShiftContext = if (shift == null && containsNonConstantUntypedShiftRuntimeExpression(expression.right, env))

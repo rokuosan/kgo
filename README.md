@@ -72,6 +72,7 @@ struct-field and interface-method promotion follow breadth-first selector
 lookup. Some interface assignment cases remain incomplete.
 Unexported interface methods are identified by their declaring package path.
 Untyped constants assigned to empty interfaces use their default types.
+Non-constant shifts of untyped rune constants default to `rune`.
 Interface type assertions and type switches are supported for the runtime
 types currently represented, including typed nil pointers, slices, maps,
 channels, and functions stored in interfaces. Nil slices and maps have their
