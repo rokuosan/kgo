@@ -2994,13 +2994,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             "Float32bits" -> {
                 count(1)
-                GoInteger(java.lang.Float.floatToRawIntBits(x().toFloat()).toLong() and 0xffffffffL, NamedGoType("uint32"))
+                GoInteger(java.lang.Float.floatToRawIntBits(x().toFloat()).toLong() and 0xffffffffL, predeclaredUInt32RuntimeType)
             }
             "Float32frombits" -> {
                 count(1)
                 GoFloat(java.lang.Float.intBitsToFloat(number(args[0], "math.Float32frombits").toInt()).toDouble(), predeclaredFloat32RuntimeType)
             }
-            "Float64bits" -> { count(1); GoInteger(java.lang.Double.doubleToRawLongBits(x()), NamedGoType("uint64")) }
+            "Float64bits" -> { count(1); GoInteger(java.lang.Double.doubleToRawLongBits(x()), predeclaredUInt64RuntimeType) }
             "Float64frombits" -> {
                 count(1)
                 val bits = when (val value = args[0]) {
