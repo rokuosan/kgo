@@ -4261,11 +4261,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             TokenKind.CHAR -> 2
             else -> null
         }
-        is NameExpression -> when (env.typeOf(expression.name)) {
-            untypedRuneRuntimeType -> 2
-            null -> if (env.getOrNull(expression.name) is BigInteger) 1 else null
+        is NameExpression -> when {
+            env.typeOf(expression.name) == untypedRuneRuntimeType -> 2
+            env.typeOf(expression.name) != null -> null
+            importedConstantType(expression, env) == untypedRuneRuntimeType -> 2
+            env.getOrNull(expression.name) is BigInteger -> 1
             else -> null
         }
+        is SelectorExpression -> if (importedConstantType(expression, env) == untypedRuneRuntimeType) 2 else null
         is ParenthesizedExpression -> integerConstantKind(expression.expression, env)
         is UnaryExpression -> if (expression.operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.XOR))
             integerConstantKind(expression.operand, env) else null
