@@ -2295,21 +2295,17 @@ class TypeChecker(
                 when (underlying(type)) {
                     is SliceGoType -> {
                         if (args.size !in 2..3) error("make slice requires length and optional capacity")
-                        args.drop(1).forEachIndexed { index, expression ->
-                            requireMakeSize(expression, types[index + 1], scope)
+                        args.drop(1).forEachIndexed { index, _ ->
+                            requireMakeSize(types[index + 1])
                         }
                     }
                     is MapGoType -> {
                         if (args.size !in 1..2) error("make map accepts at most one size hint")
-                        args.getOrNull(1)?.let { expression ->
-                            requireMakeSize(expression, types[1], scope)
-                        }
+                        args.getOrNull(1)?.let { requireMakeSize(types[1]) }
                     }
                     is ChannelGoType -> {
                         if (args.size !in 1..2) error("make channel accepts at most one buffer size")
-                        args.getOrNull(1)?.let { expression ->
-                            requireMakeSize(expression, types[1], scope)
-                        }
+                        args.getOrNull(1)?.let { requireMakeSize(types[1]) }
                     }
                     else -> error("make requires slice, map, or channel type")
                 }
@@ -3491,11 +3487,9 @@ class TypeChecker(
     }
     private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
         dotImportedType(name) != null || (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
-    private fun requireMakeSize(expression: Expression, type: GoTypeSyntax, scope: Scope) {
+    private fun requireMakeSize(type: GoTypeSyntax) {
         if (!isInteger(type)) error("make size must be integer")
-        requireIntegerConstantRepresentable(expression, predeclaredIntType, scope)
-        // Go 1.0 specifies negative sizes and a capacity below the length as
-        // run-time panics, so leave those checks to the make implementation.
+        // Go 1.0 specifies invalid sizes and values outside int as run-time panics.
     }
 
     private fun builtinTypeArgument(expression: Expression, scope: Scope): GoTypeSyntax {
