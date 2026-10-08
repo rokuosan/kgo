@@ -41,7 +41,7 @@ data class ConstantDeclaration(
     val type: GoTypeSyntax? = null,
     val iotaIndex: Int = 0
 ) : Declaration
-data class TypeDeclaration(val name: String, val type: GoTypeSyntax, val incomplete: Boolean = false) : Declaration
+data class TypeDeclaration(val name: String, val type: GoTypeSyntax) : Declaration
 data class ImportSpecSyntax(val alias: String?, val path: String, val resolvedPath: String? = null)
 data class ImportDeclaration(val imports: List<ImportSpecSyntax>) : Declaration {
     val paths: List<String> get() = imports.map { it.path }

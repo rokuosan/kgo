@@ -270,7 +270,7 @@ class Interpreter(
                 else functions[function.name] = function
             }
         }
-        file.declarations.filterIsInstance<TypeDeclaration>().filterNot { it.incomplete }.forEach {
+        file.declarations.filterIsInstance<TypeDeclaration>().forEach {
             if (it.name != "_") {
                 val typeScope = globals.child().also { scope ->
                     scope.imports = declarationImports[it] ?: RuntimeImports()
@@ -281,7 +281,7 @@ class Interpreter(
         }
         val packageConstants = file.declarations.filterIsInstance<ConstantDeclaration>()
         val packageVariables = file.declarations.filterIsInstance<VariableDeclaration>()
-        exportedTypeNames = file.declarations.filterIsInstance<TypeDeclaration>().filterNot { it.incomplete }.mapNotNullTo(mutableSetOf()) {
+        exportedTypeNames = file.declarations.filterIsInstance<TypeDeclaration>().mapNotNullTo(mutableSetOf()) {
             it.name.takeIf { name -> name != "_" && GoUnicode6.isExportedIdentifier(name) }
         }
         exportedConstantNames = packageConstants.flatMap { it.names }.filterTo(mutableSetOf()) {
@@ -2981,8 +2981,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val namedType = NamedGoType(identity)
         if (declaration.name != "_" && !env.containsLocalType(declaration.name))
             env.defineType(declaration.name, namedType)
-        if (declaration.incomplete) typeDefinitions.putIfAbsent(identity, declaration.type)
-        else if (resolveDefinition) typeDefinitions[identity] = resolveRuntimeType(declaration.type, env)
+        if (resolveDefinition) typeDefinitions[identity] = resolveRuntimeType(declaration.type, env)
     }
 
     private fun boxInterface(value: Any?, targetType: GoTypeSyntax): Any? {
