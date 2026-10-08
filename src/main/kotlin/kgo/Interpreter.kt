@@ -630,11 +630,17 @@ class Interpreter(
                 if (name == "_") return@forEachIndexed
                 if (!declared.add(name)) throw RuntimeGoError("$name repeated on left side of :=")
                 if (env.containsLocalType(name)) throw RuntimeGoError("$name redeclared in this block")
-                val initialized = defaultConstantValue(value, sourceExpressions?.getOrNull(index), env)
-                if (env.containsLocal(name)) env.set(name, initialized)
+                val sharedExpression = sourceExpressions?.singleOrNull()?.takeIf { values.size > 1 }
+                val sourceExpression = sourceExpressions?.getOrNull(index) ?: sharedExpression
+                val resultIndex = if (sharedExpression != null) index else 0
+                val existing = env.containsLocal(name)
+                val existingType = if (existing) env.typeOf(name) else null
+                val initialized = if (existingType != null && underlying(existingType) is InterfaceGoType)
+                    boxInterfaceAssignment(value, existingType, sourceExpression, env, resultIndex)
+                else defaultConstantValue(value, sourceExpression, env)
+                if (existing) env.set(name, initialized)
                 else env.define(name, initialized, declaredTypes?.getOrNull(index) ?: inferredStorageType(
-                    initialized, sourceExpressions?.getOrNull(index), env,
-                    if (sourceExpressions?.size == 1) index else 0
+                    initialized, sourceExpression, env, resultIndex
                 ))
             }
             return
