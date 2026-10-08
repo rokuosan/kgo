@@ -3208,7 +3208,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun besselY(order: Long, x: Double): Double {
         if (x.isNaN()) return x
         if (x < 0.0) return Double.NaN
-        if (x == 0.0) return Double.NEGATIVE_INFINITY
+        if (x == 0.0) {
+            return if (order < 0L && (order and 1L) != 0L) {
+                Double.POSITIVE_INFINITY
+            } else {
+                Double.NEGATIVE_INFINITY
+            }
+        }
         if (x.isInfinite()) return 0.0
         if (order == Long.MIN_VALUE) return Double.NaN
         var n = abs(order)
