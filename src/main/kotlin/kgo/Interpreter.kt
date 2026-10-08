@@ -3852,7 +3852,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         val assertedValue = if (!matches) zeroValue(target) else if (targetInterface != null)
             GoInterfaceValue(iface.dynamicType, copyForType(iface.value, iface.dynamicType), iface.implementationOwner)
-        else iface.value
+        else copyForType(iface.value, target)
         return GoAssertionResult(assertedValue, matches, iface.dynamicType)
     }
 
