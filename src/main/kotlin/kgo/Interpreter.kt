@@ -132,7 +132,7 @@ class Interpreter(
     private val globals = Environment()
     private val elementPointers = IdentityHashMap<MutableList<Any?>, MutableMap<Int, GoPointer>>()
     private val unsafeAddressByLocation = IdentityHashMap<Any, Long>()
-    private val unsafePointerByAddress = mutableMapOf<Long, GoPointer>()
+    private val unsafePointerByAddress = mutableMapOf<Long, MutableList<GoPointer>>()
     private var nextUnsafeAddress = 0x10000L
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
@@ -4367,21 +4367,31 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         pointer.rawAddress?.let { return it }
         val identity = pointer.locationIdentity ?: throw RuntimeGoError("pointer has no address")
         synchronized(unsafeAddressByLocation) {
-            return unsafeAddressByLocation.getOrPut(identity) {
-                val layout = pointer.pointeeType?.let { type ->
-                    runCatching {
-                        GoUnsafePackage.layout(type, ::underlying) { integerLiteral(it, globals) }
-                    }.getOrNull()
-                }
-                val alignment = layout?.align ?: 8L
-                val address = alignUnsafeAddress(nextUnsafeAddress, alignment)
+            unsafeAddressByLocation[identity]?.let { return it }
+            val array = runCatching { pointer.get() as? GoArray }.getOrNull()
+            val inheritedArrayBase = array?.takeIf { it.values.isNotEmpty() }
+                ?.pointerAt(0)?.locationIdentity?.let(unsafeAddressByLocation::get)
+            val layout = pointer.pointeeType?.let { type ->
+                runCatching {
+                    GoUnsafePackage.layout(type, ::underlying) { integerLiteral(it, globals) }
+                }.getOrNull()
+            }
+            val address = inheritedArrayBase ?: alignUnsafeAddress(nextUnsafeAddress, layout?.align ?: 8L)
+            if (inheritedArrayBase == null) {
                 val reservedSize = maxOf(8L, layout?.size ?: 8L)
                 nextUnsafeAddress = alignUnsafeAddress(Math.addExact(address, reservedSize), 8L)
-                unsafePointerByAddress[address] = pointer
-                registerUnsafeSubaddresses(pointer, address, mutableSetOf())
-                address
             }
+            unsafeAddressByLocation[identity] = address
+            rememberUnsafePointer(address, pointer)
+            registerUnsafeSubaddresses(pointer, address, mutableSetOf())
+            return address
         }
+    }
+
+    private fun rememberUnsafePointer(address: Long, pointer: GoPointer) {
+        val pointers = unsafePointerByAddress.getOrPut(address) { mutableListOf() }
+        if (pointers.none { it.locationIdentity === pointer.locationIdentity && it.pointeeType == pointer.pointeeType })
+            pointers += pointer
     }
 
     private fun alignUnsafeAddress(address: Long, alignment: Long): Long {
@@ -4408,7 +4418,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val pointer = slice.backingPointerAt(index)
                 val elementAddress = Math.addExact(address, Math.multiplyExact(index.toLong(), stride))
                 pointer.locationIdentity?.let { unsafeAddressByLocation.putIfAbsent(it, elementAddress) }
-                unsafePointerByAddress.putIfAbsent(elementAddress, pointer)
+                rememberUnsafePointer(elementAddress, pointer)
                 registerUnsafeSubaddresses(pointer, elementAddress, mutableSetOf())
             }
         }
@@ -4417,7 +4427,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun registerUnsafeSubaddresses(pointer: GoPointer, base: Long, ancestors: MutableSet<String>) {
         val identity = pointer.locationIdentity ?: return
         unsafeAddressByLocation.putIfAbsent(identity, base)
-        unsafePointerByAddress.putIfAbsent(base, pointer)
+        rememberUnsafePointer(base, pointer)
         val type = pointer.pointeeType?.let(::underlying) ?: return
         val addressable = runCatching { pointer.get() }.getOrNull()
         val arrayLength: (Expression) -> BigInteger = { integerLiteral(it, globals) }
@@ -4432,7 +4442,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                         val child = addressable.pointer(name)
                         val childAddress = Math.addExact(base, offset)
                         if (child.locationIdentity != null) unsafeAddressByLocation.putIfAbsent(child.locationIdentity!!, childAddress)
-                        unsafePointerByAddress.putIfAbsent(childAddress, child)
+                        rememberUnsafePointer(childAddress, child)
                         registerUnsafeSubaddresses(child, childAddress, ancestors)
                     }
                 }
@@ -4445,7 +4455,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     val child = addressable.pointerAt(index)
                     val childAddress = Math.addExact(base, Math.multiplyExact(index.toLong(), elementLayout.size))
                     if (child.locationIdentity != null) unsafeAddressByLocation.putIfAbsent(child.locationIdentity!!, childAddress)
-                    unsafePointerByAddress.putIfAbsent(childAddress, child)
+                    rememberUnsafePointer(childAddress, child)
                     registerUnsafeSubaddresses(child, childAddress, ancestors)
                 }
             }
@@ -4455,8 +4465,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun unsafePointer(address: Long, elementType: GoTypeSyntax, pointerType: GoTypeSyntax): GoPointer {
         if (address == 0L) return GoPointer.nil(elementType, pointerType)
         synchronized(unsafeAddressByLocation) {
-            return unsafePointerByAddress[address]?.retype(elementType, pointerType)
-                ?: GoPointer.address(address, elementType, pointerType)
+            val pointers = unsafePointerByAddress[address].orEmpty()
+            val pointer = pointers.firstOrNull { it.pointeeType == elementType }
+                ?: pointers.firstOrNull { candidate ->
+                    candidate.pointeeType?.let { sameRuntimeType(it, elementType) } == true
+                }
+            return pointer?.retype(elementType, pointerType) ?: GoPointer.address(address, elementType, pointerType)
         }
     }
 
