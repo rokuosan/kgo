@@ -287,7 +287,6 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenKind.LBRACE)
         val clauses = mutableListOf<SwitchClause>()
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             val expressions = when {
                 match(TokenKind.CASE) -> expressionList()
                 match(TokenKind.DEFAULT) -> null
@@ -324,7 +323,6 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenKind.LBRACE)
         val clauses = mutableListOf<TypeSwitchClause>()
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             val types = when {
                 match(TokenKind.CASE) -> {
                     val cases = mutableListOf(parseType())
@@ -352,7 +350,6 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenKind.LBRACE)
         val cases = mutableListOf<SelectCase>()
         while (!at(TokenKind.RBRACE) && !at(TokenKind.EOF)) {
-            if (match(TokenKind.SEMICOLON)) continue
             val communication = when {
                 match(TokenKind.CASE) -> parseSimpleStatement()
                 match(TokenKind.DEFAULT) -> null
