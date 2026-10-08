@@ -3364,10 +3364,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     is GoComplex -> {
                         if (value.imaginary != 0.0 || !value.real.isFinite() || value.real % 1.0 != 0.0)
                             throw RuntimeGoError("cannot convert complex value to integer")
-                        value.real.toLong()
+                        floatingToIntegerBits(value.real)
                     }
-                    is Double -> value.toLong()
-                    is GoFloat -> value.value.toLong()
+                    is Double -> floatingToIntegerBits(value)
+                    is GoFloat -> floatingToIntegerBits(value.value)
                     else -> throw RuntimeGoError("cannot convert to integer")
                 }
                 GoInteger(wrapInteger(converted, type), type)
@@ -3376,6 +3376,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         else -> value
     }
+
+    private fun floatingToIntegerBits(value: Double): Long = if (value.isFinite())
+        BigDecimal(value).toBigInteger().toLong() else value.toLong()
 
     private fun isByteElementType(type: GoTypeSyntax): Boolean =
         canonicalAliasType(type) == predeclaredUInt8RuntimeType
