@@ -702,7 +702,7 @@ class Interpreter(
             } ?: RuntimeTarget({ env.get(target.name) }, { env.set(target.name, it) }, env.typeOf(target.name))
         is IndexExpression -> {
             val receiver = evaluateIndexReceiver(target.receiver, env)
-            val key = evaluate(target.index, env)
+            val key = evaluate(target.index, env, runtimeIndexType(receiver))
             when (receiver) {
                 is GoSlice -> {
                     fun index() = collectionIndex(key, "index")
@@ -1610,9 +1610,9 @@ class Interpreter(
         if (expressions.size == 1 && arity == 2 && expressions[0] is IndexExpression) {
             val index = expressions[0] as IndexExpression
             val receiver = evaluate(index.receiver, env)
-            val key = evaluate(index.index, env)
             if (receiver is GoMap) {
                 val keyType = receiver.keyType
+                val key = evaluate(index.index, env, keyType)
                 val mapIndex = if (underlying(keyType) is InterfaceGoType)
                     boxInterfaceAssignment(key, keyType, index.index, env) else key
                 val mapKey = mapKey(mapIndex, keyType)
@@ -1621,6 +1621,7 @@ class Interpreter(
             }
             if (receiver is GoNilValue && underlying(receiver.type) is MapGoType) {
                 val mapType = underlying(receiver.type) as MapGoType
+                val key = evaluate(index.index, env, mapType.key)
                 val mapIndex = if (underlying(mapType.key) is InterfaceGoType)
                     boxInterfaceAssignment(key, mapType.key, index.index, env) else key
                 mapKey(mapIndex, mapType.key)
@@ -1783,11 +1784,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
         }
         is CallExpression -> call(expression, env)
-        is IndexExpression -> index(
-            evaluate(expression.receiver, env), evaluate(expression.index, env), expression.index, env
-        )
-        is SliceExpression -> slice(evaluateIndexReceiver(expression.receiver, env), expression.low?.let { evaluate(it, env) },
-            expression.high?.let { evaluate(it, env) })
+        is IndexExpression -> {
+            val receiver = evaluate(expression.receiver, env)
+            index(receiver, evaluate(expression.index, env, runtimeIndexType(receiver)), expression.index, env)
+        }
+        is SliceExpression -> slice(evaluateIndexReceiver(expression.receiver, env),
+            expression.low?.let { evaluate(it, env, predeclaredIntRuntimeType) },
+            expression.high?.let { evaluate(it, env, predeclaredIntRuntimeType) })
         is TypeAssertionExpression -> {
             val assertion = assertType(evaluate(expression.receiver, env), resolveRuntimeType(expression.type, env))
             if (!assertion.ok) throw RuntimeGoError("type assertion failed: ${assertion.dynamicType} is not ${expression.type}")
@@ -1856,7 +1859,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         is IndexExpression -> {
             val receiver = evaluateIndexReceiver(expression.receiver, env)
-            val key = collectionIndex(evaluate(expression.index, env), "index")
+            val key = collectionIndex(evaluate(expression.index, env, predeclaredIntRuntimeType), "index")
             when (receiver) {
                 is GoSlice -> receiver.pointerAt(key)
                 is GoArray -> receiver.pointerAt(key)
@@ -3389,6 +3392,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             else -> throw RuntimeGoError("cannot index this value")
         }
+    }
+
+    private fun runtimeIndexType(receiver: Any?): GoTypeSyntax = when (receiver) {
+        is GoMap -> receiver.keyType
+        is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.key ?: predeclaredIntRuntimeType
+        else -> predeclaredIntRuntimeType
     }
 
     private fun arrayElement(array: GoArray, rawIndex: Any?): Any? {
