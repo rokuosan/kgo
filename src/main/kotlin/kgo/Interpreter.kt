@@ -2,6 +2,7 @@ package kgo
 
 import java.math.BigInteger
 import java.math.BigDecimal
+import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -2693,7 +2694,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is GoMap -> joinFormatted(value.values.entries.map { (key, item) ->
             concatenateFormatted(formatValueBytes(key.value), encodeGoUtf8Text(":"), formatValueBytes(item))
         }, "map[", " ", "]")
-        is GoStruct -> joinFormatted(value.fields.values.map(::formatValueBytes), "{", " ", "}")
+        is GoStruct -> joinFormatted(value.fieldSnapshot().values.map(::formatValueBytes), "{", " ", "}")
         else -> encodeGoUtf8Text(stringify(value))
     }
 
@@ -3491,7 +3492,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private fun copyValue(value: Any?): Any? = when (value) {
         is GoStruct -> GoStruct(
-            value.fields.mapValuesTo(linkedMapOf()) { copyValue(it.value) },
+            value.fieldSnapshot().mapValuesTo(linkedMapOf()) { copyValue(it.value) },
             value.namedType, value.fieldTypes, value.embeddedFields, value.staticType, value.packagePath
         )
         is GoArray -> GoArray(value.elementType, value.values.mapTo(mutableListOf(), ::copyValue), value.namedType, value.type, value.packagePath)
@@ -4691,7 +4692,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is GoFloat -> if (value.value == 0.0) 0 else value.value.hashCode()
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
         is GoArray -> value.values.fold(1) { hash, element -> 31 * hash + goHash(element) }
-        is GoStruct -> value.fields.entries.filterNot { isBlankStorageKey(it.key) }
+        is GoStruct -> value.fieldSnapshot().entries.filterNot { isBlankStorageKey(it.key) }
             .fold(0) { hash, (name, element) ->
                 31 * (31 * hash + name.hashCode()) + goHash(element)
             }
@@ -4844,7 +4845,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is GoSlice -> value.toList().joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoArray -> value.values.joinToString(prefix = "[", postfix = "]") { stringify(it) }
         is GoMap -> value.values.entries.joinToString(prefix = "map[", postfix = "]") { "${stringify(it.key.value)}:${stringify(it.value)}" }
-        is GoStruct -> value.fields.values.joinToString(prefix = "{", postfix = "}") { stringify(it) }
+        is GoStruct -> value.fieldSnapshot().values.joinToString(prefix = "{", postfix = "}") { stringify(it) }
         else -> value.toString()
     }
     private fun <T> typeError(op: String, value: Any?): T = throw RuntimeGoError("invalid operand for $op: ${value?.javaClass?.simpleName ?: "nil"}")
@@ -5285,15 +5286,17 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         override fun hashCode() = goHash(value)
     }
     private inner class GoStruct(
-        val fields: MutableMap<String, Any?>,
+        fields: MutableMap<String, Any?>,
         val namedType: String? = null,
         val fieldTypes: Map<String, GoTypeSyntax> = emptyMap(),
         val embeddedFields: Set<String> = emptySet(),
         val staticType: GoTypeSyntax? = null,
         val packagePath: String? = packageIdentity
     ) {
+        val fields: MutableMap<String, Any?> = Collections.synchronizedMap(fields)
         private val addresses = mutableMapOf<String, GoPointer>()
-        fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
+        fun fieldSnapshot(): Map<String, Any?> = synchronized(fields) { LinkedHashMap(fields) }
+        @Synchronized fun pointer(field: String): GoPointer = addresses.getOrPut(field) {
             val fieldType = fieldTypes[field] ?: NamedGoType("<unknown>")
             GoPointer.reference({ fields[field] }, { value ->
                 val assigned = copyForType(value, fieldType)
@@ -5303,11 +5306,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         override fun equals(other: Any?): Boolean {
             if (other !is GoStruct || (namedType != null && other.namedType != null &&
                     (namedType != other.namedType || packagePath != other.packagePath))) return false
-            val comparableFields = fields.keys.filterNot(::isBlankStorageKey)
-            if (comparableFields.toSet() != other.fields.keys.filterNot(::isBlankStorageKey).toSet()) return false
-            return comparableFields.all { goEqual(fields[it], other.fields[it]) }
+            val ownFields = fieldSnapshot()
+            val otherFields = other.fieldSnapshot()
+            val comparableFields = ownFields.keys.filterNot(::isBlankStorageKey)
+            if (comparableFields.toSet() != otherFields.keys.filterNot(::isBlankStorageKey).toSet()) return false
+            return comparableFields.all { goEqual(ownFields[it], otherFields[it]) }
         }
-        override fun hashCode(): Int = fields.entries.filterNot { isBlankStorageKey(it.key) }
+        override fun hashCode(): Int = fieldSnapshot().entries.filterNot { isBlankStorageKey(it.key) }
             .sortedBy { it.key }
             .fold(0) { hash, (name, value) ->
                 31 * (31 * hash + name.hashCode()) + goHash(value)
