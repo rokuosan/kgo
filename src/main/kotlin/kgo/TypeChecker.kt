@@ -1021,8 +1021,8 @@ class TypeChecker(
                 if (source.direction == ChannelDirection.SEND_ONLY) error("cannot range over send-only channel")
                 null to source.element
             }
-            is NamedGoType -> if (source.name == "string") predeclaredIntType to predeclaredInt32Type else error("cannot range over ${source.name}")
-            else -> error("cannot range over this type")
+            else -> if (isString(source)) predeclaredIntType to predeclaredInt32Type
+                else error("cannot range over this type")
         }
         if (source is ChannelGoType && range.targets.size > 1) error("range over channel permits one iteration variable")
         val types = listOfNotNull(keyAndValue.first, keyAndValue.second).take(range.targets.size)
@@ -1618,12 +1618,12 @@ class TypeChecker(
                 requireInteger(boundType, "slice index")
                 requireValidConstantIndex(bound, null, "slice", scope)
             }
-            val receiver = underlying(expressionType(expression.receiver, scope))
+            val receiverType = expressionType(expression.receiver, scope)
+            val receiver = underlying(receiverType)
             val constantLength = when (receiver) {
                 is ArrayGoType -> receiver.length?.let { constantInteger(it, scope) }
                 is PointerGoType -> (underlying(receiver.element) as? ArrayGoType)?.length?.let { constantInteger(it, scope) }
-                is NamedGoType -> if (receiver.name == "string") constantStringLength(expression.receiver, scope) else null
-                else -> null
+                else -> if (isString(receiver)) constantStringLength(expression.receiver, scope) else null
             }
             val low = expression.low?.let { constantInteger(it, scope) } ?:
                 if (expression.low == null) BigInteger.ZERO else null
@@ -1647,8 +1647,7 @@ class TypeChecker(
                     is ArrayGoType -> SliceGoType(pointed.element)
                     else -> error("cannot slice through this pointer")
                 }
-                is NamedGoType -> if (receiver.name == "string") receiver else error("cannot slice ${receiver.name}")
-                else -> error("cannot slice this value")
+                else -> if (isString(receiver)) receiverType else error("cannot slice $receiver")
             }
         }
         is TypeAssertionExpression -> {
@@ -1688,12 +1687,11 @@ class TypeChecker(
                 receiver.element
             }
             is MapGoType -> { requireAssignable(index, receiver.key, "map index", expression.index, scope); receiver.value }
-            is NamedGoType -> if (receiver.name == "string") {
+            else -> if (isString(receiver)) {
                 requireInteger(index, "string index")
                 requireValidConstantIndex(expression.index, constantStringLength(expression.receiver, scope), "string", scope)
                 byteType
-            } else error("cannot index ${receiver.name}")
-            else -> error("cannot index this value")
+            } else error("cannot index this value")
         }
     }
 
