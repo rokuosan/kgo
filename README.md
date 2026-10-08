@@ -67,7 +67,9 @@ can be assigned to any boolean type.
 ./gradlew run --args='src/example'       # execute a package from its .go files
 ```
 
-This is ongoing work toward the March 2012 Go 1.0 language specification.
+This is ongoing work toward the [Go 1.0 language specification, version of
+March 17, 2012](https://go.googlesource.com/go/+/6174b5e21e73714c63061e66efdbe180e1c5491d/doc/go_spec.html),
+published with the Go 1 release.
 Identifier letters and decimal digits use the Unicode 6.0 categories specified
 by Go 1.0, rather than the host JDK's current Unicode tables.
 Empty and basic non-empty interface values use method-set checks for declared
