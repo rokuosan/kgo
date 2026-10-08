@@ -4068,7 +4068,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 resultType
             )
             return when (op) {
-                TokenKind.ADD -> result(a + b); TokenKind.SUB -> result(a - b); TokenKind.MUL -> result(a * b); TokenKind.QUO -> result(a / b)
+                TokenKind.ADD -> result(a + b)
+                TokenKind.SUB -> result(a - b)
+                TokenKind.MUL -> result(a * b)
+                TokenKind.QUO -> result(if (resultType != null && underlying(resultType) == NamedGoType("float32"))
+                    a.toFloat().div(b.toFloat()).toDouble() else a / b)
                 TokenKind.LSS -> a < b; TokenKind.LEQ -> a <= b; TokenKind.GTR -> a > b; TokenKind.GEQ -> a >= b
                 else -> throw RuntimeGoError("invalid floating-point operator $op")
             }
