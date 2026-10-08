@@ -1974,8 +1974,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun pointerToStructField(receiver: Any?, name: String): GoPointer {
-        data class Node(val value: Any?, val ancestors: Set<String>)
-        var level = listOf(Node(receiver, emptySet()))
+        data class Node(val value: Any?, val ancestors: Set<String>, val staticType: GoTypeSyntax? = null)
+        var level = listOf(Node(receiver, emptySet(), (receiver as? GoPointer)?.pointeeType))
         while (level.isNotEmpty()) {
             val matches = mutableListOf<GoPointer>()
             val next = mutableListOf<Node>()
@@ -1983,13 +1983,15 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 var receiver = node.value
                 while (receiver is GoPointer) receiver = receiver.get()
                 val struct = receiver as? GoStruct ?: return@forEach
-                if (name in struct.fields) matches += struct.pointer(name)
+                val staticType = node.staticType ?: struct.staticType
+                if (name in struct.fields && isStructFieldAccessible(staticType, name))
+                    matches += struct.pointer(name)
                 struct.embeddedFields.forEach { embeddedName ->
                     val embeddedValue = struct.fields[embeddedName] ?: return@forEach
                     val key = "${struct.packagePath}:${struct.namedType}.$embeddedName"
                     if (key !in node.ancestors) {
                         val child = if (embeddedValue is GoPointer) embeddedValue else struct.pointer(embeddedName)
-                        next += Node(child, node.ancestors + key)
+                        next += Node(child, node.ancestors + key, struct.fieldTypes[embeddedName])
                     }
                 }
             }
