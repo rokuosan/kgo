@@ -2610,12 +2610,12 @@ class TypeChecker(
             } else if (!isComparable(operandLeft) || !isComparable(operandRight)) {
                 error("cannot compare values of type $operandLeft and $operandRight")
             }
-            return comparisonResultType(leftExpression, rightExpression, scope)
+            return comparisonResultType()
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
             if (!((isOrderedNumeric(operandLeft) && isOrderedNumeric(operandRight)) || (isString(operandLeft) && isString(operandRight)))) error("invalid ordered comparison")
             requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
-            return comparisonResultType(leftExpression, rightExpression, scope)
+            return comparisonResultType()
         }
         if (operator == TokenKind.ADD && isString(operandLeft) && isString(operandRight)) {
             requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
@@ -2677,9 +2677,7 @@ class TypeChecker(
         }
     }
 
-    private fun comparisonResultType(left: Expression?, right: Expression?, scope: Scope): GoTypeSyntax =
-        if (left != null && right != null && isConstantExpression(left, scope) && isConstantExpression(right, scope))
-            untypedBool else predeclaredBoolType
+    private fun comparisonResultType(): GoTypeSyntax = predeclaredBoolType
 
     private fun requireSameOperands(
         left: GoTypeSyntax,

@@ -59,8 +59,8 @@ an incomplete subset of the Go 1.0 type system. The Go 1.0 specification leaves
 the exact return requirement undefined; this checker follows the Go compiler's
 terminating-statement rules for functions with results, including terminating
 `if`, `switch`, `select`, and unconditional `for` statements.
-Constant comparisons retain the untyped boolean result, and comparison results
-can be assigned to any boolean type.
+Comparisons have type `bool` by default, and their results can be assigned to
+any boolean type as specified by Go 1.0.
 
 ```sh
 ./gradlew run --args='hello.go'          # execute package main
