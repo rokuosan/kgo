@@ -1033,6 +1033,7 @@ class TypeChecker(
             names.forEachIndexed { i, name ->
                 if (name == "_") {
                     if (valueTypes[i] == nilType) error("use of untyped nil in short variable declaration")
+                    statement.values.getOrNull(i)?.let { requireDefaultUntypedShift(it, scope) }
                     return@forEachIndexed
                 }
                 if (scope.containsLocalType(name)) error("$name redeclared in this block")
@@ -1694,15 +1695,20 @@ class TypeChecker(
             } else {
                 val leftHasShift = containsNonConstantUntypedShift(expression.left, scope)
                 val rightHasShift = containsNonConstantUntypedShift(expression.right, scope)
+                val comparison = expression.operator in setOf(
+                    TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ
+                )
                 val leftContext = when {
                     !leftHasShift -> null
                     !rightHasShift && !isUntyped(right) -> right
+                    comparison && !rightHasShift && isUntyped(right) -> predeclaredIntType
                     expectedType != null -> expectedType
                     else -> null
                 }
                 val rightContext = when {
                     !rightHasShift -> null
                     !leftHasShift && !isUntyped(left) -> left
+                    comparison && !leftHasShift && isUntyped(left) -> predeclaredIntType
                     expectedType != null -> expectedType
                     else -> null
                 }
@@ -2706,11 +2712,15 @@ class TypeChecker(
         values.zip(expressions).forEach { (from, expression) ->
             if (from == nilType) error("use of untyped nil in $context")
             if (isUntyped(from)) requireIntegerConstantRepresentable(expression, defaultType(from), scope)
-            nonConstantUntypedShift(expression, scope)?.let { shift ->
-                requireIntegerConstantRepresentable(
-                    shift.left, defaultUntypedShiftType(expressionType(shift.left, scope)), scope
-                )
-            }
+            requireDefaultUntypedShift(expression, scope)
+        }
+    }
+
+    private fun requireDefaultUntypedShift(expression: Expression, scope: Scope) {
+        nonConstantUntypedShift(expression, scope)?.let { shift ->
+            val shiftType = defaultUntypedShiftType(expressionType(shift.left, scope))
+            if (!isInteger(shiftType)) error("left operand of shift must be integer in this context")
+            requireIntegerConstantRepresentable(shift.left, shiftType, scope)
         }
     }
 
@@ -3628,8 +3638,7 @@ class TypeChecker(
         else -> type
     }
 
-    private fun defaultUntypedShiftType(type: GoTypeSyntax): GoTypeSyntax =
-        if (type == untypedRune) predeclaredInt32Type else predeclaredIntType
+    private fun defaultUntypedShiftType(type: GoTypeSyntax): GoTypeSyntax = defaultType(type)
 
     private fun canonicalPredeclaredAlias(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         byteType -> if ("byte" !in typeDeclarations) predeclaredUint8Type else type
