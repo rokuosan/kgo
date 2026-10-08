@@ -726,12 +726,12 @@ class Interpreter(
                     RuntimeTarget(
                         {
                             val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
-                                defaultConstantValue(key, target.index, env) else key
+                                boxInterfaceAssignment(key, receiver.keyType, target.index, env) else key
                             mapValue(receiver, mapKey(mapIndex, receiver.keyType))
                         },
                         {
                             val mapIndex = if (underlying(receiver.keyType) is InterfaceGoType)
-                                defaultConstantValue(key, target.index, env) else key
+                                boxInterfaceAssignment(key, receiver.keyType, target.index, env) else key
                             receiver.values[mapKey(mapIndex, receiver.keyType)] = copyForType(it, receiver.valueType)
                         },
                         receiver.valueType
@@ -742,7 +742,7 @@ class Interpreter(
                         ?: throw RuntimeGoError("cannot assign through index")
                     RuntimeTarget({ zeroValue(mapType.value) }, {
                         val mapIndex = if (underlying(mapType.key) is InterfaceGoType)
-                            defaultConstantValue(key, target.index, env) else key
+                            boxInterfaceAssignment(key, mapType.key, target.index, env) else key
                         mapKey(mapIndex, mapType.key)
                         throw RuntimeGoError("assignment to entry in nil map")
                     }, mapType.value)
@@ -1603,7 +1603,7 @@ class Interpreter(
             if (receiver is GoMap) {
                 val keyType = receiver.keyType
                 val mapIndex = if (underlying(keyType) is InterfaceGoType)
-                    defaultConstantValue(key, index.index, env) else key
+                    boxInterfaceAssignment(key, keyType, index.index, env) else key
                 val mapKey = mapKey(mapIndex, keyType)
                 val found = receiver.values.containsKey(mapKey)
                 return listOf(MapLookupResult(mapValue(receiver, mapKey), found))
@@ -2131,9 +2131,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 target == BuiltinValue("panic") && index == 0 ->
                     defaultConstantValue(value, call.arguments.getOrNull(index), env)
                 index > 0 && appendElementType?.let { underlying(it) is InterfaceGoType } == true ->
-                    defaultConstantValue(value, call.arguments.getOrNull(index), env)
+                    boxInterfaceAssignment(value, appendElementType, call.arguments.getOrNull(index), env)
                 index == 1 && deleteKeyType?.let { underlying(it) is InterfaceGoType } == true ->
-                    defaultConstantValue(value, call.arguments.getOrNull(index), env)
+                    boxInterfaceAssignment(value, deleteKeyType, call.arguments.getOrNull(index), env)
                 else -> value
             }
         }
@@ -2586,7 +2586,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private suspend fun evaluateCompositeValue(expression: Expression, type: GoTypeSyntax, env: Environment): Any? = when {
         expression !is ElidedCompositeLiteral -> {
             val value = evaluate(expression, env, type)
-            if (underlying(type) is InterfaceGoType) defaultConstantValue(value, expression, env) else value
+            if (underlying(type) is InterfaceGoType)
+                boxInterfaceAssignment(value, type, expression, env) else value
         }
         underlying(type) is PointerGoType -> {
             val pointerType = underlying(type) as PointerGoType
@@ -3286,12 +3287,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             is GoMap -> {
                 val key = if (underlying(receiver.keyType) is InterfaceGoType && indexExpression != null && env != null)
-                    defaultConstantValue(rawIndex, indexExpression, env) else rawIndex
+                    boxInterfaceAssignment(rawIndex, receiver.keyType, indexExpression, env) else rawIndex
                 mapValue(receiver, mapKey(key, receiver.keyType))
             }
             is GoNilValue -> (underlying(receiver.type) as? MapGoType)?.let { mapType ->
                 val key = if (underlying(mapType.key) is InterfaceGoType && indexExpression != null && env != null)
-                    defaultConstantValue(rawIndex, indexExpression, env) else rawIndex
+                    boxInterfaceAssignment(rawIndex, mapType.key, indexExpression, env) else rawIndex
                 mapKey(key, mapType.key)
                 zeroValue(mapType.value)
             } ?: throw RuntimeGoError("cannot index this value")
