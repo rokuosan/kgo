@@ -4063,16 +4063,17 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         if (left is Double || right is Double || left is GoFloat || right is GoFloat) {
             val a = real(left); val b = real(right)
             val resultType = (left as? GoFloat)?.type ?: (right as? GoFloat)?.type
+            val float32 = resultType != null && underlying(resultType) == NamedGoType("float32")
             fun result(value: Double): Any = if (resultType == null) value else GoFloat(
-                if (underlying(resultType) == NamedGoType("float32")) value.toFloat().toDouble() else value,
+                if (float32) value.toFloat().toDouble() else value,
                 resultType
             )
+            fun result32(value: Float): Any = result(value.toDouble())
             return when (op) {
-                TokenKind.ADD -> result(a + b)
-                TokenKind.SUB -> result(a - b)
-                TokenKind.MUL -> result(a * b)
-                TokenKind.QUO -> result(if (resultType != null && underlying(resultType) == NamedGoType("float32"))
-                    a.toFloat().div(b.toFloat()).toDouble() else a / b)
+                TokenKind.ADD -> if (float32) result32(a.toFloat() + b.toFloat()) else result(a + b)
+                TokenKind.SUB -> if (float32) result32(a.toFloat() - b.toFloat()) else result(a - b)
+                TokenKind.MUL -> if (float32) result32(a.toFloat() * b.toFloat()) else result(a * b)
+                TokenKind.QUO -> if (float32) result32(a.toFloat() / b.toFloat()) else result(a / b)
                 TokenKind.LSS -> a < b; TokenKind.LEQ -> a <= b; TokenKind.GTR -> a > b; TokenKind.GEQ -> a >= b
                 else -> throw RuntimeGoError("invalid floating-point operator $op")
             }
