@@ -1244,7 +1244,7 @@ class Interpreter(
                     rangeIndexed(length, effectiveRange, body, loopEnv, labels, declarationTypes) { index ->
                         if (onlyIndexIsUsed) listOf(index.toLong()) else {
                             val array = GoPointer.nil(arrayType, value.type).get() as GoArray
-                            listOf(index.toLong(), array.values[index])
+                            listOf(index.toLong(), copyValue(array.values[index]))
                         }
                     }
                 }
@@ -1267,7 +1267,7 @@ class Interpreter(
                 }
             }
             is GoSlice -> rangeIndexed(value.length, effectiveRange, body, loopEnv, labels, declarationTypes) { i ->
-                if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.get(i))
+                if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), copyValue(value.get(i)))
             }
             is GoPointer -> {
                 val arrayLength = staticRangeArrayLength(range.expression, env)
@@ -1277,12 +1277,12 @@ class Interpreter(
                 rangeIndexed(arrayLength, effectiveRange, body, loopEnv, labels, declarationTypes) { index ->
                     if (onlyIndexIsUsed) listOf(index.toLong()) else {
                         val array = value.get() as? GoArray ?: throw RuntimeGoError("range over pointer requires an array")
-                        listOf(index.toLong(), array.values[index])
+                        listOf(index.toLong(), copyValue(array.values[index]))
                     }
                 }
             }
             is GoArray -> rangeIndexed(value.values.size, effectiveRange, body, loopEnv, labels, declarationTypes) { i ->
-                if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), value.values[i])
+                if (onlyIndexIsUsed) listOf(i.toLong()) else listOf(i.toLong(), copyValue(value.values[i]))
             }
             is GoMap -> {
                 // Go 1 leaves map iteration order unspecified. Snapshot keys, then
@@ -1291,7 +1291,7 @@ class Interpreter(
                 for (key in value.snapshot().keys.shuffled()) {
                     yield()
                     if (!value.values.containsKey(key)) continue
-                    val entryValue = if (onlyIndexIsUsed) null else value.values[key]
+                    val entryValue = if (onlyIndexIsUsed) null else copyValue(value.values[key])
                     if (iterationTargets.isNotEmpty()) assignValues(iterationTargets, range.operator ?: TokenKind.ASSIGN,
                         (if (onlyIndexIsUsed) listOf(copyValue(key.value)) else listOf(copyValue(key.value), entryValue))
                             .take(iterationTargets.size), loopEnv, declaredTypes = declarationTypes)
