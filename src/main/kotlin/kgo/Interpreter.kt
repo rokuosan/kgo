@@ -2282,7 +2282,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     throw PanicSignal(value, stringify(value))
                 }
                 "recover" -> {
-                    if (!panicState.recoverAllowed) return null
+                    if (!panicState.recoverAllowed || deferredCall) return null
                     val activePanic = panicState.activePanic ?: return null
                     activePanic.recovered = true
                     panicState.activePanic = null
