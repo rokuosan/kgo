@@ -1936,10 +1936,12 @@ class Interpreter(
                     val nested = child(scopes)
                     statement.init?.let { visitStatement(it, nested) }
                     visitExpression(statement.guard.expression, nested)
+                    val interfaceType = infer(statement.guard.expression, nested)
                     statement.clauses.forEach { clause ->
                         val caseScope = child(nested)
                         statement.guard.name?.takeIf { it != "_" }?.let { name ->
                             caseScope.last()[name] = clause.types?.singleOrNull()
+                                ?.let { resolveRuntimeType(it, globals) } ?: interfaceType
                         }
                         visitBlock(BlockStatement(clause.statements), caseScope)
                     }
