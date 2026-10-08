@@ -1235,6 +1235,9 @@ class TypeChecker(
             else -> switchType ?: defaultType(caseType)
         }
         val typeKey = constantIdentityTypeKey(identityType)
+        constantConvertedNumericIdentity(expression, identityType, scope)?.let { value ->
+            return "$typeKey:$value"
+        }
         if (isComplex(identityType)) {
             constantComplex(expression, scope)?.let { value ->
                 return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
@@ -1256,6 +1259,9 @@ class TypeChecker(
         val sourceType = expressionType(expression, scope)
         val identityType = if (underlying(keyType) is InterfaceGoType) defaultType(sourceType) else keyType
         val typeKey = constantIdentityTypeKey(identityType)
+        constantConvertedNumericIdentity(expression, identityType, scope)?.let { value ->
+            return "$typeKey:$value"
+        }
         if (isComplex(identityType)) {
             constantComplex(expression, scope)?.let { value ->
                 return "$typeKey:complex:${value.real.numerator}/${value.real.denominator},${value.imaginary.numerator}/${value.imaginary.denominator}"
@@ -1267,6 +1273,40 @@ class TypeChecker(
         }
         constantStringIdentity(expression, scope)?.let { value -> return "$typeKey:string:$value" }
         return constantBoolean(expression, scope)?.let { "$typeKey:boolean:$it" }
+    }
+
+    private fun constantConvertedNumericIdentity(
+        expression: Expression,
+        type: GoTypeSyntax,
+        scope: Scope
+    ): String? {
+        val name = (underlying(type) as? NamedGoType)?.name ?: return null
+        if (name in floatNames) {
+            val value = constantRational(expression, scope) ?: constantInteger(expression, scope)?.let(GoRational::of)
+                ?: return null
+            return constantConvertedRationalIdentity(value, type)
+        }
+        if (name in complexNames) {
+            val value = constantComplex(expression, scope) ?: return null
+            val componentType = if (name.endsWith("complex64")) predeclaredFloat32Type else predeclaredFloat64Type
+            val real = constantConvertedRationalIdentity(value.real, componentType) ?: return null
+            val imaginary = constantConvertedRationalIdentity(value.imaginary, componentType) ?: return null
+            return "complex:$real,$imaginary"
+        }
+        return null
+    }
+
+    private fun constantConvertedRationalIdentity(value: GoRational, type: GoTypeSyntax): String? {
+        val name = (underlying(type) as? NamedGoType)?.name ?: return null
+        return if (name.endsWith("float32")) {
+            val converted = value.toFloat()
+            val bits = if (converted == 0f) 0 else converted.toBits()
+            "float:${bits.toUInt().toString(16)}"
+        } else if (name.endsWith("float64")) {
+            val converted = value.toDouble()
+            val bits = if (converted == 0.0) 0L else converted.toBits()
+            "float:${bits.toULong().toString(16)}"
+        } else null
     }
 
     private fun constantIdentityTypeKey(type: GoTypeSyntax): String = canonicalPredeclaredAlias(type).toString()
