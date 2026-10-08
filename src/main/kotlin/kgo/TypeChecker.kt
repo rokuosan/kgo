@@ -1090,7 +1090,7 @@ class TypeChecker(
                 if (source.direction == ChannelDirection.SEND_ONLY) error("cannot range over send-only channel")
                 null to source.element
             }
-            else -> if (isString(source)) predeclaredIntType to predeclaredIntType
+            else -> if (isString(source)) predeclaredIntType to predeclaredInt32Type
                 else error("cannot range over this type")
         }
         if (source is ChannelGoType && targets.size > 1) error("range over channel permits one iteration variable")
@@ -1684,7 +1684,8 @@ class TypeChecker(
             val right = expressionType(expression.right, scope)
             if (expression.operator in setOf(TokenKind.SHL, TokenKind.SHR)) {
                 val shiftContext = if (nonConstantUntypedShift(expression, scope) != null && expectedType != null) {
-                    if (underlying(expectedType) is InterfaceGoType) defaultUntypedShiftType()
+                    if (underlying(expectedType) is InterfaceGoType)
+                        defaultUntypedShiftType(expressionType(expression.left, scope))
                     else expectedType
                 } else null
                 val contextualLeft = if (shiftContext == null) left else {
@@ -2706,7 +2707,9 @@ class TypeChecker(
             if (from == nilType) error("use of untyped nil in $context")
             if (isUntyped(from)) requireIntegerConstantRepresentable(expression, defaultType(from), scope)
             nonConstantUntypedShift(expression, scope)?.let { shift ->
-                requireIntegerConstantRepresentable(shift.left, predeclaredIntType, scope)
+                requireIntegerConstantRepresentable(
+                    shift.left, defaultUntypedShiftType(expressionType(shift.left, scope)), scope
+                )
             }
         }
     }
@@ -2729,7 +2732,7 @@ class TypeChecker(
             if (underlying(to) is InterfaceGoType) {
                 val shift = nonConstantUntypedShift(expression, scope)!!
                 requireIntegerConstantRepresentable(
-                    expression, defaultUntypedShiftType(), scope
+                    expression, defaultUntypedShiftType(expressionType(shift.left, scope)), scope
                 )
             } else error("left operand of shift must be integer in this context")
         }
@@ -2786,7 +2789,7 @@ class TypeChecker(
         if (shift != null && shift.operator in setOf(TokenKind.SHL, TokenKind.SHR) &&
             constantInteger(shift.right, scope) == null && isUntyped(expressionType(shift.left, scope))) {
             val contextualType = if (underlying(target) is InterfaceGoType)
-                defaultUntypedShiftType() else target
+                defaultUntypedShiftType(expressionType(shift.left, scope)) else target
             if (!isInteger(contextualType)) error("left operand of shift must be integer in this context")
             requireIntegerConstantRepresentable(shift.left, contextualType, scope)
             return
@@ -2904,10 +2907,10 @@ class TypeChecker(
         canonicalPredeclaredAlias(type) == predeclaredUint8Type
 
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
-        canonicalPredeclaredAlias(type) == predeclaredIntType
+        canonicalPredeclaredAlias(type) == predeclaredInt32Type
 
     private fun isPredeclaredRuneType(type: GoTypeSyntax): Boolean =
-        canonicalPredeclaredAlias(type) == predeclaredIntType
+        canonicalPredeclaredAlias(type) == predeclaredInt32Type
 
     private fun validateType(type: GoTypeSyntax, active: Set<String> = emptySet(), indirect: Boolean = false) {
         when (type) {
@@ -3552,7 +3555,7 @@ class TypeChecker(
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
                     "byte" -> predeclaredUint8Type
-                    "rune" -> predeclaredIntType
+                    "rune" -> predeclaredInt32Type
                     "error" -> errorInterfaceType
                     else -> type
                 }
@@ -3624,7 +3627,7 @@ class TypeChecker(
     }
     private fun defaultType(type: GoTypeSyntax) = when (type) {
         untypedInt -> predeclaredIntType
-        untypedRune -> predeclaredIntType
+        untypedRune -> predeclaredInt32Type
         untypedFloat -> predeclaredFloat64Type
         untypedComplex -> predeclaredComplex128Type
         untypedString -> predeclaredStringType
@@ -3632,12 +3635,13 @@ class TypeChecker(
         else -> type
     }
 
-    private fun defaultUntypedShiftType(): GoTypeSyntax = predeclaredIntType
+    private fun defaultUntypedShiftType(type: GoTypeSyntax): GoTypeSyntax =
+        if (type == untypedRune) predeclaredInt32Type else predeclaredIntType
 
     private fun canonicalPredeclaredAlias(type: GoTypeSyntax): GoTypeSyntax = when (type) {
         byteType -> if ("byte" !in typeDeclarations) predeclaredUint8Type else type
         NamedGoType("uint8") -> if ("uint8" !in typeDeclarations) predeclaredUint8Type else type
-        runeType -> if ("rune" !in typeDeclarations) predeclaredIntType else type
+        runeType -> if ("rune" !in typeDeclarations) predeclaredInt32Type else type
         intType -> if ("int" !in typeDeclarations) predeclaredIntType else type
         NamedGoType("error") -> if ("error" !in typeDeclarations) predeclaredErrorType else type
         NamedGoType("bool") -> if ("bool" !in typeDeclarations) predeclaredBoolType else type
