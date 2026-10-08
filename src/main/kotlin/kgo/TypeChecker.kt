@@ -1736,7 +1736,7 @@ class TypeChecker(
                     containsBooleanComparison(expression.operand)
             }
             val operand = expressionType(expression.operand, scope, operandContext)
-            when (expression.operator) {
+            val result = when (expression.operator) {
                 TokenKind.ADD, TokenKind.SUB -> { if (!isNumeric(operand)) error("unary operator requires numeric operand"); operand }
                 TokenKind.NOT -> { requireBoolean(operand, "!"); operand }
                 TokenKind.XOR -> { if (!isInteger(operand)) error("^ requires integer operand"); operand }
@@ -1753,13 +1753,14 @@ class TypeChecker(
                 }
                 else -> error("invalid unary operator")
             }
+            validateTypedConstantResult(expression, result, scope)
         }
         is BinaryExpression -> {
             val logical = expression.operator == TokenKind.LAND || expression.operator == TokenKind.LOR
             val logicalContext = expectedType?.takeIf(::isBoolean).takeIf { logical }
             val left = expressionType(expression.left, scope, logicalContext)
             val right = expressionType(expression.right, scope, logicalContext)
-            if (expression.operator in setOf(TokenKind.SHL, TokenKind.SHR)) {
+            val result = if (expression.operator in setOf(TokenKind.SHL, TokenKind.SHR)) {
                 val shiftContext = if (nonConstantUntypedShift(expression, scope) != null && expectedType != null) {
                     if (underlying(expectedType) is InterfaceGoType)
                         defaultUntypedShiftType(expressionType(expression.left, scope))
@@ -1799,6 +1800,7 @@ class TypeChecker(
                     expectedType?.takeIf { comparison && isBoolean(it) }
                 )
             }
+            validateTypedConstantResult(expression, result, scope)
         }
         is CallExpression -> {
             val results = callResults(expression, scope)
@@ -2911,6 +2913,14 @@ class TypeChecker(
         }
         is FunctionLiteralExpression -> false
         is NameExpression, is LiteralExpression, is TypeExpression -> false
+    }
+
+    private fun validateTypedConstantResult(
+        expression: Expression, resultType: GoTypeSyntax, scope: Scope
+    ): GoTypeSyntax {
+        if (!isUntyped(resultType) && isConstantExpression(expression, scope))
+            requireIntegerConstantRepresentable(expression, resultType, scope)
+        return resultType
     }
 
     private fun requireIntegerConstantRepresentable(expression: Expression, target: GoTypeSyntax, scope: Scope = globals) {
