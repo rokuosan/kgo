@@ -2787,7 +2787,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             "Erf" -> unary(Erf::erf)
             "Erfc" -> unary(Erf::erfc)
             "Floor" -> unary(Math::floor)
-            "Gamma" -> unary(Gamma::gamma)
+            "Gamma" -> unary(::goMathGamma)
             "Log" -> unary(Math::log)
             "Log10" -> unary(Math::log10)
             "Log1p" -> unary(Math::log1p)
@@ -2927,6 +2927,18 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         x == 0.0 && y == 0.0 -> if (x.toRawBits() < 0L) x else y
         x < y -> x
         else -> y
+    }
+
+    private fun goMathGamma(x: Double): Double = when {
+        x == Double.NEGATIVE_INFINITY || x.isNaN() -> x
+        x < -170.5674972726612 || x > 171.61447887182298 -> Double.POSITIVE_INFINITY
+        x < 0.0 && x == floor(x) -> {
+            val magnitude = -x.toInt()
+            if (magnitude > 33 && magnitude % 2 == 0) Double.NEGATIVE_INFINITY
+            else Double.POSITIVE_INFINITY
+        }
+        x == 0.0 -> Double.POSITIVE_INFINITY
+        else -> Gamma.gamma(x)
     }
 
     private fun besselJ(order: Long, x: Double): Double {
