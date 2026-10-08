@@ -210,7 +210,7 @@ class TypeChecker(
                 if (declaredType != null) {
                     validateType(declaredType)
                     requireAssignableValues(values, declaration.values, declaredType, "initializer", globals)
-                } else requireDefaultIntegerValues(values, declaration.values, "initializer", globals)
+                } else requireDefaultValues(values, declaration.values, "initializer", globals)
                 declaration.names.forEachIndexed { i, name ->
                     if (name != "_") globals.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType))
                 }
@@ -791,7 +791,7 @@ class TypeChecker(
                         if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
                             error("initializer count mismatch")
                         if (declaredType != null) requireAssignableValues(values, declaration.values, declaredType, "initializer", scope)
-                        else requireDefaultIntegerValues(values, declaration.values, "initializer", scope)
+                        else requireDefaultValues(values, declaration.values, "initializer", scope)
                         declaration.names.forEachIndexed { i, name ->
                             if (name != "_") {
                                 if (scope.containsLocal(name)) error("$name redeclared in this block")
@@ -855,7 +855,7 @@ class TypeChecker(
                 if (statement.values.isNotEmpty() && values.size != statement.names.size)
                     error("initializer count mismatch")
                 if (declaredType != null) requireAssignableValues(values, statement.values, declaredType, "initializer", scope)
-                else requireDefaultIntegerValues(values, statement.values, "initializer", scope)
+                else requireDefaultValues(values, statement.values, "initializer", scope)
                 statement.names.forEachIndexed { i, name ->
                     if (name != "_") {
                         if (scope.containsLocal(name)) error("$name redeclared in this block")
@@ -964,13 +964,17 @@ class TypeChecker(
             requireUniqueNames(names, "short declaration")
             var added = 0
             names.forEachIndexed { i, name ->
-                if (name == "_") return@forEachIndexed
+                if (name == "_") {
+                    if (valueTypes[i] == nilType) error("use of untyped nil in short variable declaration")
+                    return@forEachIndexed
+                }
                 if (scope.containsLocalType(name)) error("$name redeclared in this block")
                 if (scope.containsLocal(name)) {
                     if (scope.isConstant(name)) error("cannot assign to constant $name")
                     requireAssignable(valueTypes[i], scope.get(name), "assignment", statement.values.getOrNull(i), scope)
                 }
                 else {
+                    if (valueTypes[i] == nilType) error("use of untyped nil in short variable declaration")
                     val targetType = defaultType(valueTypes[i])
                     statement.values.getOrNull(i)?.let { requireIntegerConstantRepresentable(it, targetType, scope) }
                     scope.define(name, targetType, trackUsage = true)
@@ -993,7 +997,7 @@ class TypeChecker(
                 val value = statement.values.getOrNull(i)
                 if (left != null) requireAssignable(right, left, "assignment", value, scope)
                 else if (value != null && statement.values.size == rightTypes.size)
-                    requireDefaultIntegerValues(listOf(right), listOf(value), "assignment", scope)
+                    requireDefaultValues(listOf(right), listOf(value), "assignment", scope)
             }
         } else {
             if (leftTypes.size != 1 || rightTypes.size != 1) error("compound assignment requires one operand")
@@ -2454,9 +2458,10 @@ class TypeChecker(
         } else values.forEach { requireAssignable(it, to, context) }
     }
 
-    private fun requireDefaultIntegerValues(values: List<GoTypeSyntax>, expressions: List<Expression>, context: String, scope: Scope = globals) {
+    private fun requireDefaultValues(values: List<GoTypeSyntax>, expressions: List<Expression>, context: String, scope: Scope = globals) {
         if (values.size != expressions.size) return
         values.zip(expressions).forEach { (from, expression) ->
+            if (from == nilType) error("use of untyped nil in $context")
             if (isUntyped(from)) requireIntegerConstantRepresentable(expression, defaultType(from), scope)
             nonConstantUntypedShift(expression, scope)?.let { shift ->
                 requireIntegerConstantRepresentable(shift.left, predeclaredIntType, scope)
