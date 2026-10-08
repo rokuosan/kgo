@@ -1074,7 +1074,11 @@ class Interpreter(
             ?: InterfaceGoType(emptyList())
 
     private suspend fun executeRange(range: RangeClause, body: BlockStatement, env: Environment, labels: Set<String>) {
-        val onlyIndexIsUsed = range.targets.size <= 1 || range.targets.getOrNull(1).isBlankIdentifier()
+        if (range.targets.size == 2 && range.targets[1].isBlankIdentifier()) {
+            executeRange(range.copy(targets = range.targets.take(1)), body, env, labels)
+            return
+        }
+        val onlyIndexIsUsed = range.targets.size <= 1
         val declarationTypes = if (range.operator == TokenKind.DEFINE) rangeVariableTypes(range, env) else null
         // A := range clause declares its variables in the for statement's scope.
         // Keep that scope separate so a same-named variable in the enclosing block

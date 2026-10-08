@@ -1041,6 +1041,8 @@ class TypeChecker(
     }
 
     private fun checkRange(range: RangeClause, body: BlockStatement, scope: Scope) {
+        val targets = if (range.targets.size == 2 && isBlankIdentifier(range.targets[1]))
+            range.targets.take(1) else range.targets
         if (range.targets.isNotEmpty() && range.operator == null)
             error("range variables require = or :=")
         val source = underlying(expressionType(range.expression, scope))
@@ -1059,19 +1061,19 @@ class TypeChecker(
             else -> if (isString(source)) predeclaredIntType to predeclaredInt32Type
                 else error("cannot range over this type")
         }
-        if (source is ChannelGoType && range.targets.size > 1) error("range over channel permits one iteration variable")
-        val types = listOfNotNull(keyAndValue.first, keyAndValue.second).take(range.targets.size)
-        if (types.size != range.targets.size) error("too many range variables")
+        if (source is ChannelGoType && targets.size > 1) error("range over channel permits one iteration variable")
+        val types = listOfNotNull(keyAndValue.first, keyAndValue.second).take(targets.size)
+        if (types.size != targets.size) error("too many range variables")
         if (range.operator == TokenKind.DEFINE) {
-            val names = range.targets.map { (it as? NameExpression)?.name ?: error("range declaration requires identifiers") }
+            val names = targets.map { (it as? NameExpression)?.name ?: error("range declaration requires identifiers") }
             requireUniqueNames(names, "range declaration")
             if (names.none { it != "_" }) error("range declaration must introduce a variable")
-            range.targets.forEachIndexed { i, target ->
+            targets.forEachIndexed { i, target ->
                 val name = (target as? NameExpression)?.name ?: error("range declaration requires identifiers")
                 if (name != "_") scope.define(name, defaultType(types[i]), trackUsage = true)
             }
         } else if (range.operator == TokenKind.ASSIGN) {
-            range.targets.zip(types).forEach { (target, type) ->
+            targets.zip(types).forEach { (target, type) ->
                 requireAssignmentTarget(target, scope)
                 if (!isBlankIdentifier(target))
                     requireAssignable(type, assignmentTargetType(target, scope), "range assignment")
