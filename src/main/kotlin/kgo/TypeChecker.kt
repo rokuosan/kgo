@@ -359,7 +359,7 @@ class TypeChecker(
     private fun externalizeType(type: GoTypeSyntax, importPath: String?): GoTypeSyntax {
         fun visit(current: GoTypeSyntax): GoTypeSyntax = when (current) {
             is NamedGoType -> if (importPath != null && current.name in typeDeclarations)
-                QualifiedGoType(importPath, current.name) else current
+                QualifiedGoType(importPath, current.name) else canonicalPredeclaredAlias(current)
             is PointerGoType -> PointerGoType(visit(current.element))
             is SliceGoType -> SliceGoType(visit(current.element))
             is ArrayGoType -> ArrayGoType(current.length?.let(::externalizeArrayLength), visit(current.element))
@@ -2732,13 +2732,13 @@ class TypeChecker(
         }
         val name = (underlying(checkedTarget) as? NamedGoType)?.name ?: return
         val bits = when (name) {
-            "#predeclared-uint8", "int8", "uint8", "byte" -> 8
-            "int16", "uint16" -> 16
+            "#predeclared-int8", "#predeclared-uint8", "int8", "uint8", "byte" -> 8
+            "#predeclared-int16", "#predeclared-uint16", "int16", "uint16" -> 16
             "#predeclared-int32", "#predeclared-uint32", "int32", "uint32" -> 32
             else -> 64
         }
         val unsigned = name in setOf(
-            "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
+            "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
             "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
         )
         val minimum = if (unsigned) BigInteger.ZERO else BigInteger.ONE.shiftLeft(bits - 1).negate()
@@ -3436,11 +3436,9 @@ class TypeChecker(
             "#predeclared-bool" -> boolType
             "#predeclared-float32", "#predeclared-float64", "#predeclared-string",
             "#predeclared-complex64", "#predeclared-complex128" -> type
-            "#predeclared-int", "#predeclared-uint8" -> type
-            "#predeclared-int32" -> NamedGoType("int32")
-            "#predeclared-uint32" -> NamedGoType("uint32")
-            "#predeclared-uint64" -> NamedGoType("uint64")
-            "#predeclared-uintptr" -> NamedGoType("uintptr")
+            "#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32",
+            "#predeclared-int64", "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16",
+            "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr" -> type
             else -> typeDeclarations[type.name]?.let { if (type.name in seen) type else underlying(it, seen + type.name) }
                 ?: when (type.name) {
                     "byte" -> predeclaredUint8Type
@@ -3459,9 +3457,10 @@ class TypeChecker(
     private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType &&
         (!type.name.startsWith("#") || type.name.startsWith("#predeclared-"))
     private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
-    private fun isUintptrType(type: GoTypeSyntax) = underlying(type) == NamedGoType("uintptr")
+    private fun isUintptrType(type: GoTypeSyntax) =
+        (underlying(type) as? NamedGoType)?.name in setOf("#predeclared-uintptr", "uintptr")
     private fun isUntyped(type: GoTypeSyntax) = type is NamedGoType && type.name.startsWith("#untyped-")
-    private fun isBuiltinType(name: String) = name in builtinTypes || name == "error"
+    private fun isBuiltinType(name: String) = name in builtinTypes || name == "error" || name.startsWith("#predeclared-")
     private fun isNumeric(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
         untypedInt, untypedRune, untypedFloat, untypedComplex -> true
         is NamedGoType -> t.name in integerNames || t.name in floatNames || t.name in complexNames
@@ -3489,7 +3488,7 @@ class TypeChecker(
     }
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean =
         (underlying(type) as? NamedGoType)?.name in setOf(
-            "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
+            "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
             "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
         )
     private fun complementIntegerConstant(value: BigInteger, type: GoTypeSyntax): BigInteger {
@@ -3498,8 +3497,8 @@ class TypeChecker(
         return value.not().and(mask)
     }
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
-        "#predeclared-uint8", "int8", "uint8", "byte" -> 8
-        "int16", "uint16" -> 16
+        "#predeclared-int8", "#predeclared-uint8", "int8", "uint8", "byte" -> 8
+        "#predeclared-int16", "#predeclared-uint16", "int16", "uint16" -> 16
         "#predeclared-uint32", "int32", "uint32" -> 32
         else -> 64
     }
@@ -3537,7 +3536,12 @@ class TypeChecker(
         stringType -> if ("string" !in typeDeclarations) predeclaredStringType else type
         NamedGoType("complex64") -> if ("complex64" !in typeDeclarations) predeclaredComplex64Type else type
         NamedGoType("complex128") -> if ("complex128" !in typeDeclarations) predeclaredComplex128Type else type
+        NamedGoType("int8") -> if ("int8" !in typeDeclarations) predeclaredInt8Type else type
+        NamedGoType("int16") -> if ("int16" !in typeDeclarations) predeclaredInt16Type else type
         NamedGoType("int32") -> if ("int32" !in typeDeclarations) predeclaredInt32Type else type
+        NamedGoType("int64") -> if ("int64" !in typeDeclarations) predeclaredInt64Type else type
+        NamedGoType("uint") -> if ("uint" !in typeDeclarations) predeclaredUintType else type
+        NamedGoType("uint16") -> if ("uint16" !in typeDeclarations) predeclaredUint16Type else type
         NamedGoType("uint32") -> if ("uint32" !in typeDeclarations) predeclaredUint32Type else type
         NamedGoType("uint64") -> if ("uint64" !in typeDeclarations) predeclaredUint64Type else type
         NamedGoType("uintptr") -> if ("uintptr" !in typeDeclarations) predeclaredUintptrType else type
@@ -3687,8 +3691,13 @@ class TypeChecker(
         private val nilType = NamedGoType("#nil")
         private val intType = NamedGoType("int")
         private val predeclaredIntType = NamedGoType("#predeclared-int")
+        private val predeclaredInt8Type = NamedGoType("#predeclared-int8")
+        private val predeclaredInt16Type = NamedGoType("#predeclared-int16")
         private val predeclaredInt32Type = NamedGoType("#predeclared-int32")
+        private val predeclaredInt64Type = NamedGoType("#predeclared-int64")
+        private val predeclaredUintType = NamedGoType("#predeclared-uint")
         private val predeclaredUint8Type = NamedGoType("#predeclared-uint8")
+        private val predeclaredUint16Type = NamedGoType("#predeclared-uint16")
         private val predeclaredErrorType = NamedGoType("#predeclared-error")
         private val predeclaredBoolType = NamedGoType("#predeclared-bool")
         private val predeclaredFloat32Type = NamedGoType("#predeclared-float32")
@@ -3704,7 +3713,7 @@ class TypeChecker(
         private val boolType = NamedGoType("bool")
         private val stringType = NamedGoType("string")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(stringType))))
-        private val integerNames = setOf("#predeclared-int", "#predeclared-int32", "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
+        private val integerNames = setOf("#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32", "#predeclared-int64", "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val floatNames = setOf("#predeclared-float32", "#predeclared-float64", "float32", "float64")
         private val complexNames = setOf("#predeclared-complex64", "#predeclared-complex128", "complex64", "complex128")
         private val builtinTypes = integerNames + floatNames + complexNames + setOf("bool", "string")

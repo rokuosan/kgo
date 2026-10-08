@@ -1046,8 +1046,13 @@ class Interpreter(
         NamedGoType("string") -> if (!typeDefinitions.containsKey("string")) predeclaredStringRuntimeType else type
         NamedGoType("complex64") -> if (!typeDefinitions.containsKey("complex64")) predeclaredComplex64RuntimeType else type
         NamedGoType("complex128") -> if (!typeDefinitions.containsKey("complex128")) predeclaredComplex128RuntimeType else type
+        NamedGoType("int8") -> if (!typeDefinitions.containsKey("int8")) predeclaredInt8RuntimeType else type
+        NamedGoType("int16") -> if (!typeDefinitions.containsKey("int16")) predeclaredInt16RuntimeType else type
         NamedGoType("uint32") -> if (!typeDefinitions.containsKey("uint32")) predeclaredUInt32RuntimeType else type
         NamedGoType("uint64") -> if (!typeDefinitions.containsKey("uint64")) predeclaredUInt64RuntimeType else type
+        NamedGoType("int64") -> if (!typeDefinitions.containsKey("int64")) predeclaredInt64RuntimeType else type
+        NamedGoType("uint") -> if (!typeDefinitions.containsKey("uint")) predeclaredUIntRuntimeType else type
+        NamedGoType("uint16") -> if (!typeDefinitions.containsKey("uint16")) predeclaredUInt16RuntimeType else type
         NamedGoType("uintptr") -> if (!typeDefinitions.containsKey("uintptr")) predeclaredUintptrRuntimeType else type
         is PointerGoType -> PointerGoType(canonicalAliasType(type.element))
         is SliceGoType -> SliceGoType(canonicalAliasType(type.element))
@@ -2606,10 +2611,6 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             "#predeclared-string" -> NamedGoType("string")
             "#predeclared-complex64" -> NamedGoType("complex64")
             "#predeclared-complex128" -> NamedGoType("complex128")
-            "#predeclared-uint32" -> NamedGoType("uint32")
-            "#predeclared-uint64" -> NamedGoType("uint64")
-            "#predeclared-uintptr" -> NamedGoType("uintptr")
-            "#predeclared-int32" -> NamedGoType("int32")
             else -> typeDefinitions[type.name]?.let(::underlying) ?: when (type.name) {
             "byte" -> predeclaredUInt8RuntimeType
             "rune" -> predeclaredIntRuntimeType
@@ -2628,7 +2629,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun externalizeRuntimeType(type: GoTypeSyntax, importPath: String): GoTypeSyntax = when (type) {
-        is NamedGoType -> if (typeDefinitions.containsKey(type.name)) QualifiedGoType(importPath, type.name) else type
+        is NamedGoType -> if (typeDefinitions.containsKey(type.name)) QualifiedGoType(importPath, type.name) else canonicalAliasType(type)
         is PointerGoType -> PointerGoType(externalizeRuntimeType(type.element, importPath))
         is SliceGoType -> SliceGoType(externalizeRuntimeType(type.element, importPath))
         is ArrayGoType -> ArrayGoType(type.length?.let(::externalizeRuntimeArrayLength),
@@ -3521,7 +3522,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
         setOf(
-            "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
+            "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
             "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
         )
 
@@ -3589,8 +3590,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
-        "#predeclared-uint8", "int8", "uint8", "byte" -> 8
-        "int16", "uint16" -> 16
+        "#predeclared-int8", "#predeclared-uint8", "int8", "uint8", "byte" -> 8
+        "#predeclared-int16", "#predeclared-uint16", "int16", "uint16" -> 16
         "#predeclared-int32", "int32", "uint32" -> 32
         else -> 64
     }
@@ -5174,8 +5175,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         private val predeclaredBoolRuntimeType = NamedGoType("#predeclared-bool")
         private val predeclaredErrorRuntimeType = NamedGoType("#predeclared-error")
         private val predeclaredIntRuntimeType = NamedGoType("#predeclared-int")
+        private val predeclaredInt8RuntimeType = NamedGoType("#predeclared-int8")
+        private val predeclaredInt16RuntimeType = NamedGoType("#predeclared-int16")
         private val predeclaredInt32RuntimeType = NamedGoType("#predeclared-int32")
+        private val predeclaredInt64RuntimeType = NamedGoType("#predeclared-int64")
+        private val predeclaredUIntRuntimeType = NamedGoType("#predeclared-uint")
         private val predeclaredUInt8RuntimeType = NamedGoType("#predeclared-uint8")
+        private val predeclaredUInt16RuntimeType = NamedGoType("#predeclared-uint16")
         private val predeclaredFloat32RuntimeType = NamedGoType("#predeclared-float32")
         private val predeclaredFloat64RuntimeType = NamedGoType("#predeclared-float64")
         private val predeclaredStringRuntimeType = NamedGoType("#predeclared-string")
@@ -5184,7 +5190,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         private val predeclaredUInt32RuntimeType = NamedGoType("#predeclared-uint32")
         private val predeclaredUInt64RuntimeType = NamedGoType("#predeclared-uint64")
         private val predeclaredUintptrRuntimeType = NamedGoType("#predeclared-uintptr")
-        private val integerTypeNames = setOf("#predeclared-int", "#predeclared-int32", "#predeclared-uint8", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
+        private val integerTypeNames = setOf("#predeclared-int", "#predeclared-int8", "#predeclared-int16", "#predeclared-int32", "#predeclared-int64", "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(NamedGoType("string")))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")
