@@ -4660,8 +4660,15 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val dataAddress = slice?.let {
                     val elementSize = GoUnsafePackage.layout(actual.element, ::underlying) { integerLiteral(it, globals) }.size
                     val baseView = it.backingView()
-                    val backingBytes = Math.multiplyExact(it.backingLength().toLong(), elementSize)
-                    val baseAddress = unsafeOpaqueAddress(it.unsafeBackingIdentity, baseView, backingBytes)
+                    val baseAddress = if (it.backingLength() > 0) {
+                        registerUnsafeSliceBacking(it)
+                        val firstIdentity = it.backingPointerAt(0).locationIdentity
+                            ?: throw RuntimeGoError("slice backing has no address")
+                        synchronized(unsafeAddressByLocation) {
+                            unsafeAddressByLocation[firstIdentity]
+                                ?: throw RuntimeGoError("slice backing has no address")
+                        }
+                    } else unsafeOpaqueAddress(it.unsafeBackingIdentity, baseView)
                     synchronized(unsafeAddressByLocation) {
                         unsafeSliceBackingByAddress.putIfAbsent(baseAddress, baseView)
                     }
@@ -4793,11 +4800,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     val (baseAddress, baseSlice) = synchronized(unsafeAddressByLocation) {
                         unsafeSliceBackingByAddress.entries.firstOrNull { entry ->
                             val delta = address - entry.key
-                            delta >= 0L && delta % elementSize == 0L &&
+                            delta >= 0L && (elementSize == 0L || delta % elementSize == 0L) &&
                                 delta <= entry.value.backingLength().toLong() * elementSize
                         }?.let { it.key to it.value }
                     } ?: throw RuntimeGoError("invalid unsafe slice address")
-                    val offset = Math.toIntExact((address - baseAddress) / elementSize)
+                    val offset = if (elementSize == 0L) 0 else Math.toIntExact((address - baseAddress) / elementSize)
                     if (offset.toLong() + capacity > baseSlice.backingLength())
                         throw RuntimeGoError("invalid unsafe slice bounds")
                     baseSlice.unsafeView(offset, length.toInt(), capacity.toInt(), actual.element, type)
