@@ -3933,8 +3933,9 @@ class TypeChecker(
         is SelectorExpression -> importedPackageType(target, scope) != null
         else -> false
     }
-    private fun isTypeName(name: String, scope: Scope): Boolean = scope.typeBinding(name) != null ||
-        dotImportedType(name) != null || (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations))
+    private fun isTypeName(name: String, scope: Scope): Boolean = !scope.shadowsTypeName(name) &&
+        (scope.typeBinding(name) != null || dotImportedType(name) != null ||
+            (name !in packagePaths && (isBuiltinType(name) || name in typeDeclarations)))
     private fun requireMakeSize(type: GoTypeSyntax, expression: Expression, scope: Scope) {
         if (!isInteger(type) && !constantIntegerAssignable(type, predeclaredIntType, expression, scope))
             error("make size must be integer")
