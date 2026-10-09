@@ -5763,6 +5763,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is GoComplex -> 31 * (if (value.real == 0.0) 0 else value.real.hashCode()) + (if (value.imaginary == 0.0) 0 else value.imaginary.hashCode())
         is GoArray -> value.valueSnapshot().fold(1) { hash, element -> 31 * hash + goHash(element) }
         is GoStruct -> value.fieldSnapshot().entries.filterNot { isBlankStorageKey(it.key) }
+            .sortedBy { it.key }
             .fold(0) { hash, (name, element) ->
                 31 * (31 * hash + name.hashCode()) + goHash(element)
             }
