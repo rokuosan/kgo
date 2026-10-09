@@ -1275,12 +1275,14 @@ class Interpreter(
         // is shadowed, and reuse the new bindings across Go 1.0 loop iterations.
         val loopEnv = if (range.operator == TokenKind.DEFINE) env.child() else env
         val rangeExpressionType = staticExpressionType(range.expression, env)?.let(::underlying)
-        if (onlyIndexIsUsed && rangeExpressionType is ArrayGoType &&
+        val rangesArrayOrPointerToArray = rangeExpressionType is ArrayGoType ||
+            (rangeExpressionType is PointerGoType && underlying(rangeExpressionType.element) is ArrayGoType)
+        if (onlyIndexIsUsed && rangesArrayOrPointerToArray &&
             !containsCallOrReceive(range.expression, env)) {
             val arrayLength = staticRangeArrayLength(range.expression, env)
             if (arrayLength != null) {
-                // Go may skip an array expression when only the index is used and its
-                // length is constant. Pointer-to-array expressions must still be evaluated.
+                // Go may skip an array or pointer-to-array expression when only the
+                // index is used and its length is constant.
                 rangeIndexed(arrayLength, effectiveRange, body, loopEnv, labels, declarationTypes) { index -> listOf(index.toLong()) }
                 return
             }
