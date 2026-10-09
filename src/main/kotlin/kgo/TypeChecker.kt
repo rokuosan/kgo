@@ -3298,10 +3298,16 @@ class TypeChecker(
         if (isExportedIdentifier(name)) name
         else "${unexportedFieldPackagePath(field, name) ?: packageIdentity ?: packageName ?: "<package>"}:$name"
 
-    private fun sameSignature(left: FunctionGoType, right: FunctionGoType): Boolean =
+    private data class TypePair(val left: GoTypeSyntax, val right: GoTypeSyntax)
+
+    private fun sameSignature(
+        left: FunctionGoType,
+        right: FunctionGoType,
+        seen: MutableSet<TypePair> = mutableSetOf()
+    ): Boolean =
         left.parameters.size == right.parameters.size && left.results.size == right.results.size &&
-            left.parameters.zip(right.parameters).all { (a, b) -> sameType(a.type, b.type) && a.variadic == b.variadic } &&
-            left.results.zip(right.results).all { (a, b) -> sameType(a, b) }
+            left.parameters.zip(right.parameters).all { (a, b) -> sameType(a.type, b.type, seen) && a.variadic == b.variadic } &&
+            left.results.zip(right.results).all { (a, b) -> sameType(a, b, seen) }
 
     private fun interfaceMethodKey(method: InterfaceMethodSyntax): String =
         if (isExportedIdentifier(method.name)) method.name
@@ -3310,17 +3316,25 @@ class TypeChecker(
     private fun packageMethodKey(name: String): String = if (isExportedIdentifier(name)) name
         else "${packageIdentity ?: packageName ?: "<package>"}:$name"
 
-    private fun sameType(left: GoTypeSyntax, right: GoTypeSyntax): Boolean {
+    private fun sameType(
+        left: GoTypeSyntax,
+        right: GoTypeSyntax,
+        seen: MutableSet<TypePair> = mutableSetOf()
+    ): Boolean {
         if (left == right && !containsStructLiteral(left)) return true
         if (canonicalPredeclaredAlias(left) == canonicalPredeclaredAlias(right) &&
             !containsStructLiteral(left) && !containsStructLiteral(right)) return true
+        // Interface embedding can create recursive method signatures. Treat a
+        // repeated comparison pair coinductively after checking each pair's
+        // immediate structure, so equivalent recursive types terminate.
+        if (!seen.add(TypePair(left, right))) return true
         return when {
             left is QualifiedGoType && right is QualifiedGoType -> left.packageName == right.packageName && left.name == right.name
-            left is PointerGoType && right is PointerGoType -> sameType(left.element, right.element)
-            left is SliceGoType && right is SliceGoType -> sameType(left.element, right.element)
-            left is ArrayGoType && right is ArrayGoType -> sameArrayLength(left.length, right.length) && sameType(left.element, right.element)
-            left is MapGoType && right is MapGoType -> sameType(left.key, right.key) && sameType(left.value, right.value)
-            left is ChannelGoType && right is ChannelGoType -> left.direction == right.direction && sameType(left.element, right.element)
+            left is PointerGoType && right is PointerGoType -> sameType(left.element, right.element, seen)
+            left is SliceGoType && right is SliceGoType -> sameType(left.element, right.element, seen)
+            left is ArrayGoType && right is ArrayGoType -> sameArrayLength(left.length, right.length) && sameType(left.element, right.element, seen)
+            left is MapGoType && right is MapGoType -> sameType(left.key, right.key, seen) && sameType(left.value, right.value, seen)
+            left is ChannelGoType && right is ChannelGoType -> left.direction == right.direction && sameType(left.element, right.element, seen)
             left is StructGoType && right is StructGoType -> {
                 data class FieldIdentity(
                     val name: String,
@@ -3343,17 +3357,17 @@ class TypeChecker(
                 }
                 leftFields.size == rightFields.size && leftFields.zip(rightFields).all { (a, b) ->
                     a.name == b.name && a.packagePath == b.packagePath && a.tag == b.tag &&
-                        a.embedded == b.embedded && sameType(a.type, b.type)
+                        a.embedded == b.embedded && sameType(a.type, b.type, seen)
                 }
             }
             left is InterfaceGoType && right is InterfaceGoType -> {
                 val leftMethods = interfaceMethods(left)
                 val rightMethods = interfaceMethods(right)
                 leftMethods.keys == rightMethods.keys && leftMethods.all { (name, signature) ->
-                    rightMethods[name]?.let { sameSignature(signature, it) } == true
+                    rightMethods[name]?.let { sameSignature(signature, it, seen) } == true
                 }
             }
-            left is FunctionGoType && right is FunctionGoType -> sameSignature(left, right)
+            left is FunctionGoType && right is FunctionGoType -> sameSignature(left, right, seen)
             else -> false
         }
     }
