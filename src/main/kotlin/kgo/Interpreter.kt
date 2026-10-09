@@ -3069,7 +3069,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun containsCallOrReceive(expression: Expression, env: Environment): Boolean = when (expression) {
-        is CallExpression -> runtimeTypeConversion(expression, env)?.let {
+        is CallExpression -> (runtimeTypeConversion(expression, env)
+            ?: parenthesizedOperatorConversionType(expression.function, env))?.let {
             expression.arguments.any { argument -> containsCallOrReceive(argument, env) }
         } ?: true
         is UnaryExpression -> expression.operator == TokenKind.ARROW || containsCallOrReceive(expression.operand, env)

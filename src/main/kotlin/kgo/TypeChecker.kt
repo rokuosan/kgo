@@ -3765,7 +3765,7 @@ class TypeChecker(
                 is TypeExpression -> true
                 is NameExpression -> scope.getOrNull(target.name) == null && isTypeName(target.name, scope)
                 is SelectorExpression -> importedPackageType(target, scope) != null
-                else -> false
+                else -> parenthesizedOperatorConversionType(expression.function, scope) != null
             }
             !conversion || expression.arguments.any { containsCallOrReceive(it, scope) }
         }
