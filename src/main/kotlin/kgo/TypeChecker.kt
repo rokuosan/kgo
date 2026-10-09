@@ -2407,7 +2407,8 @@ class TypeChecker(
             if (call.arguments.size != 1 || call.expandLastArgument) error("unsafe intrinsic requires one argument")
             if (unsafeName == "Offsetof" && selectorPath(call.arguments.single()) == null)
                 error("unsafe.Offsetof requires a struct field selector")
-            expressionType(call.arguments.single(), scope)
+            val argumentType = expressionType(call.arguments.single(), scope)
+            if (argumentType == nilType) error("unsafe intrinsic argument has no type")
             return listOf(predeclaredUintptrType)
         }
         if (target is SelectorExpression) {
