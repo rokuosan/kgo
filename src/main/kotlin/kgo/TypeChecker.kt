@@ -177,6 +177,7 @@ class TypeChecker(
                 val declaredType = declaration.type?.let { resolveLocalType(it, globals) }
                 declaredType?.let {
                     validateType(it)
+                    requireConstantType(it)
                     requireAssignable(type, it, "constant initializer", expression, scope)
                 }
                 if (name != "_") globals.define(
@@ -953,6 +954,10 @@ class TypeChecker(
                     is ConstantDeclaration -> {
                         requireUniqueNames(declaration.names, "constant declaration")
                         val declaredType = declaration.type?.let { resolveLocalType(it, scope) }
+                        declaredType?.let {
+                            validateType(it)
+                            requireConstantType(it)
+                        }
                         val constants = scope.child().also { initializerScope ->
                             if (!initializerScope.hasBinding("iota") && "iota" !in packageLevelNames &&
                                 "iota" !in packagePaths) {
@@ -3857,6 +3862,10 @@ class TypeChecker(
         untypedInt, untypedRune, untypedFloat, untypedComplex -> true
         is NamedGoType -> t.name in integerNames || t.name in floatNames || t.name in complexNames
         else -> false
+    }
+    private fun requireConstantType(type: GoTypeSyntax) {
+        if (!isBoolean(type) && !isNumeric(type) && !isString(type))
+            error("invalid constant type $type")
     }
     private fun isComplex(type: GoTypeSyntax): Boolean = when (val t = underlying(type)) {
         untypedComplex -> true
