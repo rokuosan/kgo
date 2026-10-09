@@ -900,9 +900,10 @@ class TypeChecker(
 
     private fun introducesVariable(statement: Statement): Boolean = when (statement) {
         is LabeledStatement -> introducesVariable(statement.statement)
-        is VariableStatement -> true
+        is VariableStatement -> statement.names.any { it != "_" }
         is AssignmentStatement -> statement.operator == TokenKind.DEFINE
-        is DeclarationStatement -> statement.declarations.any { it is VariableDeclaration }
+        is DeclarationStatement -> statement.declarations.filterIsInstance<VariableDeclaration>()
+            .any { declaration -> declaration.names.any { it != "_" } }
         else -> false
     }
 
