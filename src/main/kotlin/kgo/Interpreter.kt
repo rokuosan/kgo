@@ -4526,6 +4526,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun isUnsafeAggregateType(type: GoTypeSyntax): Boolean = when (val actual = underlying(type)) {
         is ArrayGoType -> isUnsafeAggregateType(actual.element)
         is StructGoType -> actual.fields.all { isUnsafeAggregateType(it.type) }
+        is PointerGoType -> true
         else -> unsafeScalarRepresentation(type) != null
     }
 
@@ -4573,6 +4574,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun encodeUnsafeMemory(value: Any?, type: GoTypeSyntax): ByteArray {
         if (unsafeScalarRepresentation(type) != null) return encodeUnsafeScalar(value, type)
         return when (val actual = underlying(type)) {
+            is PointerGoType -> {
+                val address = when (value) {
+                    is GoPointer -> unsafeAddress(value)
+                    is GoNilValue, null -> 0L
+                    else -> throw RuntimeGoError("invalid unsafe pointer value")
+                }
+                ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(address).array()
+            }
             is ArrayGoType -> {
                 val array = value as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
                 val pieces = array.valueSnapshot().map { encodeUnsafeMemory(it, actual.element) }
@@ -4608,6 +4617,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             return start + width
         }
         return when (val actual = underlying(type)) {
+            is PointerGoType -> {
+                val address = ByteBuffer.wrap(bytes, start, 8).order(ByteOrder.nativeOrder()).long
+                pointer.set(unsafePointer(address, actual.element, type))
+                start + 8
+            }
             is ArrayGoType -> {
                 val array = pointer.get() as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
                 var offset = start
