@@ -137,6 +137,8 @@ class Interpreter(
     private val elementPointers = IdentityHashMap<MutableList<Any?>, MutableMap<Int, GoPointer>>()
     private val unsafeAddressByLocation = IdentityHashMap<Any, Long>()
     private val unsafePointerByAddress = mutableMapOf<Long, MutableList<UnsafePointerLocation>>()
+    private val unsafeAddressIdentityByAddress = mutableMapOf<Long, Any>()
+    private val unsafeRawBytesByObject = IdentityHashMap<Any, ByteArray>()
     private var nextUnsafeAddress = 0x10000L
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
@@ -4493,7 +4495,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             if (scalarSource != null) return unsafeScalarPointerView(
                 scalarSource.pointer, scalarSource.pointer.pointeeType!!, elementType, pointerType,
-                scalarSource.byteOffset
+                scalarSource.byteOffset, address,
+                locations.firstOrNull { it.byteOffset == 0 }?.pointer?.locationIdentity
+                    ?: unsafeAddressIdentityByAddress.getOrPut(address) { Any() }
             )
             return GoPointer.address(address, elementType, pointerType)
         }
@@ -4514,10 +4518,26 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private fun unsafeMemoryWidth(type: GoTypeSyntax): Int? {
         unsafeScalarRepresentation(type)?.let { return it.second / 8 }
-        val array = underlying(type) as? ArrayGoType ?: return null
-        val elementWidth = unsafeMemoryWidth(array.element) ?: return null
-        val length = array.length?.let { integerLiteral(it, globals).intValueExact() } ?: return null
-        return Math.multiplyExact(length, elementWidth)
+        if (!isUnsafeAggregateType(type)) return null
+        return GoUnsafePackage.layout(type, ::underlying) { integerLiteral(it, globals) }
+            .size.let(Math::toIntExact)
+    }
+
+    private fun isUnsafeAggregateType(type: GoTypeSyntax): Boolean = when (val actual = underlying(type)) {
+        is ArrayGoType -> isUnsafeAggregateType(actual.element)
+        is StructGoType -> actual.fields.all { isUnsafeAggregateType(it.type) }
+        else -> unsafeScalarRepresentation(type) != null
+    }
+
+    private fun unsafeFieldOffsets(type: StructGoType): List<Pair<RuntimeStructField, Int>> {
+        var offset = 0L
+        return structFieldSlots(type).map { field ->
+            val layout = GoUnsafePackage.layout(field.type, ::underlying) { integerLiteral(it, globals) }
+            offset = alignUnsafeAddress(offset, layout.align)
+            val fieldOffset = Math.toIntExact(offset)
+            offset = Math.addExact(offset, layout.size)
+            field to fieldOffset
+        }
     }
 
     private fun canUnsafeMemoryView(source: GoTypeSyntax, target: GoTypeSyntax, byteOffset: Int): Boolean {
@@ -4531,7 +4551,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         sourceType: GoTypeSyntax,
         targetType: GoTypeSyntax,
         pointerType: GoTypeSyntax,
-        byteOffset: Int
+        byteOffset: Int,
+        address: Long,
+        addressIdentity: Any
     ): GoPointer = source.view(targetType, pointerType,
         get = {
             val sourceBytes = encodeUnsafeMemory(source.get(), sourceType)
@@ -4543,21 +4565,39 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val targetBytes = encodeUnsafeScalar(assigned, targetType)
             targetBytes.copyInto(sourceBytes, byteOffset)
             writeUnsafeMemory(source, sourceType, sourceBytes)
-        }
+        },
+        pointerAddress = address,
+        identityOverride = addressIdentity
     )
 
     private fun encodeUnsafeMemory(value: Any?, type: GoTypeSyntax): ByteArray {
         if (unsafeScalarRepresentation(type) != null) return encodeUnsafeScalar(value, type)
-        val arrayType = underlying(type) as? ArrayGoType
-            ?: throw RuntimeGoError("unsupported unsafe memory type $type")
-        val array = value as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
-        val pieces = array.valueSnapshot().map { encodeUnsafeMemory(it, arrayType.element) }
-        return ByteArray(pieces.sumOf(ByteArray::size)).also { bytes ->
-            var offset = 0
-            pieces.forEach { piece ->
-                piece.copyInto(bytes, offset)
-                offset += piece.size
+        return when (val actual = underlying(type)) {
+            is ArrayGoType -> {
+                val array = value as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
+                val pieces = array.valueSnapshot().map { encodeUnsafeMemory(it, actual.element) }
+                ByteArray(pieces.sumOf(ByteArray::size)).also { bytes ->
+                    var offset = 0
+                    pieces.forEach { piece ->
+                        piece.copyInto(bytes, offset)
+                        offset += piece.size
+                    }
+                }
             }
+            is StructGoType -> {
+                val struct = value as? GoStruct ?: throw RuntimeGoError("invalid unsafe struct value")
+                val size = unsafeMemoryWidth(type) ?: throw RuntimeGoError("unsupported unsafe memory type $type")
+                val bytes = synchronized(unsafeRawBytesByObject) {
+                    unsafeRawBytesByObject[struct]?.takeIf { it.size == size }?.copyOf() ?: ByteArray(size)
+                }
+                val fields = struct.fieldSnapshot()
+                unsafeFieldOffsets(actual).forEach { (field, offset) ->
+                    encodeUnsafeMemory(fields[field.storageKey], field.type).copyInto(bytes, offset)
+                }
+                synchronized(unsafeRawBytesByObject) { unsafeRawBytesByObject[struct] = bytes.copyOf() }
+                bytes
+            }
+            else -> throw RuntimeGoError("unsupported unsafe memory type $type")
         }
     }
 
@@ -4567,14 +4607,28 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             pointer.set(decodeUnsafeScalar(bytes.copyOfRange(start, start + width), type))
             return start + width
         }
-        val arrayType = underlying(type) as? ArrayGoType
-            ?: throw RuntimeGoError("unsupported unsafe memory type $type")
-        val array = pointer.get() as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
-        var offset = start
-        array.values.indices.forEach { index ->
-            offset = writeUnsafeMemory(array.pointerAt(index), arrayType.element, bytes, offset)
+        return when (val actual = underlying(type)) {
+            is ArrayGoType -> {
+                val array = pointer.get() as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
+                var offset = start
+                array.values.indices.forEach { index ->
+                    offset = writeUnsafeMemory(array.pointerAt(index), actual.element, bytes, offset)
+                }
+                offset
+            }
+            is StructGoType -> {
+                val struct = pointer.get() as? GoStruct ?: throw RuntimeGoError("invalid unsafe struct value")
+                val size = unsafeMemoryWidth(type) ?: throw RuntimeGoError("unsupported unsafe memory type $type")
+                synchronized(unsafeRawBytesByObject) {
+                    unsafeRawBytesByObject[struct] = bytes.copyOfRange(start, start + size)
+                }
+                unsafeFieldOffsets(actual).forEach { (field, offset) ->
+                    writeUnsafeMemory(struct.pointer(field.storageKey), field.type, bytes, start + offset)
+                }
+                start + size
+            }
+            else -> throw RuntimeGoError("unsupported unsafe memory type $type")
         }
-        return offset
     }
 
     private fun unsafeScalarWidth(type: GoTypeSyntax): Int =
@@ -6127,8 +6181,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             type: GoTypeSyntax,
             pointerType: GoTypeSyntax,
             get: () -> Any?,
-            set: (Any?) -> Unit
-        ) = GoPointer(GoLocation(get, set), type, rawAddress, pointerType, locationIdentity)
+            set: (Any?) -> Unit,
+            pointerAddress: Long? = rawAddress,
+            identityOverride: Any? = locationIdentity
+        ) = GoPointer(GoLocation(get, set), type, pointerAddress, pointerType, identityOverride)
         fun set(value: Any?) {
             val target = location ?: throw RuntimeGoError("invalid memory address or nil pointer dereference")
             target.set(value)
