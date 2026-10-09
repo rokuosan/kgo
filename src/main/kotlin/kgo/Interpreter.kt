@@ -2684,7 +2684,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                         if (directMethod != null) {
                             val (owner, method) = directMethod
                             candidates += Candidate(null, method, node.value, methodOwner = owner)
-                        } else if (runtimeMethodSet(PointerGoType(embeddedType)).containsKey(name)) {
+                        } else {
+                            // The checker has already established that this selector
+                            // exists. If it is not a direct method on the nil
+                            // pointer's element type, resolving it requires following
+                            // an embedded field and must dereference the nil pointer.
                             throw RuntimeGoError("invalid memory address or nil pointer dereference")
                         }
                     }
