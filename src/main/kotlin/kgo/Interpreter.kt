@@ -4530,6 +4530,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is StructGoType -> actual.fields.all { isUnsafeAggregateType(it.type) }
         is PointerGoType -> true
         is MapGoType, is ChannelGoType -> true
+        is FunctionGoType -> true
         else -> unsafeScalarRepresentation(type) != null
     }
 
@@ -4614,6 +4615,15 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
                 ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(address).array()
             }
+            is FunctionGoType -> {
+                val address = when (value) {
+                    is FunctionValue, is BuiltinValue, is MethodValue,
+                    is MethodExpressionValue, is RuntimeErrorMethodValue -> unsafeOpaqueAddress(value, value)
+                    is GoNilValue, null -> 0L
+                    else -> throw RuntimeGoError("invalid unsafe function value")
+                }
+                ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(address).array()
+            }
             is ArrayGoType -> {
                 val array = value as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
                 val pieces = array.valueSnapshot().map { encodeUnsafeMemory(it, actual.element) }
@@ -4672,6 +4682,16 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     original.retype(actual.element, actual.direction, namedTypeName(type), type, namedTypePackage(type))
                 }
                 pointer.set(channel)
+                start + 8
+            }
+            is FunctionGoType -> {
+                val address = ByteBuffer.wrap(bytes, start, 8).order(ByteOrder.nativeOrder()).long
+                val function = if (address == 0L) GoNilValue(type) else {
+                    val original = unsafeOpaqueValue(address)
+                        ?: throw RuntimeGoError("invalid unsafe function address")
+                    copyForType(original, type)
+                }
+                pointer.set(function)
                 start + 8
             }
             is ArrayGoType -> {
