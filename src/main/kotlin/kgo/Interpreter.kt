@@ -2832,7 +2832,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
 
     private suspend fun call(call: CallExpression, env: Environment): Any? {
         val parenthesizedType = call.function.unparenthesized() as? TypeExpression
-        val conversionType = parenthesizedType?.type ?: parenthesizedPointerConversionType(call.function, env)
+        val conversionType = parenthesizedType?.type ?: parenthesizedOperatorConversionType(call.function, env)
         if (conversionType != null && call.arguments.size == 1 && !call.expandLastArgument) {
             val targetType = resolveRuntimeType(conversionType, env)
             val value = evaluate(call.arguments.single(), env, targetType)
@@ -2875,11 +2875,18 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
     }
 
-    private fun parenthesizedPointerConversionType(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
+    private fun parenthesizedOperatorConversionType(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
         is ParenthesizedExpression -> when (val inner = expression.expression) {
-            is UnaryExpression -> if (inner.operator == TokenKind.MUL)
-                runtimeTypeOperand(inner.operand, env)?.let(::PointerGoType) else null
-            else -> parenthesizedPointerConversionType(inner, env)
+            is UnaryExpression -> when (inner.operator) {
+                TokenKind.MUL -> runtimeTypeOperand(inner.operand, env)?.let(::PointerGoType)
+                TokenKind.ARROW -> (inner.operand as? TypeExpression)?.type?.let { type ->
+                    (underlying(resolveRuntimeType(type, env)) as? ChannelGoType)?.let {
+                        ChannelGoType(it.element, ChannelDirection.RECEIVE_ONLY)
+                    }
+                }
+                else -> null
+            }
+            else -> parenthesizedOperatorConversionType(inner, env)
         }
         else -> null
     }

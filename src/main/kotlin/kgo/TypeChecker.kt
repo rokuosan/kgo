@@ -2456,7 +2456,7 @@ class TypeChecker(
             }
         }
         val conversionType = (target as? TypeExpression)?.type
-            ?: parenthesizedPointerConversionType(call.function, scope)
+            ?: parenthesizedOperatorConversionType(call.function, scope)
         if (conversionType != null) {
             if (call.arguments.size != 1 || call.expandLastArgument) error("conversion requires one argument")
             val to = resolveLocalType(conversionType, scope)
@@ -2512,11 +2512,18 @@ class TypeChecker(
         return functionType.results
     }
 
-    private fun parenthesizedPointerConversionType(expression: Expression, scope: Scope): GoTypeSyntax? = when (expression) {
+    private fun parenthesizedOperatorConversionType(expression: Expression, scope: Scope): GoTypeSyntax? = when (expression) {
         is ParenthesizedExpression -> when (val inner = expression.expression) {
-            is UnaryExpression -> if (inner.operator == TokenKind.MUL)
-                typeOperand(inner.operand, scope)?.let(::PointerGoType) else null
-            else -> parenthesizedPointerConversionType(inner, scope)
+            is UnaryExpression -> when (inner.operator) {
+                TokenKind.MUL -> typeOperand(inner.operand, scope)?.let(::PointerGoType)
+                TokenKind.ARROW -> (inner.operand as? TypeExpression)?.type?.let { type ->
+                    (underlying(resolveLocalType(type, scope)) as? ChannelGoType)?.let {
+                        ChannelGoType(it.element, ChannelDirection.RECEIVE_ONLY)
+                    }
+                }
+                else -> null
+            }
+            else -> parenthesizedOperatorConversionType(inner, scope)
         }
         else -> null
     }
