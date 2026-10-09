@@ -2675,7 +2675,7 @@ class TypeChecker(
             "real", "imag" -> {
                 requireCount(name, args, 1, types.size)
                 val type = types.single()
-                if (type == untypedComplex) listOf(untypedFloat)
+                if (isUntyped(type) && isNumeric(type)) listOf(untypedFloat)
                 else when (underlying(type)) {
                     NamedGoType("complex64"), predeclaredComplex64Type -> listOf(predeclaredFloat32Type)
                     NamedGoType("complex128"), predeclaredComplex128Type -> listOf(predeclaredFloat64Type)
