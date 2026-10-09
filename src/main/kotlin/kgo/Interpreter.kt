@@ -142,6 +142,7 @@ class Interpreter(
     private val unsafeOpaqueAddressByIdentity = IdentityHashMap<Any, Long>()
     private val unsafeOpaqueValueByAddress = mutableMapOf<Long, Any>()
     private val unsafeByteBackingByAddress = mutableMapOf<Long, ByteArray>()
+    private val unsafeSliceBackingByAddress = mutableMapOf<Long, GoSlice>()
     private var nextUnsafeAddress = 0x10000L
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
@@ -4542,13 +4543,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is PointerGoType -> true
         is MapGoType, is ChannelGoType -> true
         is FunctionGoType -> true
+        is SliceGoType -> true
         else -> isUnsafeStringType(type) || unsafeScalarRepresentation(type) != null
     }
 
-    private fun unsafeOpaqueAddress(identity: Any, value: Any): Long = synchronized(unsafeAddressByLocation) {
+    private fun unsafeOpaqueAddress(identity: Any, value: Any, reservationSize: Long = 8L): Long = synchronized(unsafeAddressByLocation) {
         unsafeOpaqueAddressByIdentity[identity]?.let { return@synchronized it }
         val address = alignUnsafeAddress(nextUnsafeAddress, 8L)
-        val reservation = maxOf(8L, (value as? ByteArray)?.size?.toLong() ?: 8L)
+        val reservation = maxOf(8L, reservationSize, (value as? ByteArray)?.size?.toLong() ?: 8L)
         nextUnsafeAddress = Math.addExact(address, reservation)
         unsafeOpaqueAddressByIdentity[identity] = address
         unsafeOpaqueValueByAddress[address] = value
@@ -4637,6 +4639,26 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         if (unsafeScalarRepresentation(type) != null) return encodeUnsafeScalar(value, type)
         return when (val actual = underlying(type)) {
+            is SliceGoType -> {
+                val slice = when (value) {
+                    is GoSlice -> value
+                    is GoNilValue, null -> null
+                    else -> throw RuntimeGoError("invalid unsafe slice value")
+                }
+                val dataAddress = slice?.let {
+                    val elementSize = GoUnsafePackage.layout(actual.element, ::underlying) { integerLiteral(it, globals) }.size
+                    val baseView = it.backingView()
+                    val backingBytes = Math.multiplyExact(it.backingLength().toLong(), elementSize)
+                    val baseAddress = unsafeOpaqueAddress(it.unsafeBackingIdentity, baseView, backingBytes)
+                    synchronized(unsafeAddressByLocation) {
+                        unsafeSliceBackingByAddress.putIfAbsent(baseAddress, baseView)
+                    }
+                    Math.addExact(baseAddress, Math.multiplyExact(it.unsafeStart.toLong(), elementSize))
+                } ?: 0L
+                ByteBuffer.allocate(24).order(ByteOrder.nativeOrder())
+                    .putLong(dataAddress).putLong(slice?.length?.toLong() ?: 0L)
+                    .putLong(slice?.capacity?.toLong() ?: 0L).array()
+            }
             is PointerGoType -> {
                 val address = when (value) {
                     is GoPointer -> unsafeAddress(value)
@@ -4726,6 +4748,33 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             return start + width
         }
         return when (val actual = underlying(type)) {
+            is SliceGoType -> {
+                val header = ByteBuffer.wrap(bytes, start, 24).order(ByteOrder.nativeOrder())
+                val address = header.long
+                val length = header.long
+                val capacity = header.long
+                if (length < 0L || capacity < length || capacity > Int.MAX_VALUE)
+                    throw RuntimeGoError("invalid unsafe slice bounds")
+                val slice = if (address == 0L) {
+                    if (length != 0L || capacity != 0L) throw RuntimeGoError("invalid unsafe slice address")
+                    GoNilValue(type)
+                } else {
+                    val elementSize = GoUnsafePackage.layout(actual.element, ::underlying) { integerLiteral(it, globals) }.size
+                    val (baseAddress, baseSlice) = synchronized(unsafeAddressByLocation) {
+                        unsafeSliceBackingByAddress.entries.firstOrNull { entry ->
+                            val delta = address - entry.key
+                            delta >= 0L && delta % elementSize == 0L &&
+                                delta <= entry.value.backingLength().toLong() * elementSize
+                        }?.let { it.key to it.value }
+                    } ?: throw RuntimeGoError("invalid unsafe slice address")
+                    val offset = Math.toIntExact((address - baseAddress) / elementSize)
+                    if (offset.toLong() + capacity > baseSlice.backingLength())
+                        throw RuntimeGoError("invalid unsafe slice bounds")
+                    baseSlice.unsafeView(offset, length.toInt(), capacity.toInt(), actual.element, type)
+                }
+                pointer.set(slice)
+                start + 24
+            }
             is PointerGoType -> {
                 val address = ByteBuffer.wrap(bytes, start, 8).order(ByteOrder.nativeOrder()).long
                 pointer.set(unsafePointer(address, actual.element, type))
@@ -6233,6 +6282,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         fun backingPointerAt(index: Int): GoPointer = elementPointer(backing, index, elementType)
         fun backingLength(): Int = backing.size
+        val unsafeBackingIdentity: Any get() = backing
+        val unsafeStart: Int get() = start
+        fun backingView(): GoSlice = GoSlice(elementType, backing, 0, backing.size, backing.size,
+            namedType, type, packagePath, reuseSynchronizedBacking = true)
+        fun unsafeView(offset: Int, newLength: Int, newCapacity: Int, element: GoTypeSyntax, sliceType: GoTypeSyntax) =
+            GoSlice(element, backing, offset, newLength, newCapacity, namedType, sliceType, packagePath,
+                reuseSynchronizedBacking = true)
         fun subSlice(low: Int, high: Int, max: Int): GoSlice {
             if (low < 0 || high < low || max < high || max > capacity) throw RuntimeGoError("slice bounds out of range")
             return GoSlice(elementType, backing, start + low, high - low, max - low, namedType, type, packagePath,
