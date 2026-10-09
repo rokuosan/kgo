@@ -6098,7 +6098,6 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         @Synchronized private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
         suspend fun runDefers(allowRecover: Boolean = false) {
-            val panicAtStart = panicState.activePanic
             val actions = deferredCalls.asReversed().toList()
             deferredCalls.clear()
             var panicFromDefer: PanicSignal? = null
@@ -6119,14 +6118,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 } finally {
                     panicState.recoverAllowed = previousPermission
                 }
-                if (panicState.activePanic == null && panicFromDefer?.recovered == true) {
-                    panicFromDefer = null
-                    if (allowRecover && panicAtStart != null && !panicAtStart.recovered)
-                        panicState.activePanic = panicAtStart
-                }
             }
-            if (panicState.activePanic == null && panicAtStart != null && !panicAtStart.recovered)
-                panicState.activePanic = panicAtStart
             panicFromDefer?.takeUnless { it.recovered }?.let { throw it }
         }
         @Synchronized fun set(name: String, value: Any?) {
