@@ -654,7 +654,10 @@ class Interpreter(
                     while (statement.condition == null || truth(evaluate(statement.condition, scope))) {
                         yield()
                         try { executeBlock(statement.body, scope) }
-                        catch (signal: ContinueSignal) { if (!targets(signal.label, labels)) throw signal }
+                        catch (signal: ContinueSignal) {
+                            if (!targets(signal.label, labels)) throw signal
+                            statement.post?.let { execute(it, scope) }
+                        }
                         catch (signal: BreakSignal) { if (!targets(signal.label, labels)) throw signal else break }
                         statement.post?.let { execute(it, scope) }
                     }
