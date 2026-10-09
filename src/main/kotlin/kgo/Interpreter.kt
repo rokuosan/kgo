@@ -3150,7 +3150,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     else -> throw RuntimeGoError("len is not defined for this value")
                 }
                 "cap" -> return when (val value = args.singleOrNull()) {
-                    is GoChannel -> value.capacity.toLong()
+                    is GoChannel -> value.capacity
                     is GoSlice -> value.capacity.toLong()
                     is GoArray -> value.values.size.toLong()
                     is GoPointer -> pointerArrayLength(value, environment)
@@ -5082,7 +5082,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         return when (type) {
             is ChannelGoType -> {
                 if (args.size !in 1..2) throw RuntimeGoError("make channel accepts one or two arguments")
-                val capacity = args.getOrNull(1)?.let { makeSize(it, "channel capacity") } ?: 0
+                val capacity = args.getOrNull(1)?.let(::makeChannelCapacity) ?: 0L
                 if (capacity < 0) throw RuntimeGoError("negative channel capacity")
                 val requestedType = (args.first() as TypeValue).type
                 GoChannel(type.element, capacity, namedTypeName(requestedType), requestedType, type.direction,
@@ -5114,6 +5114,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         if (integer < BigInteger.valueOf(Int.MIN_VALUE.toLong()) || integer > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
             throw RuntimeGoError("$operation out of range")
         return integer.toInt()
+    }
+
+    private fun makeChannelCapacity(value: Any?): Long {
+        val capacity = exactIntegerValue(value, "channel capacity")
+        if (capacity < BigInteger.valueOf(Long.MIN_VALUE) || capacity > BigInteger.valueOf(Long.MAX_VALUE))
+            throw RuntimeGoError("channel capacity out of range")
+        return capacity.toLong()
     }
 
     private fun validateMapSizeHint(value: Any?) {
@@ -6469,7 +6476,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
     private inner class GoChannel(
         val elementType: GoTypeSyntax,
-        val capacity: Int,
+        val capacity: Long,
         val namedType: String? = null,
         val type: GoTypeSyntax? = null,
         val direction: ChannelDirection = ChannelDirection.SEND_RECEIVE,
@@ -6530,7 +6537,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 waiter.decision.claim(waiter.caseIndex, null, null, completions)
                 receiver.decision.claim(receiver.caseIndex,
                     GoReceiveResult(copyForType(waiter.sendElement!!.value, receiver.channel.elementType), true), null, completions)
-            } else if (capacity > state.buffer.size) {
+            } else if (capacity > state.buffer.size.toLong()) {
                 state.buffer += waiter.sendElement!!
                 waiter.decision.claim(waiter.caseIndex, null, null, completions)
             } else if (enqueue) addWaiter(state.senders, waiter)
