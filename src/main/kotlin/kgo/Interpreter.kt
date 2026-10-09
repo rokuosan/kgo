@@ -4437,7 +4437,22 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean =
         isGoUnsignedIntegerName((underlying(type) as? NamedGoType)?.name)
 
-    private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
+    private fun isUnsafePointerType(type: GoTypeSyntax, seen: Set<String> = emptySet()): Boolean = when (type) {
+        is NamedGoType -> typeDefinitions[type.name]?.let {
+            val identity = "local:${type.name}"
+            if (identity in seen) false else isUnsafePointerType(it, seen + identity)
+        } ?: false
+        is QualifiedGoType -> when {
+            type.packageName == "unsafe" && type.name == "Pointer" -> true
+            else -> {
+                val identity = "${type.packageName}:${type.name}"
+                if (identity in seen) false
+                else importedRuntimePackages[type.packageName]
+                    ?.isUnsafePointerType(NamedGoType(type.name), seen + identity) == true
+            }
+        }
+        else -> false
+    }
 
     private fun unsafeAddress(pointer: GoPointer): Long {
         if (pointer.isNil) return 0L

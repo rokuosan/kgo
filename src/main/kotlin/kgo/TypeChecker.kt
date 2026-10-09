@@ -3812,7 +3812,22 @@ class TypeChecker(
     }
     private fun isNamed(type: GoTypeSyntax) = type is QualifiedGoType || type is NamedGoType &&
         (!type.name.startsWith("#") || type.name.startsWith("#predeclared-"))
-    private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
+    private fun isUnsafePointerType(type: GoTypeSyntax, seen: Set<String> = emptySet()): Boolean = when (type) {
+        is NamedGoType -> typeDeclarations[type.name]?.let {
+            val identity = "local:${type.name}"
+            if (identity in seen) false else isUnsafePointerType(it, seen + identity)
+        } ?: false
+        is QualifiedGoType -> when {
+            type.packageName == "unsafe" && type.name == "Pointer" -> true
+            else -> {
+                val identity = "${type.packageName}:${type.name}"
+                if (identity in seen) false
+                else importedPackages[type.packageName]
+                    ?.isUnsafePointerType(NamedGoType(type.name), seen + identity) == true
+            }
+        }
+        else -> false
+    }
     private fun isUintptrType(type: GoTypeSyntax) =
         (underlying(type) as? NamedGoType)?.name in setOf("#predeclared-uintptr", "uintptr")
     private fun isUntyped(type: GoTypeSyntax) = type is NamedGoType && type.name.startsWith("#untyped-")
