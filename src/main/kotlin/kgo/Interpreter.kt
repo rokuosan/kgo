@@ -441,10 +441,14 @@ class Interpreter(
         }
         val priorRecoverAllowed = panicState.recoverAllowed
         val deferredRecoverAllowed = deferredCall && priorRecoverAllowed
+        val tracksDeferredRecoverFrame = deferredRecoverAllowed
+        if (tracksDeferredRecoverFrame) panicState.deferredFunctionDepth++
         panicState.recoverAllowed = deferredRecoverAllowed
         var defersRun = false
         return try {
             executeBlock(body, env, createScope = false)
+            defersRun = true
+            env.runDefers(allowRecover = deferredRecoverAllowed)
             emptyList()
         } catch (returned: ReturnSignal) {
             if (returned.values.size == signature.results.size) {
@@ -462,7 +466,7 @@ class Interpreter(
                 }
             }
             defersRun = true
-            env.runDefers()
+            env.runDefers(allowRecover = deferredRecoverAllowed)
             val values = when {
                 returned.values.isEmpty() && resultNames.isNotEmpty() && resultNames.all { it != null } ->
                     resultNames.mapIndexed { i, name ->
@@ -499,6 +503,7 @@ class Interpreter(
                 if (!defersRun && currentCoroutineContext().isActive)
                     env.runDefers()
             } finally {
+                if (tracksDeferredRecoverFrame) panicState.deferredFunctionDepth--
                 if (panicState.activePanic == null && priorActivePanic != null && !priorActivePanic.recovered)
                     panicState.activePanic = priorActivePanic
                 panicState.recoverAllowed = priorRecoverAllowed
@@ -3081,7 +3086,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     throw PanicSignal(value, stringify(value))
                 }
                 "recover" -> {
-                    if (!panicState.recoverAllowed || deferredCall) return null
+                    if (!panicState.recoverAllowed || (deferredCall && panicState.deferredFunctionDepth == 0)) return null
                     val activePanic = panicState.activePanic ?: return null
                     activePanic.recovered = true
                     panicState.activePanic = null
@@ -6226,7 +6231,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val type: GoTypeSyntax,
         val embedded: Boolean
     )
-    private class PanicState(var activePanic: PanicSignal? = null, var recoverAllowed: Boolean = false)
+    private class PanicState(
+        var activePanic: PanicSignal? = null,
+        var recoverAllowed: Boolean = false,
+        var deferredFunctionDepth: Int = 0
+    )
     private data class GoRuntimeErrorValue(val message: String)
     private data class RuntimeErrorMethodValue(
         val receiver: GoRuntimeErrorValue,
