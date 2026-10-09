@@ -2552,13 +2552,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun methodExpressionBaseType(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
-        is NameExpression -> if (env.contains(expression.name)) null else {
-            env.typeBinding(expression.name) ?: if (expression.name in env.imports.packages) null
+        is NameExpression -> when (val binding = env.binding(expression.name)) {
+            null -> env.typeBinding(expression.name) ?: if (expression.name in env.imports.packages) null
             else typeDefinitions[expression.name]?.let { NamedGoType(expression.name) }
                 ?: env.imports.dotPackages.firstOrNull { path ->
                     path == "runtime" && expression.name in GoRuntimePackage.exportedTypes
                 }?.let { QualifiedGoType(it, expression.name) }
                 ?: if (expression.name in builtinTypes) NamedGoType(expression.name) else null
+            else -> (binding.value as? TypeValue)?.type
         }
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
