@@ -494,7 +494,7 @@ class Interpreter(
             env.runDefers(allowRecover = true, blockDeferredRecoverFor = panic)
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } catch (failure: RuntimeGoError) {
-            val message = failure.message ?: "runtime panic"
+            val message = runtimeErrorMessage(failure.message ?: "runtime panic")
             val panic = PanicSignal(GoRuntimeErrorValue(message), message).also {
                 it.previousPanic = panicState.activePanic
             }
@@ -5948,6 +5948,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is GoStruct -> value.fieldSnapshot().values.joinToString(prefix = "{", postfix = "}") { stringify(it) }
         else -> value.toString()
     }
+
+    private fun runtimeErrorMessage(message: String): String =
+        if (message.startsWith("runtime error:")) message else "runtime error: $message"
     private fun <T> typeError(op: String, value: Any?): T = throw RuntimeGoError("invalid operand for $op: ${value?.javaClass?.simpleName ?: "nil"}")
 
     private fun compoundOperator(op: TokenKind) = when (op) {
@@ -6149,7 +6152,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                         panicFromDefer = panic
                         panicState.activePanic = panic
                     } catch (failure: RuntimeGoError) {
-                        val message = failure.message ?: "runtime panic"
+                        val message = runtimeErrorMessage(failure.message ?: "runtime panic")
                         val panic = PanicSignal(GoRuntimeErrorValue(message), message).also {
                             it.previousPanic = panicState.activePanic
                         }
