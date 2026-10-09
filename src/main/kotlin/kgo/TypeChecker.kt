@@ -4029,7 +4029,11 @@ class TypeChecker(
             if (isConstant) constantNames += name else constantNames -= name
         }
         fun defineType(name: String, identity: String) { typeNames[name] = identity }
-        fun typeBinding(name: String): String? = typeNames[name] ?: parent?.typeBinding(name)
+        fun typeBinding(name: String): String? = when {
+            name in typeNames -> typeNames[name]
+            name in values -> null
+            else -> parent?.typeBinding(name)
+        }
         fun shadowsTypeName(name: String): Boolean = when {
             name in typeNames -> false
             name in values -> true
