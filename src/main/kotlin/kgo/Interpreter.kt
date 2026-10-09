@@ -5083,6 +5083,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val destinationType = when (destinationValue) {
             is GoSlice -> SliceGoType(destinationValue.elementType)
             is GoNilValue -> underlying(destinationValue.type).takeIf { it is SliceGoType }
+            null -> if (sourceValue is GoString) SliceGoType(predeclaredUInt8RuntimeType) else null
             else -> throw RuntimeGoError("copy destination must be a slice")
         } as? SliceGoType ?: throw RuntimeGoError("copy destination must be a slice")
         val values = when (val source = sourceValue) {
