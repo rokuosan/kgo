@@ -4544,6 +4544,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is MapGoType, is ChannelGoType -> true
         is FunctionGoType -> true
         is SliceGoType -> true
+        is InterfaceGoType -> true
         else -> isUnsafeStringType(type) || unsafeScalarRepresentation(type) != null
     }
 
@@ -4639,6 +4640,17 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         if (unsafeScalarRepresentation(type) != null) return encodeUnsafeScalar(value, type)
         return when (val actual = underlying(type)) {
+            is InterfaceGoType -> {
+                val boxed = when (value) {
+                    is GoInterfaceValue -> value
+                    is GoNilValue, null -> null
+                    else -> throw RuntimeGoError("invalid unsafe interface value")
+                }
+                val typeAddress = boxed?.let { unsafeOpaqueAddress(it.dynamicType, it.dynamicType) } ?: 0L
+                val dataAddress = boxed?.let { unsafeOpaqueAddress(it, it) } ?: 0L
+                ByteBuffer.allocate(16).order(ByteOrder.nativeOrder())
+                    .putLong(typeAddress).putLong(dataAddress).array()
+            }
             is SliceGoType -> {
                 val slice = when (value) {
                     is GoSlice -> value
@@ -4748,6 +4760,24 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             return start + width
         }
         return when (val actual = underlying(type)) {
+            is InterfaceGoType -> {
+                val header = ByteBuffer.wrap(bytes, start, 16).order(ByteOrder.nativeOrder())
+                val typeAddress = header.long
+                val dataAddress = header.long
+                val value = if (typeAddress == 0L && dataAddress == 0L) GoNilValue(type) else {
+                    if (typeAddress == 0L || dataAddress == 0L)
+                        throw RuntimeGoError("invalid unsafe interface header")
+                    val dynamicType = unsafeOpaqueValue(typeAddress) as? GoTypeSyntax
+                        ?: throw RuntimeGoError("invalid unsafe interface type address")
+                    val boxed = unsafeOpaqueValue(dataAddress) as? GoInterfaceValue
+                        ?: throw RuntimeGoError("invalid unsafe interface data address")
+                    if (!sameRuntimeType(dynamicType, boxed.dynamicType))
+                        throw RuntimeGoError("mismatched unsafe interface header")
+                    GoInterfaceValue(dynamicType, copyForType(boxed.value, dynamicType), boxed.implementationOwner)
+                }
+                pointer.set(value)
+                start + 16
+            }
             is SliceGoType -> {
                 val header = ByteBuffer.wrap(bytes, start, 24).order(ByteOrder.nativeOrder())
                 val address = header.long
