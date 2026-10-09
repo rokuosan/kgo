@@ -7,7 +7,7 @@ class ParseError(message: String, val position: Position) : RuntimeException(
 /** Recursive-descent parser for the executable Go 1.0 core. */
 class Parser(private val tokens: List<Token>) {
     private var index = 0
-    private var allowCompositeLiteral = true
+    private var allowTypeNameCompositeLiteral = true
     private var parsingTopLevelDeclaration = false
 
     fun parseFile(): GoFile {
@@ -458,18 +458,20 @@ class Parser(private val tokens: List<Token>) {
         var expr: Expression = when (current().kind) {
             TokenKind.IDENT -> {
                 val name = take().lexeme
-                if (allowCompositeLiteral && at(TokenKind.PERIOD) && tokens.getOrNull(index + 1)?.kind == TokenKind.IDENT) {
+                if (allowTypeNameCompositeLiteral && at(TokenKind.PERIOD) &&
+                    tokens.getOrNull(index + 1)?.kind == TokenKind.IDENT) {
                     take()
                     val typeName = take().lexeme
                     if (at(TokenKind.LBRACE)) parseCompositeLiteral(QualifiedGoType(name, typeName))
                     else SelectorExpression(NameExpression(name), typeName)
-                } else if (allowCompositeLiteral && at(TokenKind.LBRACE)) parseCompositeLiteral(NamedGoType(name))
+                } else if (allowTypeNameCompositeLiteral && at(TokenKind.LBRACE))
+                    parseCompositeLiteral(NamedGoType(name))
                 else NameExpression(name)
             }
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING -> LiteralExpression(take())
             TokenKind.CHAN, TokenKind.ARROW, TokenKind.MUL, TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT, TokenKind.INTERFACE -> {
                 val type = parseType()
-                if (allowCompositeLiteral && at(TokenKind.LBRACE)) parseCompositeLiteral(type) else TypeExpression(type)
+                if (at(TokenKind.LBRACE)) parseCompositeLiteral(type) else TypeExpression(type)
             }
             TokenKind.FUNC -> {
                 take()
@@ -542,7 +544,9 @@ class Parser(private val tokens: List<Token>) {
     } else expression()
 
     private fun <T> expressionHeader(block: () -> T): T {
-        return withCompositeLiterals(false, block)
+        // Go's control-clause ambiguity applies to TypeName{...}; literals with
+        // explicit struct, array, slice, or map types remain unambiguous here.
+        return withTypeNameCompositeLiterals(false, block)
     }
 
     private fun rangeExpression(): Expression = if (rangeExpressionStartsWithUnambiguousCompositeType())
@@ -559,12 +563,12 @@ class Parser(private val tokens: List<Token>) {
         return tokens.getOrNull(tokenIndex)?.kind in setOf(TokenKind.LBRACK, TokenKind.MAP, TokenKind.STRUCT)
     }
 
-    private fun <T> expressionWithComposite(block: () -> T): T = withCompositeLiterals(true, block)
+    private fun <T> expressionWithComposite(block: () -> T): T = withTypeNameCompositeLiterals(true, block)
 
-    private fun <T> withCompositeLiterals(enabled: Boolean, block: () -> T): T {
-        val previous = allowCompositeLiteral
-        allowCompositeLiteral = enabled
-        return try { block() } finally { allowCompositeLiteral = previous }
+    private fun <T> withTypeNameCompositeLiterals(enabled: Boolean, block: () -> T): T {
+        val previous = allowTypeNameCompositeLiteral
+        allowTypeNameCompositeLiteral = enabled
+        return try { block() } finally { allowTypeNameCompositeLiteral = previous }
     }
 
     private fun parseType(): GoTypeSyntax = when {
