@@ -5014,7 +5014,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val values = args.drop(1)
         val expandsEmptyString = expandString && values.singleOrNull() is GoString &&
             (values.single() as GoString).bytes.isEmpty()
-        if (first is GoNilValue && (values.isEmpty() || expandsEmptyString)) return first
+        val expandsEmptySlice = expandString && when (val expanded = values.singleOrNull()) {
+            is GoSlice -> expanded.length == 0
+            is GoNilValue -> underlying(expanded.type) is SliceGoType
+            else -> false
+        }
+        // Appending zero elements returns the original slice, including nil.
+        if (first is GoNilValue && (values.isEmpty() || expandsEmptyString || expandsEmptySlice)) return first
         val slice = when (first) {
             is GoSlice -> first
             is GoNilValue -> (underlying(first.type) as? SliceGoType)?.let {
