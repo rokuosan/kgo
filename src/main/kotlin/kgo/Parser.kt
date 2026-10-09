@@ -160,7 +160,10 @@ class Parser(private val tokens: List<Token>) {
             val names = parseNameList()
             var type: GoTypeSyntax? = null
             if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) type = parseType()
-            val repeatsPrevious = !match(TokenKind.ASSIGN)
+            val hasInitializer = match(TokenKind.ASSIGN)
+            if (!hasInitializer && type != null)
+                fail("constant type requires an initializer")
+            val repeatsPrevious = !hasInitializer
             val values = if (!repeatsPrevious) expressionList() else {
                 if (!grouped || declarations.isEmpty() || previousValues.isEmpty())
                     fail("missing initializer in const declaration")
