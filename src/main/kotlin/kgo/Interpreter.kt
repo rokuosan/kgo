@@ -6176,19 +6176,35 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             define(name, value, type)
             constants += name
         }
-        @Synchronized fun isConstant(name: String): Boolean = if (name in values) name in constants else parent?.isConstant(name) == true
+        @Synchronized fun isConstant(name: String): Boolean = when {
+            name in values -> name in constants
+            name in namedTypes -> false
+            else -> parent?.isConstant(name) == true
+        }
         @Synchronized fun get(name: String): Any? = lookup(name)?.value ?: if (contains(name)) null else throw RuntimeGoError("undefined: $name")
-        @Synchronized fun lookup(name: String): Lookup? = if (values.containsKey(name)) Lookup(values[name]) else parent?.lookup(name)
+        @Synchronized fun lookup(name: String): Lookup? = when {
+            name in values -> Lookup(values[name])
+            name in namedTypes -> null
+            else -> parent?.lookup(name)
+        }
         @Synchronized fun binding(name: String): Lookup? = when {
             values.containsKey(name) -> Lookup(values[name])
             name in namedTypes -> Lookup(TypeValue(namedTypes.getValue(name)))
             else -> parent?.binding(name)
         }
         @Synchronized fun getOrNull(name: String): Any? = lookup(name)?.value
-        @Synchronized fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
+        @Synchronized fun contains(name: String): Boolean = when {
+            name in values -> true
+            name in namedTypes -> false
+            else -> parent?.contains(name) == true
+        }
         @Synchronized fun hasVisibleBinding(name: String): Boolean =
             values.containsKey(name) || name in namedTypes || parent?.hasVisibleBinding(name) == true
-        @Synchronized fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
+        @Synchronized fun typeOf(name: String): GoTypeSyntax? = when {
+            name in values -> types[name]
+            name in namedTypes -> null
+            else -> parent?.typeOf(name)
+        }
         @Synchronized fun defineType(name: String, type: NamedGoType) { namedTypes[name] = type }
         @Synchronized fun clearLocalTypes() { namedTypes.clear() }
         @Synchronized fun removeLocalBinding(name: String) {
@@ -6209,7 +6225,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 GoPointer.reference({ owner.get(name) }, { owner.set(name, it) }, owner.types[name] ?: runtimeType(owner.get(name)))
             }
         }
-        @Synchronized private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
+        @Synchronized private fun owner(name: String): Environment? = when {
+            name in values -> this
+            name in namedTypes -> null
+            else -> parent?.owner(name)
+        }
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
         suspend fun runDefers(
             allowRecover: Boolean = false,
@@ -6254,6 +6274,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val assigned = type?.let { copyForType(value, it) } ?: copyValue(value)
                 values[name] = if (type != null) preserveAggregateStorage(values[name], assigned, type) else assigned
             }
+            else if (name in namedTypes) throw RuntimeGoError("$name is not a variable")
             else if (parent != null && parent.contains(name)) parent.set(name, value)
             else throw RuntimeGoError("undefined: $name")
         }
