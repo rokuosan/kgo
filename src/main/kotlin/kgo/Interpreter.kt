@@ -1551,6 +1551,7 @@ class Interpreter(
         }
         is CallExpression -> {
             val conversionType = runtimeTypeConversion(expression, env)
+                ?: parenthesizedOperatorConversionType(expression.function, env)
             if (conversionType != null) conversionType.takeIf { resultIndex == 0 }
             else {
                 val functionType = when (val target = expression.function) {
