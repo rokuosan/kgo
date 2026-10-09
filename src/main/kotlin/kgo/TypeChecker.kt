@@ -110,7 +110,10 @@ class TypeChecker(
         }
         declarations.mapNotNull { (_, declaration) -> declaration as? TypeDeclaration }
             .filter { it.name != "_" }
-            .forEach { typeDeclarations[it.name] = it.type }
+            .forEach {
+                typeDeclarations[it.name] = it.type
+                globals.defineType(it.name, it.name)
+            }
         for ((_, declaration) in declarations) when (declaration) {
             is TypeDeclaration -> Unit
             is FunctionDeclaration -> {
@@ -2231,7 +2234,13 @@ class TypeChecker(
     }
 
     private fun resolveLocalType(type: GoTypeSyntax, scope: Scope): GoTypeSyntax = when (type) {
-        is NamedGoType -> scope.typeBinding(type.name)?.let(::NamedGoType) ?: dotImportedType(type.name) ?: type
+        is NamedGoType -> {
+            if (scope.shadowsTypeName(type.name)) error("${type.name} is not a type")
+            scope.typeBinding(type.name)?.let(::NamedGoType) ?: run {
+                if (type.name in packagePaths) error("${type.name} is a package, not a type")
+                dotImportedType(type.name) ?: type
+            }
+        }
         is QualifiedGoType -> {
             if (type.packageName in packagePaths &&
                 (scope.getOrNull(type.packageName) != null || scope.typeBinding(type.packageName) != null))
@@ -4020,6 +4029,11 @@ class TypeChecker(
         }
         fun defineType(name: String, identity: String) { typeNames[name] = identity }
         fun typeBinding(name: String): String? = typeNames[name] ?: parent?.typeBinding(name)
+        fun shadowsTypeName(name: String): Boolean = when {
+            name in typeNames -> false
+            name in values -> true
+            else -> parent?.shadowsTypeName(name) == true
+        }
         fun hasBinding(name: String): Boolean = name in values || name in typeNames || parent?.hasBinding(name) == true
         fun containsLocalType(name: String) = name in typeNames
         fun containsLocal(name: String) = name in values || name in typeNames
