@@ -141,4 +141,11 @@ data class ChannelGoType(val element: GoTypeSyntax, val direction: ChannelDirect
 data class StructGoType(val fields: List<StructFieldSyntax>) : GoTypeSyntax
 data class InterfaceGoType(val methods: List<InterfaceMethodSyntax>, val embeddedTypes: List<GoTypeSyntax> = emptyList()) : GoTypeSyntax
 data class FunctionGoType(val parameters: List<ParameterSyntax>, val results: List<GoTypeSyntax>) : GoTypeSyntax
+
+internal fun goIntegerBitWidth(name: String?): Int = when (name) {
+    "#predeclared-int8", "#predeclared-uint8", "int8", "uint8", "byte" -> 8
+    "#predeclared-int16", "#predeclared-uint16", "int16", "uint16" -> 16
+    "#predeclared-int32", "#predeclared-uint32", "int32", "uint32" -> 32
+    else -> 64
+}
 enum class ChannelDirection { SEND_RECEIVE, SEND_ONLY, RECEIVE_ONLY }

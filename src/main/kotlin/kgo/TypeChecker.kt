@@ -3852,12 +3852,8 @@ class TypeChecker(
         val mask = BigInteger.ONE.shiftLeft(integerBitWidth(type)).subtract(BigInteger.ONE)
         return value.not().and(mask)
     }
-    private fun integerBitWidth(type: GoTypeSyntax): Int = when ((underlying(type) as? NamedGoType)?.name) {
-        "#predeclared-int8", "#predeclared-uint8", "int8", "uint8", "byte" -> 8
-        "#predeclared-int16", "#predeclared-uint16", "int16", "uint16" -> 16
-        "#predeclared-int32", "#predeclared-uint32", "int32", "uint32" -> 32
-        else -> 64
-    }
+    private fun integerBitWidth(type: GoTypeSyntax): Int =
+        goIntegerBitWidth((underlying(type) as? NamedGoType)?.name)
     private fun isString(type: GoTypeSyntax) = underlying(type) == stringType ||
         underlying(type) == predeclaredStringType || type == untypedString
     private fun isBoolean(type: GoTypeSyntax) = underlying(type) == boolType || type == untypedBool
