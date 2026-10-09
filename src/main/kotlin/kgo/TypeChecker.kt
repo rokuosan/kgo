@@ -352,6 +352,8 @@ class TypeChecker(
 
     internal fun hasExportedType(name: String): Boolean = isExportedIdentifier(name) && name in typeDeclarations
 
+    internal fun hasDeclaredType(name: String): Boolean = name in typeDeclarations
+
     internal fun exportedConstant(name: String, importPath: String? = null): ExportedConstant? {
         if (!isExportedIdentifier(name) || !globals.isConstant(name)) return null
         return ExportedConstant(
@@ -3075,7 +3077,7 @@ class TypeChecker(
                 val path = packagePaths[type.packageName]?.let { importedPackagePath(type.packageName) } ?: type.packageName
                 if (standardPackageName(path) == "unsafe" && type.name == "Pointer") return
                 if (standardPackageName(path) == "runtime" && type.name in GoRuntimePackage.exportedTypes) return
-                if (importedPackages[path]?.hasExportedType(type.name) != true)
+                if (importedPackages[path]?.hasDeclaredType(type.name) != true)
                     error("undefined imported type ${type.packageName}.${type.name}")
             }
             is PointerGoType -> validateType(type.element, active, true)
