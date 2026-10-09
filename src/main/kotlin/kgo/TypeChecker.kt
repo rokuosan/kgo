@@ -3016,10 +3016,7 @@ class TypeChecker(
             "#predeclared-int32", "#predeclared-uint32", "int32", "uint32" -> 32
             else -> 64
         }
-        val unsigned = name in setOf(
-            "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
-            "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
-        )
+        val unsigned = isGoUnsignedIntegerName(name)
         val minimum = if (unsigned) BigInteger.ZERO else BigInteger.ONE.shiftLeft(bits - 1).negate()
         val maximum = if (unsigned) BigInteger.ONE.shiftLeft(bits).subtract(BigInteger.ONE)
             else BigInteger.ONE.shiftLeft(bits - 1).subtract(BigInteger.ONE)
@@ -3843,10 +3840,7 @@ class TypeChecker(
         else -> false
     }
     private fun isUnsignedInteger(type: GoTypeSyntax): Boolean =
-        (underlying(type) as? NamedGoType)?.name in setOf(
-            "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
-            "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
-        )
+        isGoUnsignedIntegerName((underlying(type) as? NamedGoType)?.name)
     private fun complementIntegerConstant(value: BigInteger, type: GoTypeSyntax): BigInteger {
         if (!isUnsignedInteger(type)) return value.not()
         val mask = BigInteger.ONE.shiftLeft(integerBitWidth(type)).subtract(BigInteger.ONE)

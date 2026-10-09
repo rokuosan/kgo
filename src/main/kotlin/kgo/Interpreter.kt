@@ -4431,11 +4431,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun isRuneElementType(type: GoTypeSyntax): Boolean =
         canonicalAliasType(type) == predeclaredInt32RuntimeType
 
-    private fun isUnsignedInteger(type: GoTypeSyntax): Boolean = (underlying(type) as? NamedGoType)?.name in
-        setOf(
-            "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32", "#predeclared-uint64", "#predeclared-uintptr",
-            "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"
-        )
+    private fun isUnsignedInteger(type: GoTypeSyntax): Boolean =
+        isGoUnsignedIntegerName((underlying(type) as? NamedGoType)?.name)
 
     private fun isUnsafePointerType(type: GoTypeSyntax) = type == QualifiedGoType("unsafe", "Pointer")
 

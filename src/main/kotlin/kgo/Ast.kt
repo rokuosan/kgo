@@ -148,4 +148,11 @@ internal fun goIntegerBitWidth(name: String?): Int = when (name) {
     "#predeclared-int32", "#predeclared-uint32", "int32", "uint32" -> 32
     else -> 64
 }
+
+internal fun isGoUnsignedIntegerName(name: String?): Boolean = when (name) {
+    "#predeclared-uint", "#predeclared-uint8", "#predeclared-uint16", "#predeclared-uint32",
+    "#predeclared-uint64", "#predeclared-uintptr", "uint", "uint8", "uint16", "uint32", "uint64",
+    "uintptr", "byte" -> true
+    else -> false
+}
 enum class ChannelDirection { SEND_RECEIVE, SEND_ONLY, RECEIVE_ONLY }
