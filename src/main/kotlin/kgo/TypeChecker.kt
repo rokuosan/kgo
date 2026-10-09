@@ -2700,7 +2700,7 @@ class TypeChecker(
         if (operator in setOf(TokenKind.LAND, TokenKind.LOR)) {
             requireBoolean(operandLeft, "logical operator")
             requireBoolean(operandRight, "logical operator")
-            requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
+            requireIdenticalOrConstantOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
             return commonType(operandLeft, operandRight)
         }
         if (operator in setOf(TokenKind.EQL, TokenKind.NEQ)) {
@@ -2717,17 +2717,18 @@ class TypeChecker(
         }
         if (operator in setOf(TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ)) {
             if (!((isOrderedNumeric(operandLeft) && isOrderedNumeric(operandRight)) || (isString(operandLeft) && isString(operandRight)))) error("invalid ordered comparison")
-            requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
+            if (!comparisonCompatible(operandLeft, operandRight, leftExpression, rightExpression, scope))
+                error("incompatible comparison: $operandLeft and $operandRight")
             return comparisonResultType(comparisonContext, leftExpression, rightExpression, scope)
         }
         if (operator == TokenKind.ADD && isString(operandLeft) && isString(operandRight)) {
-            requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
+            requireIdenticalOrConstantOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
             return commonType(operandLeft, operandRight)
         }
         if (operator in setOf(TokenKind.ADD, TokenKind.SUB, TokenKind.MUL, TokenKind.QUO, TokenKind.REM) && !isNumeric(operandLeft)) error("arithmetic requires numeric operands")
         if (operator in setOf(TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT, TokenKind.REM) && !isInteger(operandLeft)) error("operator requires integer operands")
         if (!isNumeric(operandLeft) && operator !in setOf(TokenKind.AND, TokenKind.OR, TokenKind.XOR, TokenKind.AND_NOT, TokenKind.REM)) error("invalid binary operands")
-        requireSameOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
+        requireIdenticalOrConstantOperands(operandLeft, operandRight, leftExpression, rightExpression, scope)
         return commonType(operandLeft, operandRight)
     }
 
@@ -2794,14 +2795,17 @@ class TypeChecker(
             TokenKind.EQL, TokenKind.NEQ, TokenKind.LSS, TokenKind.LEQ, TokenKind.GTR, TokenKind.GEQ
         )
 
-    private fun requireSameOperands(
+    private fun requireIdenticalOrConstantOperands(
         left: GoTypeSyntax,
         right: GoTypeSyntax,
         leftExpression: Expression? = null,
         rightExpression: Expression? = null,
         scope: Scope = globals
     ) {
-        if (!constantOperandsAssignable(left, right, leftExpression, rightExpression, scope))
+        if (sameType(left, right)) return
+        if ((isUntyped(left) || isUntyped(right)) &&
+            constantOperandsAssignable(left, right, leftExpression, rightExpression, scope)) return
+        else
             error("mismatched operand types: $left and $right")
     }
 
