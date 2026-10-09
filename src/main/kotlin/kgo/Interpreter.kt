@@ -3146,10 +3146,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                                 panicState.activePanic === panicState.blockedDeferredRecoverPanic
                             ))) return null
                     val activePanic = panicState.activePanic ?: return null
+                    // Go 1.0 specifies that recover during panic(nil) returns nil
+                    // without stopping the panic sequence.
+                    if (activePanic.value == null) return null
                     activePanic.recovered = true
                     panicState.activePanic = activePanic.previousPanic
                     return when (val value = activePanic.value) {
-                        null, is GoInterfaceValue -> value
+                        is GoInterfaceValue -> value
                         else -> runtimeType(value)?.let { GoInterfaceValue(canonicalAliasType(it), value, this) } ?: value
                     }
                 }
