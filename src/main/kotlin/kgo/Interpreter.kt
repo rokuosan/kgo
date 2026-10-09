@@ -6197,7 +6197,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             constants.remove(name)
             addresses.remove(name)
         }
-        @Synchronized fun typeBinding(name: String): NamedGoType? = namedTypes[name] ?: parent?.typeBinding(name)
+        @Synchronized fun typeBinding(name: String): NamedGoType? = when {
+            name in namedTypes -> namedTypes[name]
+            name in values -> null
+            else -> parent?.typeBinding(name)
+        }
         @Synchronized fun containsLocalType(name: String) = name in namedTypes
         @Synchronized fun pointer(name: String): GoPointer {
             val owner = owner(name) ?: throw RuntimeGoError("undefined: $name")
