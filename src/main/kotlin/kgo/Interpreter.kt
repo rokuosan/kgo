@@ -878,7 +878,7 @@ class Interpreter(
             }
         }
         is SelectorExpression -> {
-            if (target.receiver is NameExpression && !env.contains(target.receiver.name)) {
+            if (target.receiver is NameExpression && !env.hasVisibleBinding(target.receiver.name)) {
                 val path = env.imports.packages[target.receiver.name]
                 if (path != null) importedRuntimePackages[path]?.exportedVariableTarget(target.field)?.let { return it }
             }
@@ -1464,7 +1464,7 @@ class Interpreter(
             }
             val packageAlias = (expression.receiver as? NameExpression)?.name
             val importedPath = packageAlias
-                ?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
+                ?.takeUnless { env.hasVisibleBinding(it) }
                 ?.let(env.imports.packages::get)
             if (importedPath != null) {
                 importedRuntimePackages[importedPath]?.exportedFunction(expression.field)?.function?.let {
@@ -1565,7 +1565,7 @@ class Interpreter(
 
     private fun isNilOperand(expression: Expression, env: Environment): Boolean = when (expression) {
         is ParenthesizedExpression -> isNilOperand(expression.expression, env)
-        is NameExpression -> expression.name == "nil" && !env.contains(expression.name)
+        is NameExpression -> expression.name == "nil" && !env.hasVisibleBinding(expression.name)
         else -> false
     }
 
@@ -2465,14 +2465,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     expression.field,
                     FunctionGoType(listOf(ParameterSyntax(null, methodReceiverType)) + method.parameters, method.results)
                 )
-            } else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+            } else if (expression.receiver is NameExpression && !env.hasVisibleBinding(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name] == "fmt") BuiltinValue(expression.field)
-            else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+            else if (expression.receiver is NameExpression && !env.hasVisibleBinding(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name] == "math") evaluateMathPackageMember(expression.field)
-            else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+            else if (expression.receiver is NameExpression && !env.hasVisibleBinding(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name] == "unsafe")
                 evaluateUnsafePackageMember(expression.field)
-            else if (expression.receiver is NameExpression && !env.contains(expression.receiver.name) &&
+            else if (expression.receiver is NameExpression && !env.hasVisibleBinding(expression.receiver.name) &&
                 env.imports.packages[expression.receiver.name]?.let(importedRuntimePackages::containsKey) == true) {
                 val path = env.imports.packages.getValue(expression.receiver.name)
                 val imported = importedRuntimePackages.getValue(path)
@@ -2564,7 +2564,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
             val path = alias
-                ?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
+                ?.takeUnless { env.hasVisibleBinding(it) }
                 ?.let(env.imports.packages::get)
             if (path == "runtime" && expression.field in GoRuntimePackage.exportedTypes)
                 QualifiedGoType(path, expression.field)
@@ -2580,7 +2580,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             importedRuntimePackages[path]?.exportedVariablePointer(expression.name)
         } ?: env.pointer(expression.name)
         is SelectorExpression -> {
-            val pointer = if (expression.receiver is NameExpression && !env.contains(expression.receiver.name)) {
+            val pointer = if (expression.receiver is NameExpression && !env.hasVisibleBinding(expression.receiver.name)) {
                 env.imports.packages[expression.receiver.name]?.let { path ->
                     importedRuntimePackages[path]?.exportedVariablePointer(expression.field)
                 }
@@ -2768,10 +2768,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun unsafeIntrinsicName(function: Expression, env: Environment): String? = when (val target = function.unparenthesized()) {
         is SelectorExpression -> {
             val alias = (target.receiver as? NameExpression)?.name ?: return null
-            if (env.contains(alias) || env.typeBinding(alias) != null || env.imports.packages[alias] != "unsafe") return null
+            if (env.hasVisibleBinding(alias) || env.imports.packages[alias] != "unsafe") return null
             target.field.takeIf { GoUnsafePackage.functionType(it) != null }
         }
-        is NameExpression -> if (!env.contains(target.name) && env.typeBinding(target.name) == null &&
+        is NameExpression -> if (!env.hasVisibleBinding(target.name) &&
             "unsafe" in env.imports.dotPackages && target.name in GoUnsafePackage.exportedNames) target.name else null
         else -> null
     }
@@ -2859,7 +2859,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun isPredeclaredBuiltin(name: String, env: Environment): Boolean {
-        if (env.contains(name) || env.typeBinding(name) != null || name in env.imports.packages ||
+        if (env.hasVisibleBinding(name) || name in env.imports.packages ||
             name in functions || typeDefinitions.containsKey(name)) return false
         return env.imports.dotPackages.none { path ->
             when (path) {
@@ -2899,7 +2899,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         } }
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
-            val path = alias?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
+            val path = alias?.takeUnless { env.hasVisibleBinding(it) }
                 ?.let(env.imports.packages::get)
             if (path != null && (expression.field in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
                     path == "runtime" && expression.field in GoRuntimePackage.exportedTypes))
@@ -3050,7 +3050,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         is SelectorExpression -> {
             val alias = (target.receiver as? NameExpression)?.name
-            val path = alias?.takeIf { !env.contains(it) && env.typeBinding(it) == null }?.let(env.imports.packages::get)
+            val path = alias?.takeIf { !env.hasVisibleBinding(it) }?.let(env.imports.packages::get)
             if (path == "unsafe" && target.field in GoUnsafePackage.exportedTypes)
                 QualifiedGoType(path, target.field)
             else if (path == "runtime" && target.field in GoRuntimePackage.exportedTypes)
@@ -6093,7 +6093,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             } ?: return null
             is SelectorExpression -> {
                 val alias = (target.receiver as? NameExpression)?.name ?: return null
-                val importedPath = env.imports.packages[alias]?.takeIf { !env.contains(alias) } ?: return null
+                val importedPath = env.imports.packages[alias]?.takeIf { !env.hasVisibleBinding(alias) } ?: return null
                 val imported = importedRuntimePackages[importedPath] ?: return null
                 if (target.field !in imported.exportedConstantNames) return null
                 importedPath to target.field
@@ -6186,6 +6186,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         @Synchronized fun getOrNull(name: String): Any? = lookup(name)?.value
         @Synchronized fun contains(name: String): Boolean = values.containsKey(name) || parent?.contains(name) == true
+        @Synchronized fun hasVisibleBinding(name: String): Boolean =
+            values.containsKey(name) || name in namedTypes || parent?.hasVisibleBinding(name) == true
         @Synchronized fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
         @Synchronized fun defineType(name: String, type: NamedGoType) { namedTypes[name] = type }
         @Synchronized fun clearLocalTypes() { namedTypes.clear() }
