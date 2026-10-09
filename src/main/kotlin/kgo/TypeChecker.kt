@@ -3205,6 +3205,8 @@ class TypeChecker(
             val key = embedded.toString()
             if (key in seen) error("invalid recursive interface embedding")
             interfaceMethods(embedded, seen + key).forEach { (name, signature) ->
+                // Go 1.0 requires unique method names throughout the interface method set.
+                // Keep rejecting duplicate embedded methods, even when their signatures match.
                 if (result.putIfAbsent(name, signature) != null)
                     error("duplicate interface method $name")
             }
