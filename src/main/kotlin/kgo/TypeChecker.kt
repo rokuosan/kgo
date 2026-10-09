@@ -117,7 +117,10 @@ class TypeChecker(
                 val receiver = declaration.receiver
                 if (receiver != null && declaration.name == "_") error("method name cannot be blank")
                 if (receiver == null) {
-                    if (declaration.name == "init") initFunctions += declaration
+                    if (declaration.name == "init") {
+                        if (declaration.body == null) error("init function must have a body")
+                        initFunctions += declaration
+                    }
                     else if (declaration.name != "_" && functions.putIfAbsent(declaration.name, declaration) != null)
                         error("function ${declaration.name} redeclared")
                 } else {
