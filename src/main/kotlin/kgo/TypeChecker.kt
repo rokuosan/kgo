@@ -2616,6 +2616,11 @@ class TypeChecker(
                 if (!isUntyped(first) && !isUntyped(second) && !sameType(first, second))
                     error("complex arguments must have the same type")
                 val typed = listOf(first, second).firstOrNull { !isUntyped(it) }
+                if (typed != null) {
+                    argumentTypes.forEachIndexed { index, argumentType ->
+                        requireAssignable(argumentType, typed, "complex argument", args[index], scope)
+                    }
+                }
                 listOf(when {
                     typed == null -> untypedComplex
                     underlying(typed) in setOf(NamedGoType("float32"), predeclaredFloat32Type) -> predeclaredComplex64Type
