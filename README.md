@@ -51,7 +51,8 @@ The `unsafe` import implements Go 1.0's `Sizeof`, `Alignof`, and `Offsetof`
 intrinsics and `Pointer` using a fixed 64-bit Go data layout on the JVM.
 Intrinsic arguments are type-checked but not evaluated, and their `uintptr`
 results can be used as constants. Pointer and `uintptr` conversions use
-interpreter-managed addresses.
+interpreter-managed addresses; scalar reinterpretation works within scalar
+values and contiguous arrays of scalar values.
 The `runtime` import exposes the Go 1.0 `Error` interface with its
 `String() string` method for run-time panic values.
 Before execution, a static checker validates function signatures, declared
