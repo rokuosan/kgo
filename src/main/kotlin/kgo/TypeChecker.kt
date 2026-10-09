@@ -445,6 +445,9 @@ class TypeChecker(
     private fun dotImportedConstant(name: String): Pair<String, ExportedConstant>? =
         dotImportPaths.firstNotNullOfOrNull { path -> importedConstant(path, name)?.let { path to it } }
 
+    private fun visibleDotImportedName(name: String, scope: Scope): Boolean =
+        scope.getOrNull(name) == null && scope.typeBinding(name) == null
+
     private fun dotImportedType(name: String): QualifiedGoType? = dotImportPaths.firstNotNullOfOrNull { path ->
         if (standardPackageName(path) == "unsafe" && name in GoUnsafePackage.exportedTypes) {
             usedDotImportPaths += path
@@ -1398,7 +1401,7 @@ class TypeChecker(
 
     private fun constantComplex(expression: Expression, scope: Scope = globals): ConstantComplexValue? = when (expression) {
         is NameExpression -> scope.constantComplex(expression.name)
-            ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.complex else null
+            ?: if (visibleDotImportedName(expression.name, scope)) dotImportedConstant(expression.name)?.second?.complex else null
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
             alias?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }
@@ -1475,7 +1478,8 @@ class TypeChecker(
             else when (expression.name) {
                 "true" -> true
                 "false" -> false
-                else -> dotImportedConstant(expression.name)?.second?.boolean
+                else -> if (visibleDotImportedName(expression.name, scope))
+                    dotImportedConstant(expression.name)?.second?.boolean else null
             }
         is SelectorExpression -> (expression.receiver as? NameExpression)?.name
             ?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }
@@ -1530,7 +1534,7 @@ class TypeChecker(
 
     private fun constantStringIdentity(expression: Expression, scope: Scope = globals): String? = when (expression) {
         is NameExpression -> scope.constantStringIdentity(expression.name)
-            ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.stringIdentity else null
+            ?: if (visibleDotImportedName(expression.name, scope)) dotImportedConstant(expression.name)?.second?.stringIdentity else null
         is SelectorExpression -> (expression.receiver as? NameExpression)?.name
             ?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }
             ?.let(packagePaths::get)?.let { importedConstant(it, expression.field)?.stringIdentity }
@@ -3420,8 +3424,8 @@ class TypeChecker(
             TokenKind.INT, TokenKind.FLOAT, TokenKind.IMAG, TokenKind.CHAR, TokenKind.STRING
         )
         is NameExpression -> if (scope.getOrNull(expression.name) != null) scope.isConstant(expression.name)
-            else expression.name in setOf("true", "false") || dotImportedConstant(expression.name) != null ||
-                dotImportedConstantRational(expression.name) != null
+            else expression.name in setOf("true", "false") || visibleDotImportedName(expression.name, scope) &&
+                (dotImportedConstant(expression.name) != null || dotImportedConstantRational(expression.name) != null)
         is SelectorExpression -> expression.receiver is NameExpression &&
             scope.getOrNull(expression.receiver.name) == null && scope.typeBinding(expression.receiver.name) == null &&
             (packagePaths[expression.receiver.name]?.let { standardPackageName(it) == "math" &&
@@ -3464,7 +3468,7 @@ class TypeChecker(
         }
 
     private fun constantRational(expression: Expression, scope: Scope = globals): GoRational? = when (expression) {
-        is NameExpression -> scope.constantRational(expression.name) ?: if (scope.getOrNull(expression.name) == null)
+        is NameExpression -> scope.constantRational(expression.name) ?: if (visibleDotImportedName(expression.name, scope))
             dotImportedConstantRational(expression.name) else null
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
@@ -3682,8 +3686,10 @@ class TypeChecker(
         is LiteralExpression -> if (expression.token.kind == TokenKind.STRING)
             stringLiteralByteLength(expression.token.lexeme)?.let(BigInteger::valueOf) else null
         is NameExpression -> scope.constantStringLength(expression.name)
-            ?: if (scope.getOrNull(expression.name) == null) dotImportedConstant(expression.name)?.second?.stringLength else null
-        is SelectorExpression -> (expression.receiver as? NameExpression)?.name?.let(packagePaths::get)
+            ?: if (visibleDotImportedName(expression.name, scope)) dotImportedConstant(expression.name)?.second?.stringLength else null
+        is SelectorExpression -> (expression.receiver as? NameExpression)?.name
+            ?.takeIf { scope.getOrNull(it) == null && scope.typeBinding(it) == null }
+            ?.let(packagePaths::get)
             ?.let { importedConstant(it, expression.field)?.stringLength }
         is ParenthesizedExpression -> constantStringLength(expression.expression, scope)
         is BinaryExpression -> if (expression.operator == TokenKind.ADD) {
