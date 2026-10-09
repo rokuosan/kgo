@@ -531,6 +531,7 @@ class Interpreter(
     }
 
     private suspend fun executeStatementList(statements: List<Statement>, env: Environment) {
+        val entryBindings = env.localBindingNames()
         var index = 0
         while (index < statements.size) {
             yield()
@@ -540,6 +541,11 @@ class Interpreter(
             } catch (jump: GotoSignal) {
                 val target = statements.indexOfFirst { hasLeadingLabel(it, jump.label) }
                 if (target < 0) throw jump
+                if (target < index) {
+                    val retainedBindings = entryBindings + declaredLocalBindings(statements.take(target))
+                    (declaredLocalBindings(statements.subList(target, index + 1)) - retainedBindings)
+                        .forEach(env::removeLocalBinding)
+                }
                 env.clearLocalTypes()
                 predeclareTypes(statements.take(target), env)
                 if (target > index)
@@ -547,6 +553,31 @@ class Interpreter(
                 index = target
             }
         }
+    }
+
+    private fun declaredLocalBindings(statements: List<Statement>): Set<String> = buildSet {
+        fun collect(statement: Statement) {
+            when (statement) {
+                is DeclarationStatement -> statement.declarations.forEach { declaration ->
+                    when (declaration) {
+                        is VariableDeclaration, is ConstantDeclaration -> addAll(declarationNames(declaration))
+                        else -> Unit
+                    }
+                }
+                is VariableStatement -> addAll(statement.names.filter { it != "_" })
+                is AssignmentStatement -> if (statement.operator == TokenKind.DEFINE)
+                    statement.targets.mapNotNullTo(this) { (it as? NameExpression)?.name?.takeUnless { name -> name == "_" } }
+                is LabeledStatement -> collect(statement.statement)
+                else -> Unit
+            }
+        }
+        statements.forEach(::collect)
+    }
+
+    private fun declarationNames(declaration: Declaration): List<String> = when (declaration) {
+        is VariableDeclaration -> declaration.names.filter { it != "_" }
+        is ConstantDeclaration -> declaration.names.filter { it != "_" }
+        else -> emptyList()
     }
 
     private fun hasLeadingLabel(statement: Statement, label: String): Boolean = when (statement) {
@@ -6114,6 +6145,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         var functionResultTypes: List<GoTypeSyntax> = parent?.functionResultTypes.orEmpty()
         fun child() = Environment(this, deferredCalls, panicState, imports)
         @Synchronized fun containsLocal(name: String) = values.containsKey(name)
+        @Synchronized fun localBindingNames(): Set<String> = values.keys.toSet()
         @Synchronized fun define(name: String, value: Any?, type: GoTypeSyntax? = null) {
             values[name] = type?.let { copyForType(value, it) } ?: copyValue(value)
             if (type != null) types[name] = type
@@ -6135,6 +6167,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         @Synchronized fun typeOf(name: String): GoTypeSyntax? = types[name] ?: parent?.typeOf(name)
         @Synchronized fun defineType(name: String, type: NamedGoType) { namedTypes[name] = type }
         @Synchronized fun clearLocalTypes() { namedTypes.clear() }
+        @Synchronized fun removeLocalBinding(name: String) {
+            values.remove(name)
+            types.remove(name)
+            constants.remove(name)
+            addresses.remove(name)
+        }
         @Synchronized fun typeBinding(name: String): NamedGoType? = namedTypes[name] ?: parent?.typeBinding(name)
         @Synchronized fun containsLocalType(name: String) = name in namedTypes
         @Synchronized fun pointer(name: String): GoPointer {
