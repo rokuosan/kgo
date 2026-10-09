@@ -3937,9 +3937,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         iface.embeddedTypes.forEach { embedded ->
             val key = embedded.toString()
             if (key !in seen) interfaceMethodsRuntime(embedded, seen + key).forEach { (name, signature) ->
-                val previous = result.putIfAbsent(name, signature)
-                if (previous != null && !sameFunctionType(previous, signature))
-                    throw RuntimeGoError("incompatible interface method $name")
+                if (result.putIfAbsent(name, signature) != null)
+                    throw RuntimeGoError("duplicate interface method $name")
             }
         }
         val declaredNames = mutableSetOf<String>()
@@ -3947,9 +3946,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             val key = runtimeInterfaceMethodKey(method)
             if (!declaredNames.add(key)) throw RuntimeGoError("duplicate interface method ${method.name}")
             val signature = FunctionGoType(method.parameters, method.results)
-            val previous = result.putIfAbsent(key, signature)
-            if (previous != null && !sameFunctionType(previous, signature))
-                throw RuntimeGoError("incompatible interface method ${method.name}")
+            if (result.putIfAbsent(key, signature) != null)
+                throw RuntimeGoError("duplicate interface method ${method.name}")
         }
         return result
     }

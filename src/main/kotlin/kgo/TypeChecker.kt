@@ -3199,9 +3199,8 @@ class TypeChecker(
             val key = embedded.toString()
             if (key in seen) error("invalid recursive interface embedding")
             interfaceMethods(embedded, seen + key).forEach { (name, signature) ->
-                val previous = result.putIfAbsent(name, signature)
-                if (previous != null && !sameSignature(previous, signature))
-                    error("incompatible interface method $name")
+                if (result.putIfAbsent(name, signature) != null)
+                    error("duplicate interface method $name")
             }
         }
         val declaredNames = mutableSetOf<String>()
@@ -3209,9 +3208,8 @@ class TypeChecker(
             val signature = FunctionGoType(method.parameters, method.results)
             val key = interfaceMethodKey(method)
             if (!declaredNames.add(key)) error("duplicate interface method ${method.name}")
-            val previous = result.putIfAbsent(key, signature)
-            if (previous != null && !sameSignature(previous, signature))
-                error("incompatible interface method ${method.name}")
+            if (result.putIfAbsent(key, signature) != null)
+                error("duplicate interface method ${method.name}")
         }
         return result
     }
