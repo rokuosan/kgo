@@ -5083,7 +5083,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         val destinationType = when (destinationValue) {
             is GoSlice -> SliceGoType(destinationValue.elementType)
             is GoNilValue -> underlying(destinationValue.type).takeIf { it is SliceGoType }
-            null -> if (sourceValue is GoString) SliceGoType(predeclaredUInt8RuntimeType) else null
+            null -> when (sourceValue) {
+                is GoSlice -> SliceGoType(sourceValue.elementType)
+                is GoNilValue -> underlying(sourceValue.type).takeIf { it is SliceGoType }
+                is GoString -> SliceGoType(predeclaredUInt8RuntimeType)
+                else -> null
+            }
             else -> throw RuntimeGoError("copy destination must be a slice")
         } as? SliceGoType ?: throw RuntimeGoError("copy destination must be a slice")
         val values = when (val source = sourceValue) {
@@ -5097,6 +5102,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 if (!sameRuntimeType(destinationType.element, sourceType.element)) throw RuntimeGoError("copy slice element types do not match")
                 emptyList()
             }
+            null -> emptyList()
             is GoString -> {
                 if (!isByteElementType(destinationType.element))
                     throw RuntimeGoError("copy from string requires a byte slice")
