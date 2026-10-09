@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.4.20"
+    kotlin("jvm") version "2.4.21"
     application
 }
 
@@ -11,7 +11,7 @@ repositories { mavenCentral() }
 kotlin {
     jvmToolchain(27)
     compilerOptions {
-        // Kotlin 2.4.20 runs on JDK 27 but currently emits bytecode through JVM 26.
+        // Kotlin 2.4.21 runs on JDK 27 but currently emits bytecode through JVM 26.
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_26)
     }
 }
