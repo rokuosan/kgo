@@ -2377,6 +2377,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is UnaryExpression -> when (expression.operator) {
             TokenKind.AND -> addressOf(expression.operand, env)
             TokenKind.MUL -> {
+                val operandType = staticExpressionType(expression.operand, env)?.let { resolveRuntimeType(it, env) }
+                if (operandType?.let(::isUnsafePointerType) == true)
+                    throw RuntimeGoError("cannot indirect unsafe.Pointer")
                 val pointer = evaluate(expression.operand, env) as? GoPointer
                     ?: throw RuntimeGoError("dereference of non-pointer")
                 val pointedType = pointer.pointeeType

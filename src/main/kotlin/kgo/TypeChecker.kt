@@ -1759,7 +1759,10 @@ class TypeChecker(
                         error("& requires addressable operand")
                     PointerGoType(operand)
                 }
-                TokenKind.MUL -> (underlying(operand) as? PointerGoType)?.element ?: error("* requires pointer operand")
+                TokenKind.MUL -> {
+                    if (isUnsafePointerType(operand)) error("cannot indirect unsafe.Pointer")
+                    (underlying(operand) as? PointerGoType)?.element ?: error("* requires pointer operand")
+                }
                 TokenKind.ARROW -> {
                     val channel = underlying(operand) as? ChannelGoType ?: error("receive requires a channel")
                     if (channel.direction == ChannelDirection.SEND_ONLY) error("cannot receive from send-only channel")
