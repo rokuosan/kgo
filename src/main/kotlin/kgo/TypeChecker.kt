@@ -3141,7 +3141,12 @@ class TypeChecker(
             is InterfaceGoType -> {
                 val names = mutableSetOf<String>()
                 type.embeddedTypes.forEach {
-                    validateType(it, active)
+                    // Interface embedding is normally direct, but it can occur
+                    // inside a method signature that already provides an
+                    // indirection (for example, I may return interface { I }).
+                    // Preserve that context so valid recursive interfaces are
+                    // accepted while direct embedding cycles remain invalid.
+                    validateType(it, active, indirect)
                     if (underlying(it) !is InterfaceGoType) error("embedded interface element must be an interface")
                 }
                 type.methods.forEach { method ->
