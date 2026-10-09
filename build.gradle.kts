@@ -24,6 +24,10 @@ java {
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     implementation("org.apache.commons:commons-math3:3.6.1")
+
+    testImplementation(kotlin("test"))
 }
 
 application { mainClass.set("kgo.MainKt") }
+
+tasks.test { useJUnitPlatform() }

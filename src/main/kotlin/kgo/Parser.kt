@@ -139,8 +139,8 @@ class Parser(private val tokens: List<Token>) {
         return results
     }
 
-    private fun parseVariables(): List<VariableDeclaration> {
-        if (!match(TokenKind.LPAREN)) return listOf(parseVariableSpec())
+    private fun parseVariables(topLevel: Boolean = true): List<VariableDeclaration> {
+        if (!match(TokenKind.LPAREN)) return listOf(parseVariableSpec(topLevel = topLevel))
         val declarations = mutableListOf<VariableDeclaration>()
         while (!at(TokenKind.RPAREN) && !at(TokenKind.EOF)) {
             declarations += parseVariableSpec(grouped = true)
@@ -202,12 +202,13 @@ class Parser(private val tokens: List<Token>) {
         return TypeDeclaration(name, parseType())
     }
 
-    private fun parseVariableSpec(grouped: Boolean = false): VariableDeclaration {
+    private fun parseVariableSpec(grouped: Boolean = false, topLevel: Boolean = true): VariableDeclaration {
         val names = parseNameList()
         val type = if (typeStart(current().kind) && !at(TokenKind.ASSIGN)) parseType() else null
         val values = if (match(TokenKind.ASSIGN)) expressionList() else emptyList()
         if (type == null && values.isEmpty()) fail("expected a type or initializer")
-        if (grouped) semicolonOrClose(TokenKind.RPAREN) else optionalSemicolon()
+        if (grouped) semicolonOrClose(TokenKind.RPAREN)
+        else if (topLevel) optionalSemicolon()
         return VariableDeclaration(names, values, type)
     }
 
@@ -250,7 +251,7 @@ class Parser(private val tokens: List<Token>) {
         return when {
         at(TokenKind.LBRACE) -> parseBlock()
         match(TokenKind.RETURN) -> ReturnStatement(if (at(TokenKind.SEMICOLON) || at(TokenKind.RBRACE)) emptyList() else expressionList())
-        match(TokenKind.VAR) -> DeclarationStatement(parseVariables())
+        match(TokenKind.VAR) -> DeclarationStatement(parseVariables(topLevel = false))
         match(TokenKind.CONST) -> DeclarationStatement(parseConstants())
         match(TokenKind.TYPE) -> DeclarationStatement(parseTypes())
         match(TokenKind.IF) -> parseIf()
