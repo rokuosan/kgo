@@ -53,7 +53,8 @@ Intrinsic arguments are type-checked but not evaluated, and their `uintptr`
 results can be used as constants. Pointer and `uintptr` conversions use
 interpreter-managed addresses; scalar reinterpretation works within scalar
 values and structs and arrays composed of scalar, pointer, map, channel, or
-function values, including struct padding.
+function values, including string headers, string backing bytes, and struct
+padding.
 The `runtime` import exposes the Go 1.0 `Error` interface with its
 `String() string` method for run-time panic values.
 Before execution, a static checker validates function signatures, declared

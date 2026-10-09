@@ -141,6 +141,7 @@ class Interpreter(
     private val unsafeRawBytesByObject = IdentityHashMap<Any, ByteArray>()
     private val unsafeOpaqueAddressByIdentity = IdentityHashMap<Any, Long>()
     private val unsafeOpaqueValueByAddress = mutableMapOf<Long, Any>()
+    private val unsafeByteBackingByAddress = mutableMapOf<Long, ByteArray>()
     private var nextUnsafeAddress = 0x10000L
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
@@ -4484,6 +4485,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private fun unsafePointer(address: Long, elementType: GoTypeSyntax, pointerType: GoTypeSyntax): GoPointer {
         if (address == 0L) return GoPointer.nil(elementType, pointerType)
         synchronized(unsafeAddressByLocation) {
+            unsafeByteBackingAt(address)?.let { (bytes, offset) ->
+                val width = unsafeScalarRepresentation(elementType)?.second?.div(8)
+                if (width != null && offset + width <= bytes.size) return unsafeBytePointerView(
+                    bytes, offset, elementType, pointerType, address,
+                    unsafeAddressIdentityByAddress.getOrPut(address) { Any() }
+                )
+            }
             val locations = unsafePointerByAddress[address].orEmpty()
             val pointer = locations.firstOrNull { it.byteOffset == 0 && it.pointer.pointeeType == elementType }?.pointer
                 ?: locations.firstOrNull { location -> location.byteOffset == 0 &&
@@ -4525,27 +4533,59 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             .size.let(Math::toIntExact)
     }
 
+    private fun isUnsafeStringType(type: GoTypeSyntax): Boolean =
+        (underlying(type) as? NamedGoType)?.name == "string"
+
     private fun isUnsafeAggregateType(type: GoTypeSyntax): Boolean = when (val actual = underlying(type)) {
         is ArrayGoType -> isUnsafeAggregateType(actual.element)
         is StructGoType -> actual.fields.all { isUnsafeAggregateType(it.type) }
         is PointerGoType -> true
         is MapGoType, is ChannelGoType -> true
         is FunctionGoType -> true
-        else -> unsafeScalarRepresentation(type) != null
+        else -> isUnsafeStringType(type) || unsafeScalarRepresentation(type) != null
     }
 
     private fun unsafeOpaqueAddress(identity: Any, value: Any): Long = synchronized(unsafeAddressByLocation) {
         unsafeOpaqueAddressByIdentity[identity]?.let { return@synchronized it }
         val address = alignUnsafeAddress(nextUnsafeAddress, 8L)
-        nextUnsafeAddress = Math.addExact(address, 8L)
+        val reservation = maxOf(8L, (value as? ByteArray)?.size?.toLong() ?: 8L)
+        nextUnsafeAddress = Math.addExact(address, reservation)
         unsafeOpaqueAddressByIdentity[identity] = address
         unsafeOpaqueValueByAddress[address] = value
+        if (value is ByteArray) unsafeByteBackingByAddress[address] = value
         address
     }
 
     private fun unsafeOpaqueValue(address: Long): Any? = synchronized(unsafeAddressByLocation) {
         unsafeOpaqueValueByAddress[address]
     }
+
+    private fun unsafeByteBackingAt(address: Long): Pair<ByteArray, Int>? =
+        unsafeByteBackingByAddress.entries.firstNotNullOfOrNull { (base, bytes) ->
+            val offset = address - base
+            if (offset >= 0 && offset < bytes.size) bytes to offset.toInt() else null
+        }
+
+    private fun unsafeBytePointerView(
+        bytes: ByteArray,
+        offset: Int,
+        elementType: GoTypeSyntax,
+        pointerType: GoTypeSyntax,
+        address: Long,
+        addressIdentity: Any
+    ): GoPointer = GoPointer.reference({
+        GoInteger((bytes[offset].toInt() and 0xff).toLong(), predeclaredUInt8RuntimeType)
+    }, { assigned ->
+        bytes[offset] = integerValue(assigned, "unsafe byte write").toByte()
+    }, predeclaredUInt8RuntimeType).view(elementType, pointerType,
+        get = {
+            val width = unsafeScalarWidth(elementType)
+            decodeUnsafeScalar(bytes.copyOfRange(offset, offset + width), elementType)
+        },
+        set = { assigned -> encodeUnsafeScalar(assigned, elementType).copyInto(bytes, offset) },
+        pointerAddress = address,
+        identityOverride = addressIdentity
+    )
 
     private fun unsafeFieldOffsets(type: StructGoType): List<Pair<RuntimeStructField, Int>> {
         var offset = 0L
@@ -4589,6 +4629,12 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     )
 
     private fun encodeUnsafeMemory(value: Any?, type: GoTypeSyntax): ByteArray {
+        if (isUnsafeStringType(type)) {
+            val string = value as? GoString ?: throw RuntimeGoError("invalid unsafe string value")
+            val address = unsafeOpaqueAddress(string.bytes, string.bytes)
+            return ByteBuffer.allocate(16).order(ByteOrder.nativeOrder())
+                .putLong(address).putLong(string.bytes.size.toLong()).array()
+        }
         if (unsafeScalarRepresentation(type) != null) return encodeUnsafeScalar(value, type)
         return when (val actual = underlying(type)) {
             is PointerGoType -> {
@@ -4653,6 +4699,27 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun writeUnsafeMemory(pointer: GoPointer, type: GoTypeSyntax, bytes: ByteArray, start: Int = 0): Int {
+        if (isUnsafeStringType(type)) {
+            val header = ByteBuffer.wrap(bytes, start, 16).order(ByteOrder.nativeOrder())
+            val address = header.long
+            val length = header.long
+            if (length < 0L || length > Int.MAX_VALUE)
+                throw RuntimeGoError("invalid unsafe string length")
+            val content = when {
+                address == 0L && length == 0L -> byteArrayOf()
+                else -> {
+                    val (backing, offset) = unsafeByteBackingAt(address)
+                        ?: if (length == 0L && unsafeOpaqueValue(address) is ByteArray)
+                            (unsafeOpaqueValue(address) as ByteArray) to 0
+                        else throw RuntimeGoError("invalid unsafe string address")
+                    if (offset.toLong() + length > backing.size)
+                        throw RuntimeGoError("invalid unsafe string bounds")
+                    backing.copyOfRange(offset, offset + length.toInt())
+                }
+            }
+            pointer.set(GoString(content, type))
+            return start + 16
+        }
         if (unsafeScalarRepresentation(type) != null) {
             val width = unsafeScalarWidth(type)
             pointer.set(decodeUnsafeScalar(bytes.copyOfRange(start, start + width), type))
