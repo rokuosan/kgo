@@ -119,8 +119,6 @@ class TypeChecker(
                 if (receiver == null) {
                     if (declaration.name == "init") {
                         if (declaration.body == null) error("init function must have a body")
-                        if (declaration.parameterTypes.isNotEmpty() || declaration.resultTypes.isNotEmpty())
-                            error("init function must have no arguments or return values")
                         initFunctions += declaration
                     }
                     else if (declaration.name != "_" && functions.putIfAbsent(declaration.name, declaration) != null)
