@@ -3,7 +3,7 @@ package kgo
 /** The Go 1.0 runtime declarations required by the language specification. */
 internal object GoRuntimePackage {
     private val errorType = InterfaceGoType(
-        listOf(InterfaceMethodSyntax("String", emptyList(), listOf(NamedGoType("string")))),
+        listOf(InterfaceMethodSyntax("RuntimeError", emptyList(), emptyList())),
         listOf(NamedGoType("#predeclared-error"))
     )
 

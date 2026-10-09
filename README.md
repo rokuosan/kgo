@@ -55,8 +55,9 @@ interpreter-managed addresses; scalar reinterpretation works within scalar
 values and structs and arrays composed of scalar, string, slice, interface,
 pointer, map, channel, or function values, including string backing bytes and
 struct padding.
-The `runtime` import exposes the Go 1.0 `Error` interface with its
-`String() string` method for run-time panic values.
+The `runtime` import exposes the Go 1.0 `Error` interface, embedding the
+predeclared `error` interface and adding the `RuntimeError()` marker method.
+Interpreter-generated run-time panic values implement both methods.
 Before execution, a static checker validates function signatures, declared
 types, initializers, and many expression and statement type rules. It is still
 an incomplete subset of the Go 1.0 type system. The Go 1.0 specification leaves

@@ -2643,7 +2643,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     return@forEach
                 }
                 if (current is GoInterfaceValue) {
-                    val member = if (current.value is GoRuntimeErrorValue && name == "String")
+                    val member = if (current.value is GoRuntimeErrorValue && name in runtimeErrorMethodNames)
                         RuntimeErrorMethodValue(current.value, name)
                     else (current.implementationOwner ?: this)
                         .selectStructMember(current.value, name, receiverExpression, env)
@@ -2652,7 +2652,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
                 val struct = current as? GoStruct
                 if (struct == null) {
-                    if (current is GoRuntimeErrorValue && name == "String") {
+                    if (current is GoRuntimeErrorValue && name in runtimeErrorMethodNames) {
                         candidates += Candidate(null, null, current, current)
                         return@forEach
                     }
@@ -3067,7 +3067,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             is RuntimeErrorMethodValue -> {
                 if (args.isNotEmpty()) throw RuntimeGoError("${target.name} expects no arguments")
-                return if (target.name == "String")
+                return if (target.name == "Error")
                     GoString(target.receiver.message.toByteArray(Charsets.UTF_8), predeclaredStringRuntimeType)
                 else null
             }
@@ -3571,6 +3571,9 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         else -> this
     }
 
+    private fun runtimeErrorMethodType(name: String): FunctionGoType =
+        runtimeErrorMethodTypes[name] ?: throw RuntimeGoError("unknown runtime.Error method $name")
+
     private fun runtimeType(value: Any?): GoTypeSyntax? = when (value) {
         is GoRuntimeErrorValue -> runtimeErrorValueType
         is GoInterfaceValue -> value.dynamicType
@@ -3607,8 +3610,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 value.owner.externalizeRuntimeType(signature, it) as FunctionGoType
             } ?: signature else signature
         }
-        is RuntimeErrorMethodValue -> value.type ?: if (value.name == "String")
-            FunctionGoType(emptyList(), listOf(predeclaredStringRuntimeType)) else FunctionGoType(emptyList(), emptyList())
+        is RuntimeErrorMethodValue -> value.type ?: runtimeErrorMethodType(value.name)
         is BuiltinValue -> value.type
         is MethodExpressionValue -> value.type
         is Long -> predeclaredIntRuntimeType
@@ -3966,9 +3968,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         val actual = underlying(type)
         if (actual is InterfaceGoType) return interfaceMethodsRuntime(actual)
-        if (type == runtimeErrorValueType) return mapOf(
-            "String" to FunctionGoType(emptyList(), listOf(predeclaredStringRuntimeType))
-        )
+        if (type == runtimeErrorValueType) return runtimeErrorMethodTypes
         val result = linkedMapOf<String, FunctionGoType>()
         data class SearchNode(val type: GoTypeSyntax, val pointer: Boolean, val ancestors: Set<String>)
         fun baseType(nodeType: GoTypeSyntax): GoTypeSyntax = underlying((nodeType as? PointerGoType)?.element ?: nodeType)
@@ -6689,6 +6689,11 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         private val complexTypeNames = setOf("#predeclared-complex64", "#predeclared-complex128", "complex64", "complex128")
         private val errorInterfaceType = InterfaceGoType(listOf(InterfaceMethodSyntax("Error", emptyList(), listOf(predeclaredStringRuntimeType))))
         private val runtimeErrorValueType = NamedGoType("#runtime.Error")
+        private val runtimeErrorMethodNames = setOf("Error", "RuntimeError")
+        private val runtimeErrorMethodTypes = mapOf(
+            "Error" to FunctionGoType(emptyList(), listOf(predeclaredStringRuntimeType)),
+            "RuntimeError" to FunctionGoType(emptyList(), emptyList())
+        )
         private val builtinTypes = setOf("bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr")
     }
 }
