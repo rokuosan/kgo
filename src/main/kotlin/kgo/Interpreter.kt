@@ -542,6 +542,8 @@ class Interpreter(
                 if (target < 0) throw jump
                 env.clearLocalTypes()
                 predeclareTypes(statements.take(target), env)
+                if (target > index)
+                    predeclareConstants(statements.subList(index + 1, target), env)
                 index = target
             }
         }
@@ -564,6 +566,20 @@ class Interpreter(
         statements.forEach(::predeclare)
     }
 
+    private suspend fun predeclareConstants(statements: List<Statement>, env: Environment) {
+        for (statement in statements) {
+            when (statement) {
+                is DeclarationStatement -> statement.declarations.filterIsInstance<ConstantDeclaration>()
+                    .forEach { declaration ->
+                        if (declaration.names.any { it != "_" && !env.containsLocal(it) })
+                            initializeConstantIn(declaration, env)
+                    }
+                is LabeledStatement -> predeclareConstants(listOf(statement.statement), env)
+                else -> Unit
+            }
+        }
+    }
+
     private suspend fun execute(statement: Statement, env: Environment, labels: Set<String> = emptySet()) {
         when (statement) {
             EmptyStatement -> Unit
@@ -571,7 +587,8 @@ class Interpreter(
             is DeclarationStatement -> statement.declarations.forEach { declaration ->
                 when (declaration) {
                     is VariableDeclaration -> initialize(declaration.names, declaration.values, env, declaration.type)
-                    is ConstantDeclaration -> initializeConstantIn(declaration, env)
+                    is ConstantDeclaration -> if (declaration.names.any { it != "_" && !env.containsLocal(it) })
+                        initializeConstantIn(declaration, env)
                     is TypeDeclaration -> defineLocalType(declaration, env)
                     else -> throw RuntimeGoError("unsupported local declaration")
                 }
