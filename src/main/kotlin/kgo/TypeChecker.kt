@@ -224,7 +224,10 @@ class TypeChecker(
                 if (declaredType != null) {
                     validateType(declaredType)
                     requireAssignableValues(values, expressions, declaredType, "initializer", globals)
-                } else if (expressions.isNotEmpty()) requireDefaultValues(values, expressions, "initializer", globals)
+                } else if (expressions.isNotEmpty()) requireDefaultValues(
+                    values, expressions, "initializer", globals,
+                    declaration.names.indices.filterTo(mutableSetOf()) { declaration.names[it] == "_" }
+                )
                 names.forEachIndexed { i, name ->
                     if (name != "_") globals.define(name, declaredType ?: defaultType(values.getOrNull(i) ?: intType))
                 }
@@ -927,7 +930,10 @@ class TypeChecker(
                         if (declaration.values.isNotEmpty() && values.size != declaration.names.size)
                             error("initializer count mismatch")
                         if (declaredType != null) requireAssignableValues(values, declaration.values, declaredType, "initializer", scope)
-                        else requireDefaultValues(values, declaration.values, "initializer", scope)
+                        else requireDefaultValues(
+                            values, declaration.values, "initializer", scope,
+                            declaration.names.indices.filterTo(mutableSetOf()) { declaration.names[it] == "_" }
+                        )
                         declaration.names.forEachIndexed { i, name ->
                             if (name != "_") {
                                 if (scope.containsLocal(name)) error("$name redeclared in this block")
@@ -991,7 +997,10 @@ class TypeChecker(
                 if (statement.values.isNotEmpty() && values.size != statement.names.size)
                     error("initializer count mismatch")
                 if (declaredType != null) requireAssignableValues(values, statement.values, declaredType, "initializer", scope)
-                else requireDefaultValues(values, statement.values, "initializer", scope)
+                else requireDefaultValues(
+                    values, statement.values, "initializer", scope,
+                    statement.names.indices.filterTo(mutableSetOf()) { statement.names[it] == "_" }
+                )
                 statement.names.forEachIndexed { i, name ->
                     if (name != "_") {
                         if (scope.containsLocal(name)) error("$name redeclared in this block")
@@ -1101,7 +1110,6 @@ class TypeChecker(
             var added = 0
             names.forEachIndexed { i, name ->
                 if (name == "_") {
-                    if (valueTypes[i] == nilType) error("use of untyped nil in short variable declaration")
                     statement.values.getOrNull(i)?.let { requireDefaultUntypedShift(it, scope) }
                     return@forEachIndexed
                 }
@@ -1134,7 +1142,7 @@ class TypeChecker(
                 val value = statement.values.getOrNull(i)
                 if (left != null) requireAssignable(right, left, "assignment", value, scope)
                 else if (value != null && statement.values.size == rightTypes.size)
-                    requireDefaultValues(listOf(right), listOf(value), "assignment", scope)
+                    requireDefaultValues(listOf(right), listOf(value), "assignment", scope, setOf(0))
             }
         } else {
             if (leftTypes.size != 1 || rightTypes.size != 1) error("compound assignment requires one operand")
@@ -2832,9 +2840,19 @@ class TypeChecker(
         } else values.forEach { requireAssignable(it, to, context) }
     }
 
-    private fun requireDefaultValues(values: List<GoTypeSyntax>, expressions: List<Expression>, context: String, scope: Scope = globals) {
+    private fun requireDefaultValues(
+        values: List<GoTypeSyntax>,
+        expressions: List<Expression>,
+        context: String,
+        scope: Scope = globals,
+        discardedValues: Set<Int> = emptySet()
+    ) {
         if (values.size != expressions.size) return
-        values.zip(expressions).forEach { (from, expression) ->
+        values.zip(expressions).forEachIndexed { index, (from, expression) ->
+            if (index in discardedValues) {
+                requireDefaultUntypedShift(expression, scope)
+                return@forEachIndexed
+            }
             if (from == nilType) error("use of untyped nil in $context")
             if (isUntyped(from)) requireIntegerConstantRepresentable(expression, defaultType(from), scope)
             requireDefaultUntypedShift(expression, scope)
