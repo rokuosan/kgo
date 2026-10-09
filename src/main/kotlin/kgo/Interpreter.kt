@@ -3512,7 +3512,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             type.methods.map { method ->
                 method.copy(
                     parameters = method.parameters.map { it.copy(type = resolveRuntimeType(it.type, env)) },
-                    results = method.results.map { resolveRuntimeType(it, env) }
+                    results = method.results.map { resolveRuntimeType(it, env) },
+                    packagePath = method.packagePath ?: packageIdentity.takeIf {
+                        GoUnicode6.isUnexportedIdentifier(method.name)
+                    }
                 )
             },
             type.embeddedTypes.map { resolveRuntimeType(it, env) }

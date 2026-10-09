@@ -2259,7 +2259,10 @@ class TypeChecker(
             type.methods.map { method ->
                 method.copy(
                     parameters = method.parameters.map { it.copy(type = resolveLocalType(it.type, scope)) },
-                    results = method.results.map { resolveLocalType(it, scope) }
+                    results = method.results.map { resolveLocalType(it, scope) },
+                    packagePath = method.packagePath ?: packageIdentity.takeIf {
+                        GoUnicode6.isUnexportedIdentifier(method.name)
+                    }
                 )
             },
             type.embeddedTypes.map { resolveLocalType(it, scope) }
