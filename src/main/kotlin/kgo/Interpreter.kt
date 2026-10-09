@@ -4771,7 +4771,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 val header = ByteBuffer.wrap(bytes, start, 16).order(ByteOrder.nativeOrder())
                 val typeAddress = header.long
                 val dataAddress = header.long
-                val value = if (typeAddress == 0L && dataAddress == 0L) GoNilValue(type) else {
+                val value = if (typeAddress == 0L && dataAddress == 0L) null else {
                     if (typeAddress == 0L || dataAddress == 0L)
                         throw RuntimeGoError("invalid unsafe interface header")
                     val dynamicType = unsafeOpaqueValue(typeAddress) as? GoTypeSyntax
