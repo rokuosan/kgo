@@ -487,16 +487,20 @@ class Interpreter(
                 copyForType(normalized, type)
             } ?: value }
         } catch (panic: PanicSignal) {
+            if (panic.previousPanic == null && panicState.activePanic !== panic)
+                panic.previousPanic = panicState.activePanic
             panicState.activePanic = panic
             defersRun = true
-            env.runDefers(allowRecover = true)
+            env.runDefers(allowRecover = true, blockDeferredRecoverFor = panic)
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } catch (failure: RuntimeGoError) {
             val message = failure.message ?: "runtime panic"
-            val panic = PanicSignal(GoRuntimeErrorValue(message), message)
+            val panic = PanicSignal(GoRuntimeErrorValue(message), message).also {
+                it.previousPanic = panicState.activePanic
+            }
             panicState.activePanic = panic
             defersRun = true
-            env.runDefers(allowRecover = true)
+            env.runDefers(allowRecover = true, blockDeferredRecoverFor = panic)
             if (panic.recovered) recoveredResultValues(function, resultNames, env) else throw panic
         } finally {
             try {
@@ -3086,10 +3090,13 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                     throw PanicSignal(value, stringify(value))
                 }
                 "recover" -> {
-                    if (!panicState.recoverAllowed || (deferredCall && panicState.deferredFunctionDepth == 0)) return null
+                    if (!panicState.recoverAllowed || (deferredCall && (
+                            panicState.deferredFunctionDepth == 0 ||
+                                panicState.activePanic === panicState.blockedDeferredRecoverPanic
+                            ))) return null
                     val activePanic = panicState.activePanic ?: return null
                     activePanic.recovered = true
-                    panicState.activePanic = null
+                    panicState.activePanic = activePanic.previousPanic
                     return when (val value = activePanic.value) {
                         null, is GoInterfaceValue -> value
                         else -> runtimeType(value)?.let { GoInterfaceValue(canonicalAliasType(it), value, this) } ?: value
@@ -6120,29 +6127,42 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         }
         @Synchronized private fun owner(name: String): Environment? = if (values.containsKey(name)) this else parent?.owner(name)
         fun defer(action: suspend () -> Unit) { deferredCalls += action }
-        suspend fun runDefers(allowRecover: Boolean = false) {
+        suspend fun runDefers(
+            allowRecover: Boolean = false,
+            blockDeferredRecoverFor: PanicSignal? = null
+        ) {
             val actions = deferredCalls.asReversed().toList()
             deferredCalls.clear()
+            val previousBlockedPanic = panicState.blockedDeferredRecoverPanic
+            if (blockDeferredRecoverFor != null) panicState.blockedDeferredRecoverPanic = blockDeferredRecoverFor
             var panicFromDefer: PanicSignal? = null
-            for (action in actions) {
-                val previousPermission = panicState.recoverAllowed
-                panicState.recoverAllowed = panicState.activePanic != null &&
-                    (allowRecover || panicFromDefer != null)
-                try {
-                    action()
-                } catch (panic: PanicSignal) {
-                    panicFromDefer = panic
-                    panicState.activePanic = panic
-                } catch (failure: RuntimeGoError) {
-                    val message = failure.message ?: "runtime panic"
-                    val panic = PanicSignal(GoRuntimeErrorValue(message), message)
-                    panicFromDefer = panic
-                    panicState.activePanic = panic
-                } finally {
-                    panicState.recoverAllowed = previousPermission
+            try {
+                for (action in actions) {
+                    val previousPermission = panicState.recoverAllowed
+                    panicState.recoverAllowed = panicState.activePanic != null &&
+                        (allowRecover || panicFromDefer != null)
+                    try {
+                        action()
+                    } catch (panic: PanicSignal) {
+                        if (panic.previousPanic == null && panicState.activePanic !== panic)
+                            panic.previousPanic = panicState.activePanic
+                        panicFromDefer = panic
+                        panicState.activePanic = panic
+                    } catch (failure: RuntimeGoError) {
+                        val message = failure.message ?: "runtime panic"
+                        val panic = PanicSignal(GoRuntimeErrorValue(message), message).also {
+                            it.previousPanic = panicState.activePanic
+                        }
+                        panicFromDefer = panic
+                        panicState.activePanic = panic
+                    } finally {
+                        panicState.recoverAllowed = previousPermission
+                    }
                 }
+                panicFromDefer?.takeUnless { it.recovered }?.let { throw it }
+            } finally {
+                panicState.blockedDeferredRecoverPanic = previousBlockedPanic
             }
-            panicFromDefer?.takeUnless { it.recovered }?.let { throw it }
         }
         @Synchronized fun set(name: String, value: Any?) {
             if (values.containsKey(name)) {
@@ -6234,7 +6254,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private class PanicState(
         var activePanic: PanicSignal? = null,
         var recoverAllowed: Boolean = false,
-        var deferredFunctionDepth: Int = 0
+        var deferredFunctionDepth: Int = 0,
+        var blockedDeferredRecoverPanic: PanicSignal? = null
     )
     private data class GoRuntimeErrorValue(val message: String)
     private data class RuntimeErrorMethodValue(
@@ -6244,6 +6265,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     )
     private class PanicSignal(val value: Any?, message: String) : RuntimeGoError(message) {
         var recovered: Boolean = false
+        var previousPanic: PanicSignal? = null
     }
     private data class SelectSelection(
         val caseIndex: Int,
