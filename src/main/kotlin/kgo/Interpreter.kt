@@ -2884,15 +2884,18 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     }
 
     private fun runtimeTypeOperand(expression: Expression, env: Environment): GoTypeSyntax? = when (expression) {
-        is NameExpression -> if (!env.contains(expression.name)) {
-            env.typeBinding(expression.name) ?: when {
+        is NameExpression -> env.binding(expression.name).let { binding -> when {
+            binding == null -> env.typeBinding(expression.name) ?: when {
                 typeDefinitions.containsKey(expression.name) -> NamedGoType(expression.name)
-                else -> env.imports.dotPackages.firstOrNull { path ->
-                    expression.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
-                        path == "runtime" && expression.name in GoRuntimePackage.exportedTypes
-                }?.let { path -> QualifiedGoType(path, expression.name) }
+                else -> env.imports.dotPackages.firstNotNullOfOrNull { path ->
+                    if (expression.name in importedRuntimePackages[path]?.exportedTypeNames.orEmpty() ||
+                        path == "runtime" && expression.name in GoRuntimePackage.exportedTypes)
+                        QualifiedGoType(path, expression.name) else null
+                }
             }
-        } else null
+            binding.value is TypeValue -> binding.value.type
+            else -> null
+        } }
         is SelectorExpression -> {
             val alias = (expression.receiver as? NameExpression)?.name
             val path = alias?.takeUnless { env.contains(it) || env.typeBinding(it) != null }
