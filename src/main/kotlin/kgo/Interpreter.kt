@@ -139,6 +139,8 @@ class Interpreter(
     private val unsafePointerByAddress = mutableMapOf<Long, MutableList<UnsafePointerLocation>>()
     private val unsafeAddressIdentityByAddress = mutableMapOf<Long, Any>()
     private val unsafeRawBytesByObject = IdentityHashMap<Any, ByteArray>()
+    private val unsafeOpaqueAddressByIdentity = IdentityHashMap<Any, Long>()
+    private val unsafeOpaqueValueByAddress = mutableMapOf<Long, Any>()
     private var nextUnsafeAddress = 0x10000L
     private val typeDefinitions = ConcurrentHashMap<String, GoTypeSyntax>()
     private val localTypeIdentities = IdentityHashMap<TypeDeclaration, String>()
@@ -4527,7 +4529,21 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         is ArrayGoType -> isUnsafeAggregateType(actual.element)
         is StructGoType -> actual.fields.all { isUnsafeAggregateType(it.type) }
         is PointerGoType -> true
+        is MapGoType, is ChannelGoType -> true
         else -> unsafeScalarRepresentation(type) != null
+    }
+
+    private fun unsafeOpaqueAddress(identity: Any, value: Any): Long = synchronized(unsafeAddressByLocation) {
+        unsafeOpaqueAddressByIdentity[identity]?.let { return@synchronized it }
+        val address = alignUnsafeAddress(nextUnsafeAddress, 8L)
+        nextUnsafeAddress = Math.addExact(address, 8L)
+        unsafeOpaqueAddressByIdentity[identity] = address
+        unsafeOpaqueValueByAddress[address] = value
+        address
+    }
+
+    private fun unsafeOpaqueValue(address: Long): Any? = synchronized(unsafeAddressByLocation) {
+        unsafeOpaqueValueByAddress[address]
     }
 
     private fun unsafeFieldOffsets(type: StructGoType): List<Pair<RuntimeStructField, Int>> {
@@ -4582,6 +4598,22 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
                 ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(address).array()
             }
+            is MapGoType -> {
+                val address = when (value) {
+                    is GoMap -> unsafeOpaqueAddress(value.values, value)
+                    is GoNilValue, null -> 0L
+                    else -> throw RuntimeGoError("invalid unsafe map value")
+                }
+                ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(address).array()
+            }
+            is ChannelGoType -> {
+                val address = when (value) {
+                    is GoChannel -> unsafeOpaqueAddress(value.unsafeIdentity, value)
+                    is GoNilValue, null -> 0L
+                    else -> throw RuntimeGoError("invalid unsafe channel value")
+                }
+                ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(address).array()
+            }
             is ArrayGoType -> {
                 val array = value as? GoArray ?: throw RuntimeGoError("invalid unsafe array value")
                 val pieces = array.valueSnapshot().map { encodeUnsafeMemory(it, actual.element) }
@@ -4620,6 +4652,26 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             is PointerGoType -> {
                 val address = ByteBuffer.wrap(bytes, start, 8).order(ByteOrder.nativeOrder()).long
                 pointer.set(unsafePointer(address, actual.element, type))
+                start + 8
+            }
+            is MapGoType -> {
+                val address = ByteBuffer.wrap(bytes, start, 8).order(ByteOrder.nativeOrder()).long
+                val map = if (address == 0L) GoNilValue(type) else {
+                    val original = unsafeOpaqueValue(address) as? GoMap
+                        ?: throw RuntimeGoError("invalid unsafe map address")
+                    original.retype(actual.key, actual.value, namedTypeName(type), type, namedTypePackage(type))
+                }
+                pointer.set(map)
+                start + 8
+            }
+            is ChannelGoType -> {
+                val address = ByteBuffer.wrap(bytes, start, 8).order(ByteOrder.nativeOrder()).long
+                val channel = if (address == 0L) GoNilValue(type) else {
+                    val original = unsafeOpaqueValue(address) as? GoChannel
+                        ?: throw RuntimeGoError("invalid unsafe channel address")
+                    original.retype(actual.element, actual.direction, namedTypeName(type), type, namedTypePackage(type))
+                }
+                pointer.set(channel)
                 start + 8
             }
             is ArrayGoType -> {
@@ -6245,6 +6297,8 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         private val identity: Any = Any(),
         val packagePath: String? = packageIdentity
     ) {
+        val unsafeIdentity: Any get() = identity
+
         fun retype(element: GoTypeSyntax, direction: ChannelDirection, name: String?, type: GoTypeSyntax,
                    packagePath: String? = packageIdentity) =
             GoChannel(element, capacity, name, type, direction, state, identity, packagePath)

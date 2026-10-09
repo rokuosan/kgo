@@ -52,8 +52,8 @@ intrinsics and `Pointer` using a fixed 64-bit Go data layout on the JVM.
 Intrinsic arguments are type-checked but not evaluated, and their `uintptr`
 results can be used as constants. Pointer and `uintptr` conversions use
 interpreter-managed addresses; scalar reinterpretation works within scalar
-values and structs and arrays composed of scalar or pointer values, including
-struct padding.
+values and structs and arrays composed of scalar, pointer, map, or channel
+values, including struct padding.
 The `runtime` import exposes the Go 1.0 `Error` interface with its
 `String() string` method for run-time panic values.
 Before execution, a static checker validates function signatures, declared
