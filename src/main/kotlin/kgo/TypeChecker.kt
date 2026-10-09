@@ -4043,25 +4043,59 @@ class TypeChecker(
         fun containsLocalType(name: String) = name in typeNames
         fun containsLocal(name: String) = name in values || name in typeNames
         fun get(name: String): GoTypeSyntax = getOrNull(name) ?: throw GoTypeError("undefined: $name")
-        fun getOrNull(name: String): GoTypeSyntax? = values[name] ?: parent?.getOrNull(name)
+        fun getOrNull(name: String): GoTypeSyntax? = when {
+            name in values -> values[name]
+            name in typeNames -> null
+            else -> parent?.getOrNull(name)
+        }
         fun markUsed(name: String) {
             if (name in values) trackedLocals[name]?.used = true
-            else parent?.markUsed(name)
+            else if (name !in typeNames) parent?.markUsed(name)
         }
         fun newUsageGroup(name: String): LocalUsage? = localUsage?.let { usage ->
             LocalUsage(name).also(usage::add)
         }
         fun unusedLocalVariable(): String? = localUsage?.firstOrNull { !it.used }?.name
-        fun isVariable(name: String): Boolean = if (name in values)
-            name !in constantNames && name !in functionNames else parent?.isVariable(name) == true
-        fun constantInteger(name: String): BigInteger? = if (name in values) integerConstants[name] else parent?.constantInteger(name)
-        fun constantRational(name: String): GoRational? = if (name in values) rationalConstants[name]
-            ?: integerConstants[name]?.let { GoRational.of(it) } else parent?.constantRational(name)
-        fun constantStringLength(name: String): BigInteger? = if (name in values) stringLengths[name] else parent?.constantStringLength(name)
-        fun constantStringIdentity(name: String): String? = if (name in values) stringIdentities[name] else parent?.constantStringIdentity(name)
-        fun constantBoolean(name: String): Boolean? = if (name in values) booleanConstants[name] else parent?.constantBoolean(name)
-        fun constantComplex(name: String): ConstantComplexValue? = if (name in values) complexConstants[name] else parent?.constantComplex(name)
-        fun isConstant(name: String): Boolean = if (name in values) name in constantNames else parent?.isConstant(name) == true
+        fun isVariable(name: String): Boolean = when {
+            name in values -> name !in constantNames && name !in functionNames
+            name in typeNames -> false
+            else -> parent?.isVariable(name) == true
+        }
+        fun constantInteger(name: String): BigInteger? = when {
+            name in values -> integerConstants[name]
+            name in typeNames -> null
+            else -> parent?.constantInteger(name)
+        }
+        fun constantRational(name: String): GoRational? = when {
+            name in values -> rationalConstants[name] ?: integerConstants[name]?.let { GoRational.of(it) }
+            name in typeNames -> null
+            else -> parent?.constantRational(name)
+        }
+        fun constantStringLength(name: String): BigInteger? = when {
+            name in values -> stringLengths[name]
+            name in typeNames -> null
+            else -> parent?.constantStringLength(name)
+        }
+        fun constantStringIdentity(name: String): String? = when {
+            name in values -> stringIdentities[name]
+            name in typeNames -> null
+            else -> parent?.constantStringIdentity(name)
+        }
+        fun constantBoolean(name: String): Boolean? = when {
+            name in values -> booleanConstants[name]
+            name in typeNames -> null
+            else -> parent?.constantBoolean(name)
+        }
+        fun constantComplex(name: String): ConstantComplexValue? = when {
+            name in values -> complexConstants[name]
+            name in typeNames -> null
+            else -> parent?.constantComplex(name)
+        }
+        fun isConstant(name: String): Boolean = when {
+            name in values -> name in constantNames
+            name in typeNames -> false
+            else -> parent?.isConstant(name) == true
+        }
     }
 
     companion object {
