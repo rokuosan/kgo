@@ -1005,11 +1005,13 @@ class Interpreter(
     ): SelectSelection {
         if (operations.isEmpty() && defaultIndex < 0) awaitCancellation()
         return suspendCancellableCoroutine { continuation ->
-            val decision = ChannelDecision { continuation.resumeWith(Result.success(it)) }
-            continuation.invokeOnCancellation { decision.cancel() }
-            val completions = mutableListOf<() -> Unit>()
-            synchronized(goChannelCoordinator) {
-                if (!continuation.isActive) return@synchronized
+            var currentDecision: ChannelDecision? = null
+            lateinit var register: (MutableList<() -> Unit>) -> Unit
+            register = { completions ->
+                val decision = ChannelDecision(recheck = register) {
+                    continuation.resumeWith(Result.success(it))
+                }
+                currentDecision = decision
                 operations.shuffled().forEach { operation ->
                     if (decision.selected) return@forEach
                     val element = (operation as? SelectSend)?.let {
@@ -1023,6 +1025,14 @@ class Interpreter(
                 }
                 if (!decision.selected && defaultIndex >= 0)
                     decision.claim(defaultIndex, null, null, completions)
+            }
+            continuation.invokeOnCancellation {
+                synchronized(goChannelCoordinator) { currentDecision?.cancel() }
+            }
+            val completions = mutableListOf<() -> Unit>()
+            synchronized(goChannelCoordinator) {
+                if (!continuation.isActive) return@synchronized
+                register(completions)
             }
             completions.forEach { it() }
         }
@@ -6393,7 +6403,10 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
     private sealed interface SelectOperation { val caseIndex: Int; val channel: GoChannel }
     private data class SelectSend(override val caseIndex: Int, override val channel: GoChannel, val value: Any?) : SelectOperation
     private data class SelectReceive(override val caseIndex: Int, override val channel: GoChannel, val assignment: AssignmentStatement?) : SelectOperation
-    private inner class ChannelDecision(private val complete: (SelectSelection) -> Unit) {
+    private inner class ChannelDecision(
+        private val recheck: ((MutableList<() -> Unit>) -> Unit)? = null,
+        private val complete: (SelectSelection) -> Unit
+    ) {
         var selected = false
             private set
         val waiters = mutableListOf<ChannelWaiter>()
@@ -6410,6 +6423,16 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             waiters.clear()
             val selection = SelectSelection(caseIndex, received, failure)
             completions += { complete(selection) }
+            return true
+        }
+
+        fun recheck(completions: MutableList<() -> Unit>): Boolean {
+            val retry = recheck ?: return false
+            if (selected) return true
+            selected = true
+            waiters.toList().forEach { it.channel.removeWaiter(it) }
+            waiters.clear()
+            retry(completions)
             return true
         }
 
@@ -6762,6 +6785,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
                 }
                 (state.senders + state.receivers).shuffled().forEach { waiter ->
                     if (waiter.decision.selected) return@forEach
+                    if (waiter.decision.recheck(completions)) return@forEach
                     if (waiter.sendElement != null)
                         waiter.decision.claim(waiter.caseIndex, null, RuntimeGoError("send on closed channel"), completions)
                     else waiter.decision.claim(waiter.caseIndex, GoReceiveResult(zeroValue(elementType), false), null, completions)
