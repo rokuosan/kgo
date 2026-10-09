@@ -5100,8 +5100,7 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
             }
             is MapGoType -> {
                 if (args.size !in 1..2) throw RuntimeGoError("make map accepts one or two arguments")
-                val size = args.getOrNull(1)?.let { makeSize(it, "map size hint") } ?: 0
-                if (size < 0) throw RuntimeGoError("negative map size hint")
+                args.getOrNull(1)?.let(::validateMapSizeHint)
                 val requestedType = (args.first() as TypeValue).type
                 GoMap(type.key, type.value, zeroValue(type.value), linkedMapOf(),
                     namedTypeName(requestedType), requestedType, namedTypePackage(requestedType))
@@ -5115,6 +5114,14 @@ private suspend fun evaluate(expression: Expression, env: Environment, expectedT
         if (integer < BigInteger.valueOf(Int.MIN_VALUE.toLong()) || integer > BigInteger.valueOf(Int.MAX_VALUE.toLong()))
             throw RuntimeGoError("$operation out of range")
         return integer.toInt()
+    }
+
+    private fun validateMapSizeHint(value: Any?) {
+        val size = exactIntegerValue(value, "map size hint")
+        if (size.signum() < 0) throw RuntimeGoError("negative map size hint")
+        // This interpreter's Go int is 64-bit; map storage grows lazily and
+        // does not need a JVM Int-sized allocation for its size hint.
+        if (size > BigInteger.valueOf(Long.MAX_VALUE)) throw RuntimeGoError("map size hint out of range")
     }
 
     private fun zeroedSliceBacking(capacity: Int, elementType: GoTypeSyntax): MutableList<Any?> = try {
