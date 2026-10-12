@@ -17,7 +17,13 @@ internal data class GoSourceGraph(val rootFiles: List<GoFile>, val packages: Lis
 internal class GoSourcePackageLoader(entryDirectory: File) {
     private val entryDirectory = entryDirectory.canonicalFile
     private val module = findModule(this.entryDirectory)
-    private val states = mutableMapOf<String, Int>()
+    private val states = mutableMapOf<String, VisitState>()
+
+    private enum class VisitState { LOADING, LOADED }
+
+    private companion object {
+        val builtInPackages = setOf("fmt", "math", "runtime", "unsafe")
+    }
 
     fun load(files: List<GoFile>): GoSourceGraph {
         val order = mutableListOf<GoSourcePackage>()
@@ -26,15 +32,16 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
     }
 
     private fun visit(path: String, importerDirectory: File, order: MutableList<GoSourcePackage>): String {
-        if (path == "fmt" || path == "math" || path == "runtime" || path == "unsafe") return path
+        if (path in builtInPackages) return path
         val directory = resolve(path, importerDirectory)
             ?: throw GoTypeError("cannot locate imported package $path")
         val identity = if (isRelativeImportPath(path)) directory.path else path
         when (states[identity]) {
-            2 -> return identity
-            1 -> throw GoTypeError("import cycle involving $path")
+            VisitState.LOADED -> return identity
+            VisitState.LOADING -> throw GoTypeError("import cycle involving $path")
+            null -> Unit
         }
-        states[identity] = 1
+        states[identity] = VisitState.LOADING
         val files = parseGoFiles(directory)
         if (files.isEmpty()) throw GoTypeError("no Go source files in imported package $path")
         val packageName = files.first().packageName
@@ -43,7 +50,7 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
             throw GoTypeError("source files in imported package $path declare different package names")
         val resolvedFiles = resolveImports(files, directory, order)
         val loaded = GoSourcePackage(identity, directory, packageName, resolvedFiles)
-        states[identity] = 2
+        states[identity] = VisitState.LOADED
         order += loaded
         return identity
     }
@@ -56,7 +63,7 @@ internal class GoSourcePackageLoader(entryDirectory: File) {
         file.copy(declarations = file.declarations.map { declaration ->
             if (declaration !is ImportDeclaration) declaration else declaration.copy(imports = declaration.imports.map { spec ->
                 val path = spec.decodedPath()
-                if (path == "fmt" || path == "math" || path == "runtime" || path == "unsafe") spec.copy(resolvedPath = path)
+                if (path in builtInPackages) spec.copy(resolvedPath = path)
                 else spec.copy(resolvedPath = visit(path, importerDirectory, order))
             })
         })
